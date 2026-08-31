@@ -33,7 +33,7 @@ export interface Config {
   extractionModel?: string
   /** Retries after the first extraction attempt before a turn is skipped. */
   extractionMaxRetries?: number
-  /** Output token cap for extraction calls. */
+  /** Output token cap for extraction calls (reasoning models need a large budget). */
   extractionMaxTokens?: number
   /** Journal ops between snapshot compactions. */
   snapshotThreshold?: number
@@ -84,6 +84,10 @@ export function buildTurnText(session: Session, turn: number): string {
   for (const event of events) {
     if (startSeq >= 0 && event.seq < startSeq) continue
     if (event.type === 'user/message') {
+      // Only genuine user input: workspace-instruction/runtime-context
+      // snapshots also arrive as user/message events inside the turn and
+      // would swamp the extraction prompt.
+      if (event.data.source.kind !== 'user') continue
       const text = event.data.content.map(blockText).filter(Boolean).join('\n')
       if (text.length > 0) lines.push(`User: ${text}`)
     } else if (event.type === 'assistant/message' && event.data.turn === turn) {
@@ -166,7 +170,7 @@ export function apply(ctx: Context, config: Config) {
         ? undefined
         : createQueryExpander({
           cachePath: join(dataDir, 'query-expansion-cache.json'),
-          callLlm: prompt => callPluginLlm(ctx, config, lastRoute, prompt, 256),
+          callLlm: prompt => callPluginLlm(ctx, config, lastRoute, prompt, 4096),
         }),
     })
 
@@ -174,7 +178,7 @@ export function apply(ctx: Context, config: Config) {
     if (config.extraction === 'turn_end') {
       const pipeline = new ExtractionPipeline({
         store,
-        callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, config.extractionMaxTokens ?? 2048),
+        callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, config.extractionMaxTokens ?? 16384),
       })
       queue = new ExtractionQueue(job => pipeline.extractTurn(job), {
         maxRetries: config.extractionMaxRetries,
