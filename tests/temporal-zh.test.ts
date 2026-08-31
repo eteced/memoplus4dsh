@@ -30,6 +30,10 @@ describe('resolveTimeExpr — Chinese constructs', () => {
     expect(iso(resolveTimeExpr('上周五', BASE).time)).toBe('2026-08-28T12:00:00.000Z')
     expect(iso(resolveTimeExpr('下周三', BASE).time)).toBe('2026-09-09T12:00:00.000Z')
     expect(iso(resolveTimeExpr('星期三', BASE).time)).toBe('2026-08-26T12:00:00.000Z')
+    // Time-of-day suffix resolves the date part, keeps day precision.
+    const withTime = resolveTimeExpr('下周三下午3点', BASE)
+    expect(iso(withTime.time)).toBe('2026-09-09T12:00:00.000Z')
+    expect(withTime.precision).toBe('day')
   })
 
   it('resolves "N 天/周/个月前"', () => {
