@@ -1,0 +1,14 @@
+node_modules/
+lib/
+coverage/
+# 插件数据与模型缓存（运行时产生，绝不开源）
+data/
+*.onnx
+# 测试 harness 的本地实例（含 token/credentials）
+test-harness/dsh-home/
+test-harness/*.token
+# 凭证与环境
+.env
+.env.*
+!.env.example
+*.log
