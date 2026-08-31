@@ -1,7 +1,9 @@
 # memoplus4dsh 设计文档
 
-> 版本：v0.1（初稿） 日期：2026-09-01
-> 状态：待 review 后实施
+> 版本：v0.1（已实施） 日期：2026-09-01
+> 状态：M1–M5 全部完成（骨架 / 存储+抽取 / 检索注入 / 真人场景测试 / 发布收尾）。
+> 实施记录：docs/m2-notes.md、docs/m3-notes.md、docs/m4-scenario-test.md、docs/m5-release-check.md；
+> 已知限制：docs/known-issues.md。
 
 ## 1. 定位与目标
 

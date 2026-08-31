@@ -34,7 +34,7 @@ scripts/test-harness/start-test.sh    # install plugin + boot dsh web
 
    ```
    ==> dsh web up (pid 326593)
-       URL:   http://127.0.0.1:39857/?token=nsZTT7m7p0bdV3f0YgEiWsiCVEb56rLM_z7QzRz0nE0
+       URL:   http://127.0.0.1:39857/?token=<redacted>
    ```
 
 3. **Runtime fiber check** — the host's `pluginInventory` Remote is queried
