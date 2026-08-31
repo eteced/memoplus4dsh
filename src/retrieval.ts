@@ -51,7 +51,7 @@ export function stem(word: string): string {
  */
 function wordsOf(text: string): string[] {
   const lower = text.toLowerCase()
-  const words = lower.match(/[a-z]+/g) ?? []
+  const words: string[] = lower.match(/[a-z]+/g) ?? []
   for (const run of lower.match(/[一-鿿]+/g) ?? []) {
     if (run.length === 1) {
       words.push(run)

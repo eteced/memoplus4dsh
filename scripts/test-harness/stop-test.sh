@@ -3,7 +3,8 @@
 # Re-entrant: exits 0 when nothing is running.
 set -euo pipefail
 
-TEST_DIR="/home/claw/kimi_code_workspace/test"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEST_DIR="${MEMOPLUS4DSH_TEST_DIR:-$(cd "$SCRIPT_DIR/../../.." && pwd)/test}"
 PID_FILE="$TEST_DIR/run/web.pid"
 
 if [[ ! -f "$PID_FILE" ]]; then

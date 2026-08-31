@@ -29,8 +29,8 @@ PROFILE_DIR="$DSH_HOME_RESOLVED/profiles/$PROFILE"
 PATCH_FILE="$PROFILE_DIR/cordis.patch.yml"
 MARKER="memoplus4dsh"
 
-NODE_BIN="/home/claw/anaconda3/envs/py3_torch/bin"
-[[ -x "$NODE_BIN/npm" ]] && export PATH="$NODE_BIN:$PATH"
+# Node/npm must be on PATH; set NODE_BIN to prepend a specific bin directory.
+if [[ -n "${NODE_BIN:-}" && -x "$NODE_BIN/npm" ]]; then export PATH="$NODE_BIN:$PATH"; fi
 
 if [[ ! -d "$PROFILE_DIR" ]]; then
   echo "==> profile '$PROFILE' does not exist at $PROFILE_DIR; nothing to do"

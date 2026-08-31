@@ -36,11 +36,9 @@ PROFILE_DIR="$DSH_HOME_RESOLVED/profiles/$PROFILE"
 PATCH_FILE="$PROFILE_DIR/cordis.patch.yml"
 MARKER="memoplus4dsh"
 
-# Node/npm live in the conda env on this machine; prepend if present so the
-# build and npm install below work from any caller.
-NODE_BIN="/home/claw/anaconda3/envs/py3_torch/bin"
-[[ -x "$NODE_BIN/npm" ]] && export PATH="$NODE_BIN:$PATH"
-command -v npm >/dev/null || { echo "install.sh: npm not found on PATH" >&2; exit 1; }
+# Node/npm must be on PATH; set NODE_BIN to prepend a specific bin directory.
+if [[ -n "${NODE_BIN:-}" && -x "$NODE_BIN/npm" ]]; then export PATH="$NODE_BIN:$PATH"; fi
+command -v npm >/dev/null || { echo "install.sh: npm not found on PATH (or set NODE_BIN)" >&2; exit 1; }
 
 echo "==> building plugin in $PLUGIN_DIR"
 (cd "$PLUGIN_DIR" && npm run build)

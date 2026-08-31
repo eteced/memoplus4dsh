@@ -9,10 +9,13 @@
 
 import { readFileSync, existsSync, appendFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { DeepSeekHarness } from '@deepseek-ai/dsh-sdk-client'
 
-export const HARNESS_ROOT = '/home/claw/kimi_code_workspace'
-export const TEST_DIR = join(HARNESS_ROOT, 'test')
+// Repo root is two levels up from scripts/test-harness/; the test directory
+// defaults to <workspace>/test (sibling of the repo), overridable via env.
+const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
+export const TEST_DIR = process.env.MEMOPLUS4DSH_TEST_DIR ?? join(REPO_ROOT, '..', 'test')
 export const DSH_HOME = join(TEST_DIR, 'dsh-home')
 export const DSH_BIN = join(TEST_DIR, 'dsh-install', 'node_modules', '.bin', 'dsh')
 export const GRAPH_FILE = join(DSH_HOME, 'memoplus4dsh', 'memory-graph.jsonl')

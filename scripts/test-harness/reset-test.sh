@@ -3,13 +3,13 @@
 # (test/dsh-home), so the next start-test.sh begins from a pristine profile.
 # The dsh npm installation (test/dsh-install) is kept as a cache; delete it by
 # hand if you want to re-resolve the dsh package itself. All removals stay
-# inside /home/claw/kimi_code_workspace/test/.
+# inside the test directory.
 set -euo pipefail
 
-TEST_DIR="/home/claw/kimi_code_workspace/test"
-HARNESS_ROOT="/home/claw/kimi_code_workspace"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEST_DIR="${MEMOPLUS4DSH_TEST_DIR:-$(cd "$SCRIPT_DIR/../../.." && pwd)/test}"
 
-"$HARNESS_ROOT/memoplus4dsh/scripts/test-harness/stop-test.sh"
+"$SCRIPT_DIR/stop-test.sh"
 
 echo "==> removing $TEST_DIR/dsh-home"
 rm -rf "$TEST_DIR/dsh-home"

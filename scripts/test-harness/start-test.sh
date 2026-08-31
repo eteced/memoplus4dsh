@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # start-test.sh — boot an isolated dsh web instance with memoplus4dsh loaded.
 #
-# Layout under /home/claw/kimi_code_workspace/test/:
+# Layout (defaults; override with MEMOPLUS4DSH_TEST_DIR):
 #   dsh-install/   npm project holding @deepseek-ai/dsh (kept across resets)
 #   dsh-home/      isolated DSH_HOME (wiped by reset-test.sh)
 #   logs/web.log   web server log
@@ -14,11 +14,10 @@
 # Re-entrant: if the server is already running this prints its URL and exits 0.
 set -euo pipefail
 
-HARNESS_ROOT="/home/claw/kimi_code_workspace"
-TEST_DIR="$HARNESS_ROOT/test"
-PLUGIN_DIR="$HARNESS_ROOT/memoplus4dsh"
-NODE_BIN="/home/claw/anaconda3/envs/py3_torch/bin"
-export PATH="$NODE_BIN:$PATH"
+PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+TEST_DIR="${MEMOPLUS4DSH_TEST_DIR:-$(cd "$PLUGIN_DIR/.." && pwd)/test}"
+# Node/npm must be on PATH; set NODE_BIN to prepend a specific bin directory.
+if [[ -n "${NODE_BIN:-}" && -x "$NODE_BIN/npm" ]]; then export PATH="$NODE_BIN:$PATH"; fi
 
 export DSH_HOME="$TEST_DIR/dsh-home"
 DSH_BIN="$TEST_DIR/dsh-install/node_modules/.bin/dsh"

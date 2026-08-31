@@ -25,7 +25,7 @@ scripts/test-harness/start-test.sh    # install plugin + boot dsh web
      name: '@deepseek-ai/dsh-sandbox-policy'
      config:
        mode: workspace-write
-       workspaceRoot: /home/claw/kimi_code_workspace/test
+       workspaceRoot: <workspace>/test
    ```
 
 2. **Readiness** — the server prints `dsh web: http://127.0.0.1:<port>/?token=...`
