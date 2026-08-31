@@ -1,0 +1,142 @@
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { UserMessage } from '@deepseek-ai/dsh-session'
+import {
+  createPreStepHandler,
+  currentQueryText,
+  formatMemoryMessage,
+  isMemoryInjection,
+  PLUGIN_NAME,
+} from '../src/inject.js'
+import { MemoryStore } from '../src/store.js'
+import type { MemoryEvent } from '../src/store.js'
+
+let dir: string
+
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), 'memoplus4dsh-inject-'))
+})
+
+afterEach(() => {
+  rmSync(dir, { recursive: true, force: true })
+})
+
+function userMessage(text: string, plugin = false): UserMessage {
+  return createUserMessage({
+    content: [{ type: 'text', text }],
+    source: plugin ? { kind: 'plugin', plugin: PLUGIN_NAME } : { kind: 'user' },
+  })
+}
+
+function seedStore(store: MemoryStore): MemoryEvent {
+  const alice = store.createOrResolve('Alice', 'PERSON').entity
+  return store.addEvent({
+    subjectEntityIds: [alice.id],
+    objectEntityIds: [],
+    predicate: 'likes',
+    normalizedText: 'Alice likes tea.',
+    details: 'especially green tea',
+    timeExpr: 'last year',
+    eventTime: null,
+    eventTimePrecision: 'unknown',
+    mentionTime: '2026-09-01T12:00:00.000Z',
+    sourceSession: 's1',
+    sourceTurn: 0,
+  })
+}
+
+describe('injection message format', () => {
+  it('renders a memory list with time and details', () => {
+    const store = new MemoryStore({ dir })
+    const event = seedStore(store)
+    const message = formatMemoryMessage([event], store, 2000)!
+    expect(message.source.kind).toBe('plugin')
+    expect(message.source.kind === 'plugin' && message.source.plugin).toBe(PLUGIN_NAME)
+    const block = message.content[0]!
+    expect(block.type).toBe('text')
+    const text = block.type === 'text' ? block.text : ''
+    expect(text).toContain('Alice likes tea.')
+    expect(text).toContain('[last year]')
+    expect(text).toContain('(especially green tea)')
+  })
+
+  it('returns undefined for no hits and respects the char cap', () => {
+    const store = new MemoryStore({ dir })
+    expect(formatMemoryMessage([], store, 2000)).toBeUndefined()
+    const event = seedStore(store)
+    expect(formatMemoryMessage([event], store, 10)).toBeUndefined()
+  })
+})
+
+describe('currentQueryText', () => {
+  it('takes the last genuine user message and skips plugin injections', () => {
+    const messages = [userMessage('first'), userMessage('memories…', true), userMessage('second')]
+    expect(currentQueryText(messages)).toBe('second')
+    expect(currentQueryText([userMessage('memories…', true)])).toBeUndefined()
+  })
+})
+
+describe('createPreStepHandler', () => {
+  it('injects memories after the claimed batch on step 1', async () => {
+    const store = new MemoryStore({ dir })
+    const event = seedStore(store)
+    const handler = createPreStepHandler({ store, retrieve: () => Promise.resolve([event]) })
+    const claimed = userMessage('what does Alice like?')
+    const decision = await handler(
+      { messages: [claimed], step: 1 },
+      () => Promise.resolve({ kind: 'enter', messages: [claimed] }),
+    )
+    expect(decision.kind).toBe('enter')
+    if (decision.kind !== 'enter') return
+    expect(decision.messages).toHaveLength(2)
+    expect(decision.messages[0]).toBe(claimed)
+    const injected = decision.messages[1]!
+    expect(isMemoryInjection(injected)).toBe(true)
+    const block = injected.content[0]!
+    expect(block.type === 'text' && block.text).toContain('Alice likes tea.')
+  })
+
+  it('passes through on later steps, rejects, no-hits, and retrieval failure', async () => {
+    const store = new MemoryStore({ dir })
+    const event = seedStore(store)
+    const claimed = userMessage('hi')
+    const enter = { kind: 'enter' as const, messages: [claimed] }
+
+    const handler = createPreStepHandler({ store, retrieve: () => Promise.resolve([event]) })
+    // step 2: no injection
+    const step2 = await handler({ messages: [claimed], step: 2 }, () => Promise.resolve(enter))
+    expect(step2).toEqual(enter)
+    // reject: untouched
+    const rejected = await handler({ messages: [claimed], step: 1 }, () => Promise.resolve({ kind: 'reject' as const }))
+    expect(rejected.kind).toBe('reject')
+
+    // no hits: untouched
+    const emptyHandler = createPreStepHandler({ store, retrieve: () => Promise.resolve([]) })
+    const noHits = await emptyHandler({ messages: [claimed], step: 1 }, () => Promise.resolve(enter))
+    expect(noHits).toEqual(enter)
+
+    // retrieval failure must not break the turn
+    const failingHandler = createPreStepHandler({
+      store,
+      retrieve: () => Promise.reject(new Error('boom')),
+    })
+    const failed = await failingHandler({ messages: [claimed], step: 1 }, () => Promise.resolve(enter))
+    expect(failed).toEqual(enter)
+  })
+
+  it('does not re-inject when an injection is already in the batch', async () => {
+    const store = new MemoryStore({ dir })
+    const event = seedStore(store)
+    const handler = createPreStepHandler({ store, retrieve: () => Promise.resolve([event]) })
+    const claimed = userMessage('hi')
+    const prior = userMessage('memories…', true)
+    const decision = await handler(
+      { messages: [claimed], step: 1 },
+      () => Promise.resolve({ kind: 'enter', messages: [claimed, prior] }),
+    )
+    expect(decision.kind === 'enter' && decision.messages).toHaveLength(2)
+  })
+})

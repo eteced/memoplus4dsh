@@ -18,7 +18,7 @@ export type EntityType = 'PERSON' | 'OBJECT' | 'CONCEPT'
 export const ENTITY_TYPES: readonly EntityType[] = ['PERSON', 'OBJECT', 'CONCEPT']
 
 /** Precision of a resolved event time. */
-export type TimePrecision = 'year' | 'month' | 'day' | 'hour' | 'minute' | 'second' | 'unknown'
+export type TimePrecision = 'year' | 'month' | 'week' | 'day' | 'hour' | 'minute' | 'second' | 'unknown'
 
 /** One node in the memory graph. */
 export interface Entity {
@@ -256,6 +256,15 @@ export class MemoryStore {
     this.indexEvent(event)
     this.append({ v: 1, op: 'event.add', data: { ...event } })
     return event
+  }
+
+  /** Attach (or replace) an event's embedding, persisted as a journal op. */
+  setEventEmbedding(id: string, embedding: number[]): boolean {
+    const event = this.events.get(id)
+    if (!event) return false
+    event.embedding = embedding
+    this.append({ v: 1, op: 'event.add', data: { ...event } })
+    return true
   }
 
   // ---------- deletes ----------

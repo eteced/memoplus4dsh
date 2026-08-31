@@ -10,6 +10,7 @@
 
 import type { Entity, EntityType, MemoryStore, NewEvent, TimePrecision } from './store.js'
 import { ENTITY_TYPES } from './store.js'
+import { extractTimeExpr, resolveTimeExpr } from './temporal.js'
 
 /**
  * Single-turn extraction prompt. Ported verbatim-in-spirit from memoplus
@@ -191,14 +192,21 @@ export function formatKnownEntities(
 /** Minimal fact length below which a row is dropped as too weak. */
 export const MIN_FACT_LENGTH = 12
 
-/** Resolve a verbatim time expression to (ISO time, precision). M2: ISO dates only. */
-export function resolveEventTime(timeExpr: string): { eventTime: string | null; precision: TimePrecision } {
-  const match = /(\d{4})[-/](\d{1,2})[-/](\d{1,2})/.exec(timeExpr.trim())
-  if (match) {
-    const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])))
-    if (!Number.isNaN(date.getTime())) return { eventTime: date.toISOString(), precision: 'day' }
-  }
-  return { eventTime: null, precision: 'unknown' }
+/**
+ * Resolve a verbatim time expression to (ISO time, precision), relative to
+ * `base` (the turn's mention time). Delegates to the temporal module; when
+ * the expression is empty, tries to recover one from the fact text.
+ */
+export function resolveEventTime(
+  timeExpr: string,
+  base: Date,
+  factText = '',
+): { eventTime: string | null; precision: TimePrecision } {
+  const expr = timeExpr.length > 0 ? timeExpr : extractTimeExpr(factText) ?? ''
+  if (expr.length === 0) return { eventTime: null, precision: 'unknown' }
+  const resolved = resolveTimeExpr(expr, base)
+  if (resolved.precision === 'unknown') return { eventTime: null, precision: 'unknown' }
+  return { eventTime: resolved.time.toISOString(), precision: resolved.precision }
 }
 
 /** One unit of extraction work: one finished conversation turn. */
@@ -261,14 +269,15 @@ export class ExtractionPipeline {
         const object = this.store.createOrResolve(row.object, 'CONCEPT')
         objectEntityIds.push(object.entity.id)
       }
-      const { eventTime, precision } = resolveEventTime(row.timeExpr)
+      const mentionDate = new Date(job.mentionTime)
+      const { eventTime, precision } = resolveEventTime(row.timeExpr, mentionDate, row.fact)
       const event: NewEvent = {
         subjectEntityIds: [subject.entity.id],
         objectEntityIds,
         predicate: row.predicate,
         normalizedText: row.fact,
         details: row.details,
-        timeExpr: row.timeExpr,
+        timeExpr: row.timeExpr || (extractTimeExpr(row.fact) ?? ''),
         eventTime,
         eventTimePrecision: precision,
         mentionTime: job.mentionTime,

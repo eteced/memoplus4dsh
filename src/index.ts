@@ -2,6 +2,8 @@ import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-system-prompt'
+import type {} from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-tools'
 import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session'
@@ -10,19 +12,24 @@ import { MemoryStore } from './store.js'
 import { ExtractionPipeline, ExtractionQueue } from './extraction.js'
 import type { ExtractionJob } from './extraction.js'
 import { registerBridges } from './bridges.js'
+import { OnnxEmbedder, NULL_EMBEDDER } from './embedding.js'
+import type { TextEmbedder } from './embedding.js'
+import { Retriever, createQueryExpander } from './retrieval.js'
+import { createPreStepHandler } from './inject.js'
+import { registerMemoryTools } from './tools.js'
 
 export const name = 'memoplus4dsh'
 
 export interface Config {
   /** When to run extraction: after every completed turn, or never. */
   extraction: 'turn_end' | 'off'
-  /** Max memories injected per user message (used from M3). */
+  /** Max memories injected per user message. */
   injectTopK: number
   /** Plugin data directory; defaults to `<dsh-home>/memoplus4dsh/`. */
   dataDir?: string
-  /** Provider route for extraction calls; defaults to the session's own route. */
+  /** Provider route for extraction/expansion calls; defaults to the session's own route. */
   extractionProvider?: string
-  /** Model for extraction calls; defaults to the session's own model. */
+  /** Model for extraction/expansion calls; defaults to the session's own model. */
   extractionModel?: string
   /** Retries after the first extraction attempt before a turn is skipped. */
   extractionMaxRetries?: number
@@ -30,9 +37,21 @@ export interface Config {
   extractionMaxTokens?: number
   /** Journal ops between snapshot compactions. */
   snapshotThreshold?: number
+  /** Pre-step memory injection; default true. */
+  injection?: boolean
+  /** memory_search / memory_remember tools; default true. */
+  tools?: boolean
+  /** Local ONNX embeddings; default true. Failure degrades to keyword-only retrieval. */
+  embedding?: boolean
+  /** HuggingFace base URL or mirror for the embedding model download. */
+  hfBaseUrl?: string
+  /** LLM query expansion during retrieval; default true. */
+  queryExpansion?: boolean
+  /** Character cap for the injected memory block. */
+  injectMaxChars?: number
 }
 
-export const inject = ['systemPrompt', 'llm']
+export const inject = ['systemPrompt', 'llm', 'tools']
 
 /** Default data dir: `$DSH_HOME/memoplus4dsh`, falling back to `~/.dsh`. */
 function defaultDataDir(env: Record<string, string | undefined> = process.env): string {
@@ -75,18 +94,24 @@ export function buildTurnText(session: Session, turn: number): string {
   return lines.join('\n')
 }
 
-/** One extraction call through the session's own (or configured) model route. */
-async function callExtractionLlm(
+interface Route {
+  provider: string
+  model: string
+}
+
+/** One auxiliary model call (extraction/expansion) through the user's own route. */
+async function callPluginLlm(
   ctx: Context,
   config: Config,
-  job: ExtractionJob,
+  route: Route | undefined,
   prompt: string,
+  maxTokens: number,
 ): Promise<string> {
-  const route = config.extractionProvider !== undefined && config.extractionModel !== undefined
+  const resolved = config.extractionProvider !== undefined && config.extractionModel !== undefined
     ? { provider: config.extractionProvider, model: config.extractionModel }
-    : job.route
-  if (route === undefined) {
-    throw new Error('no provider/model route available for extraction')
+    : route
+  if (resolved === undefined) {
+    throw new Error('no provider/model route available for the memory plugin call')
   }
   const message: Message = createUserMessage({
     content: [{ type: 'text', text: prompt }],
@@ -94,10 +119,10 @@ async function callExtractionLlm(
   })
   const texts = new Map<number, string>()
   const stream = ctx.llm.stream({
-    provider: route.provider,
-    model: route.model,
+    provider: resolved.provider,
+    model: resolved.model,
     messages: [message],
-    maxTokens: config.extractionMaxTokens ?? 2048,
+    maxTokens,
   })
   for await (const chunk of stream) {
     if (chunk.type === 'text-delta') {
@@ -110,26 +135,46 @@ async function callExtractionLlm(
 export function apply(ctx: Context, config: Config) {
   const logger = ctx.logger('memoplus4dsh')
   ctx.effect(() => {
+    const dataDir = config.dataDir ?? defaultDataDir()
     const store = new MemoryStore({
-      dir: config.dataDir ?? defaultDataDir(),
+      dir: dataDir,
       snapshotThreshold: config.snapshotThreshold,
     })
+    // Route of the most recently observed session; extraction jobs carry
+    // their own, this cell serves query expansion at injection time.
+    let lastRoute: Route | undefined
 
     ctx.systemPrompt.section({
       name: 'memoplus4dsh',
       order: 900,
       text: 'You have a unified long-term memory (memoplus4dsh). ' +
-        'Relevant memories may appear as plugin messages; use them naturally.',
+        'Relevant memories may appear as plugin messages; use them naturally. ' +
+        'Use the memory_search tool to actively recall, and memory_remember when the user asks you to remember something.',
     })
 
-    // M-later: bridges from schedule/goal/todo events (none registered in M2).
+    // M-later: bridges from schedule/goal/todo events (none registered in M2/M3).
     const bridges = registerBridges(store)
+
+    const embedder: TextEmbedder = config.embedding === false
+      ? NULL_EMBEDDER
+      : new OnnxEmbedder({ modelsDir: join(dataDir, 'models'), hfBaseUrl: config.hfBaseUrl })
+
+    const retriever = new Retriever({
+      store,
+      embedder,
+      expandQuery: config.queryExpansion === false
+        ? undefined
+        : createQueryExpander({
+          cachePath: join(dataDir, 'query-expansion-cache.json'),
+          callLlm: prompt => callPluginLlm(ctx, config, lastRoute, prompt, 256),
+        }),
+    })
 
     let queue: ExtractionQueue | undefined
     if (config.extraction === 'turn_end') {
       const pipeline = new ExtractionPipeline({
         store,
-        callLlm: (prompt, job) => callExtractionLlm(ctx, config, job, prompt),
+        callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, config.extractionMaxTokens ?? 2048),
       })
       queue = new ExtractionQueue(job => pipeline.extractTurn(job), {
         maxRetries: config.extractionMaxRetries,
@@ -139,25 +184,39 @@ export function apply(ctx: Context, config: Config) {
       })
       ctx.on('session/event', (session, event) => {
         if (event.type !== 'turn/end' || event.data.reason.kind !== 'completed') return
+        const header = session.requestHeader()
+        if (header !== undefined) lastRoute = { provider: header.config.provider, model: header.config.model }
         const turnText = buildTurnText(session, event.data.turn)
         if (turnText.trim().length === 0) return
-        const header = session.requestHeader()
         queue!.enqueue({
           sessionId: session.id,
           turn: event.data.turn,
           turnText,
           mentionTime: new Date(event.time).toISOString(),
-          route: header === undefined ? undefined : {
-            provider: header.config.provider,
-            model: header.config.model,
-          },
+          route: lastRoute,
         })
       })
     }
 
+    if (config.injection !== false) {
+      const handler = createPreStepHandler({
+        store,
+        maxChars: config.injectMaxChars,
+        retrieve: query => retriever.retrieve(query, { topK: config.injectTopK }),
+      })
+      ctx.on('agent/pre-step', (payload, next) => {
+        const header = payload.agent.session.requestHeader()
+        if (header !== undefined) lastRoute = { provider: header.config.provider, model: header.config.model }
+        return handler(payload, next)
+      })
+    }
+
+    const disposeTools = config.tools === false ? undefined : registerMemoryTools(ctx, { store, retriever })
+
     logger.info(`memory plugin loaded (data: ${store.filePath}, extraction: ${config.extraction})`)
 
     return () => {
+      disposeTools?.()
       for (const bridge of bridges) bridge.dispose()
       // Best-effort durable checkpoint; the journal itself is already safe.
       try {

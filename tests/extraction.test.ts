@@ -161,15 +161,30 @@ describe('formatKnownEntities', () => {
 })
 
 describe('resolveEventTime', () => {
+  const base = new Date('2026-09-01T12:00:00.000Z')
+
   it('resolves ISO dates to day precision', () => {
-    const { eventTime, precision } = resolveEventTime('2026-03-05')
+    const { eventTime, precision } = resolveEventTime('2026-03-05', base)
     expect(precision).toBe('day')
     expect(eventTime).toBe('2026-03-05T00:00:00.000Z')
   })
 
-  it('leaves relative expressions unresolved (M3 temporal resolver)', () => {
-    expect(resolveEventTime('last Saturday')).toEqual({ eventTime: null, precision: 'unknown' })
-    expect(resolveEventTime('')).toEqual({ eventTime: null, precision: 'unknown' })
+  it('resolves relative expressions against the base (mention time)', () => {
+    const { eventTime, precision } = resolveEventTime('last year', base)
+    expect(precision).toBe('year')
+    expect(eventTime).toBe('2025-09-01T12:00:00.000Z')
+    expect(resolveEventTime('last Saturday', base).eventTime).toBe('2026-08-29T12:00:00.000Z')
+  })
+
+  it('recovers a time expression from the fact text when the column is empty', () => {
+    const { eventTime, precision } = resolveEventTime('', base, 'Bob painted a landscape last year.')
+    expect(precision).toBe('year')
+    expect(eventTime).toBe('2025-09-01T12:00:00.000Z')
+  })
+
+  it('returns unknown when nothing resolves', () => {
+    expect(resolveEventTime('', base)).toEqual({ eventTime: null, precision: 'unknown' })
+    expect(resolveEventTime('_', base)).toEqual({ eventTime: null, precision: 'unknown' })
   })
 })
 
@@ -265,8 +280,9 @@ describe('ExtractionPipeline', () => {
     expect(events).toHaveLength(2)
     const painted = events.find(e => e.predicate === 'painted')!
     expect(painted.timeExpr).toBe('last year')
-    expect(painted.eventTime).toBeNull()
-    expect(painted.eventTimePrecision).toBe('unknown')
+    // 'last year' relative to the mention time 2026-09-01 -> 2025, year precision.
+    expect(painted.eventTime).toBe('2025-09-01T12:00:00.000Z')
+    expect(painted.eventTimePrecision).toBe('year')
     expect(painted.mentionTime).toBe('2026-09-01T12:00:00.000Z')
     expect(painted.sourceSession).toBe('session-1')
     expect(painted.sourceTurn).toBe(0)
