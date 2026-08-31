@@ -57,7 +57,8 @@ async function scenario1(harness) {
   let view
   try {
     await waitForGraph(evs => {
-      const text = evs.map(e => `${e.normalizedText} ${e.details}`).join('\n')
+      const own = evs.filter(e => e.sourceSession === s)
+      const text = own.map(e => `${e.normalizedText} ${e.details}`).join('\n')
       return containsAny(text, DENTIST) && containsAny(text, RUST) && containsAny(text, TEA)
     }, { timeoutMs: 300_000 })
     view = graphView()
@@ -69,7 +70,8 @@ async function scenario1(harness) {
   }
 
   // "下周三" resolves relative to the mention time to a concrete Wednesday.
-  const dentist = view.events.find(e => containsAny(`${e.normalizedText} ${e.details} ${e.timeExpr}`, DENTIST))
+  const dentist = view.events.find(e => e.sourceSession === s
+    && containsAny(`${e.normalizedText} ${e.details} ${e.timeExpr}`, DENTIST))
   const wednesday = dentist !== undefined && dentist.eventTime !== null
     && new Date(dentist.eventTime).getUTCDay() === 3
     && dentist.eventTime > dentist.mentionTime
@@ -225,6 +227,17 @@ async function runOne(fn, id, results) {
 
 const wanted = ONLY ?? new Set([...scenarios.keys()])
 const results = []
+
+// --clean wipes the plugin's derived state so the run's evidence is
+// self-contained (sessions stay on disk; only the memory graph is reset).
+if (process.argv.includes('--clean')) {
+  const { rmSync } = await import('node:fs')
+  const { DSH_HOME } = await import('./sdk-driver.mjs')
+  for (const f of ['memory-graph.jsonl', 'extraction-debug.jsonl', 'query-expansion-cache.json']) {
+    rmSync(join(DSH_HOME, 'memoplus4dsh', f), { force: true })
+  }
+  console.log('cleaned plugin data state')
+}
 
 // Phase 1: S1 in the first runtime lifetime.
 if (wanted.has(1)) {

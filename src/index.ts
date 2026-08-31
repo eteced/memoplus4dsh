@@ -36,6 +36,8 @@ export interface Config {
   extractionMaxRetries?: number
   /** Output token cap for extraction calls (reasoning models need a large budget). */
   extractionMaxTokens?: number
+  /** Per-call timeout for extraction/expansion calls (default 240s). */
+  extractionCallTimeoutMs?: number
   /** Journal ops between snapshot compactions. */
   snapshotThreshold?: number
   /** Pre-step memory injection; default true. */
@@ -128,6 +130,9 @@ async function callPluginLlm(
     model: resolved.model,
     messages: [message],
     maxTokens,
+    // Bound the call: an endpoint that drops the connection without an error
+    // would otherwise stall the serial extraction queue forever.
+    signal: AbortSignal.timeout(config.extractionCallTimeoutMs ?? 240_000),
   })
   for await (const chunk of stream) {
     if (chunk.type === 'text-delta') {

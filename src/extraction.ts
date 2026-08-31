@@ -50,6 +50,7 @@ Rules:
 - For static attributes (identity, relationship status, home country), use PREDICATE=is and the value in OBJECT.
 - Extract EVERY fact explicitly stated. Do not skip details.
 - ONLY output facts from this turn.
+- Write NORMALIZED_FACT and DETAILS in the same language as the conversation turn.
 
 Conversation turn:
 {turn_text}

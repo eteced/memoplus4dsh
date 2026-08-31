@@ -44,8 +44,23 @@ export function stem(word: string): string {
   return w
 }
 
+/**
+ * Keyword tokens: ASCII words plus CJK bigrams (so Chinese text participates
+ * in keyword matching; single CJK runs never overlap by accident as whole
+ * words, bigrams give graded overlap). Language-level tokenization only.
+ */
 function wordsOf(text: string): string[] {
-  return text.toLowerCase().match(/[a-z]+/g) ?? []
+  const lower = text.toLowerCase()
+  const words = lower.match(/[a-z]+/g) ?? []
+  for (const run of lower.match(/[一-鿿]+/g) ?? []) {
+    if (run.length === 1) {
+      words.push(run)
+      continue
+    }
+    words.push(run)
+    for (let i = 0; i + 2 <= run.length; i++) words.push(run.slice(i, i + 2))
+  }
+  return words
 }
 
 /**
