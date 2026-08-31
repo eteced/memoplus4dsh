@@ -120,9 +120,10 @@ export function resolveTimeExpr(expr: string, base: Date): ResolvedTime {
   if (e === '去年') return { time: yearShift(base, -1), precision: 'year' }
   if (e === '明年') return { time: yearShift(base, 1), precision: 'year' }
   if (e === '今年') return { time: base, precision: 'year' }
-  // 上周三 / 下周X / 这周日 / 星期五 forms. 上/this/bare mean the most recent
-  // past occurrence (English "last Friday" semantics); 下 means next week's.
-  let zm = /^(上|这|本|下)?(?:周|星期)([一二三四五六日天])$/.exec(e)
+  // 上周三 / 下周X / 这周日 / 星期五 forms, with optional time-of-day suffix
+  // ("下周三下午3点"): the date resolves from the weekday part; the clock
+  // time stays verbatim in timeExpr (day precision is kept).
+  let zm = /^(上|这|本|下)?(?:周|星期)([一二三四五六日天])(?:凌晨|早上|上午|中午|下午|晚上|今晚)?(?:\d{1,2}点(?::?\d{1,2}分?)?|半)?$/.exec(e)
   if (zm) {
     const modifier = zm[1] ?? ''
     const wd = ZH_WEEKDAYS[zm[2]!]!
