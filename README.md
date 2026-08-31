@@ -16,8 +16,18 @@ scripts/install.sh          # adds the plugin to your dsh profile
 ## Uninstall
 
 ```sh
-scripts/uninstall.sh        # removes the plugin; memory data is kept unless --purge
+scripts/uninstall.sh        # removes the plugin from the profile (fully reversible)
 ```
+
+## Test instance
+
+```sh
+scripts/test-harness/start-test.sh   # isolated DSH_HOME under ../test, prints authenticated URL
+scripts/test-harness/stop-test.sh
+scripts/test-harness/reset-test.sh   # stop + wipe the test DSH_HOME
+```
+
+See [docs/m1-verification.md](docs/m1-verification.md) for how loading is verified.
 
 ## Development
 
