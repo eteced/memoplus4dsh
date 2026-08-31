@@ -154,7 +154,8 @@ export function apply(ctx: Context, config: Config) {
       order: 900,
       text: 'You have a unified long-term memory (memoplus4dsh). ' +
         'Relevant memories may appear as plugin messages; use them naturally. ' +
-        'Use the memory_search tool to actively recall, and memory_remember when the user asks you to remember something.',
+        'Use the memory_search tool to actively recall past facts when the user asks about them. ' +
+        'When the user asks you to remember something, you MUST call the memory_remember tool with the fact as one self-contained sentence.',
     })
 
     // M-later: bridges from schedule/goal/todo events (none registered in M2/M3).

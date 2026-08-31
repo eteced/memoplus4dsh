@@ -36,6 +36,21 @@ const NUM_WORDS: Record<string, number> = {
   one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10,
 }
 
+/** Chinese weekday characters (Monday-first, matching WEEKDAYS). */
+const ZH_WEEKDAYS: Record<string, number> = {
+  一: 0, 二: 1, 三: 2, 四: 3, 五: 4, 六: 5, 日: 6, 天: 6,
+}
+
+/** Chinese numerals for small counts. */
+const ZH_NUMS: Record<string, number> = {
+  一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10,
+}
+
+/** Minimal Chinese relative-date words (universal time constructs). */
+const ZH_RELATIVE_DAYS: Record<string, number> = {
+  前天: -2, 昨天: -1, 今天: 0, 明天: 1, 后天: 2,
+}
+
 const DAY_MS = 24 * 60 * 60 * 1000
 
 function expandWeekdayAbbrevs(expr: string): string {
@@ -72,6 +87,12 @@ function daysInMonth(year: number, month: number): number {
   return new Date(Date.UTC(month === 12 ? year + 1 : year, month === 12 ? 0 : month, 0)).getUTCDate()
 }
 
+/** Shift whole years, preserving month/day/time-of-day. */
+function yearShift(date: Date, delta: number): Date {
+  return new Date(Date.UTC(date.getUTCFullYear() + delta, date.getUTCMonth(), date.getUTCDate(),
+    date.getUTCHours(), date.getUTCMinutes(), date.getUTCSeconds()))
+}
+
 export interface ResolvedTime {
   time: Date
   precision: TimePrecision
@@ -86,8 +107,46 @@ export function resolveTimeExpr(expr: string, base: Date): ResolvedTime {
   if (e.length === 0 || e === 'unknown' || e === 'n/a' || e === '-' || e === '_') {
     return { time: base, precision: 'unknown' }
   }
-  e = expandWeekdayAbbrevs(e)
   const day = (d: Date): ResolvedTime => ({ time: d, precision: 'day' })
+
+  // Chinese relative days and week/month/year words (exact matches only).
+  if (e in ZH_RELATIVE_DAYS) return day(new Date(base.getTime() + ZH_RELATIVE_DAYS[e]! * DAY_MS))
+  if (e === '上周') return day(new Date(base.getTime() - 7 * DAY_MS))
+  if (e === '下周') return day(new Date(base.getTime() + 7 * DAY_MS))
+  if (e === '这周' || e === '本周') return { time: base, precision: 'week' }
+  if (e === '上个月' || e === '上月') return { time: shiftMonth(base, -1), precision: 'month' }
+  if (e === '下个月' || e === '下月') return { time: shiftMonth(base, 1), precision: 'month' }
+  if (e === '这个月' || e === '本月') return { time: base, precision: 'month' }
+  if (e === '去年') return { time: yearShift(base, -1), precision: 'year' }
+  if (e === '明年') return { time: yearShift(base, 1), precision: 'year' }
+  if (e === '今年') return { time: base, precision: 'year' }
+  // 上周三 / 下周X / 这周日 / 星期五 forms. 上/this/bare mean the most recent
+  // past occurrence (English "last Friday" semantics); 下 means next week's.
+  let zm = /^(上|这|本|下)?(?:周|星期)([一二三四五六日天])$/.exec(e)
+  if (zm) {
+    const modifier = zm[1] ?? ''
+    const wd = ZH_WEEKDAYS[zm[2]!]!
+    const currentWd = (base.getUTCDay() + 6) % 7
+    if (modifier === '下') {
+      const diff = (wd - currentWd + 7) % 7
+      return day(new Date(base.getTime() + (diff + 7) * DAY_MS))
+    }
+    let diff = (currentWd - wd + 7) % 7
+    if (diff === 0) diff = 7
+    return day(new Date(base.getTime() - diff * DAY_MS))
+  }
+  // 三天前 / 两周前 / 一个月前 / 3天前 forms.
+  zm = new RegExp(`^(\\d+|[${Object.keys(ZH_NUMS).join('')}])个?(天|日|周|星期|个月|月|年)前$`).exec(e)
+  if (zm) {
+    const num = zm[1]! in ZH_NUMS ? ZH_NUMS[zm[1]!]! : Number(zm[1])
+    const unit = zm[2]!
+    if (unit === '天' || unit === '日') return day(new Date(base.getTime() - num * DAY_MS))
+    if (unit === '周' || unit === '星期') return day(new Date(base.getTime() - num * 7 * DAY_MS))
+    if (unit === '个月' || unit === '月') return { time: shiftMonth(base, -num), precision: 'month' }
+    return { time: yearShift(base, -num), precision: 'year' }
+  }
+
+  e = expandWeekdayAbbrevs(e)
 
   // ISO-like dates
   let m = /(\d{4})[-/](\d{1,2})[-/](\d{1,2})/.exec(e)
@@ -152,16 +211,8 @@ export function resolveTimeExpr(expr: string, base: Date): ResolvedTime {
   }
   if (e === 'last month') return { time: shiftMonth(base, -1), precision: 'month' }
   if (e === 'next month') return { time: shiftMonth(base, 1), precision: 'month' }
-  if (e === 'last year') {
-    const t = new Date(Date.UTC(base.getUTCFullYear() - 1, base.getUTCMonth(), base.getUTCDate(),
-      base.getUTCHours(), base.getUTCMinutes(), base.getUTCSeconds()))
-    return { time: t, precision: 'year' }
-  }
-  if (e === 'next year') {
-    const t = new Date(Date.UTC(base.getUTCFullYear() + 1, base.getUTCMonth(), base.getUTCDate(),
-      base.getUTCHours(), base.getUTCMinutes(), base.getUTCSeconds()))
-    return { time: t, precision: 'year' }
-  }
+  if (e === 'last year') return { time: yearShift(base, -1), precision: 'year' }
+  if (e === 'next year') return { time: yearShift(base, 1), precision: 'year' }
 
   // "this week/month/year"
   if (e === 'this week') return { time: base, precision: 'week' }
@@ -257,6 +308,14 @@ const ORDINAL_RE = /\b(last|previous|recent(?:ly)?|past|this)\s*(\d+)?\s*(time|t
  */
 export function resolveTemporalQuery(query: string, anchor: Date): TemporalOp {
   const q = query.toLowerCase()
+
+  // Minimal Chinese query-side constructs (universal time words).
+  if (q.includes('去年')) return { mode: 'IN_YEAR', year: anchor.getUTCFullYear() - 1 }
+  if (q.includes('今年')) return { mode: 'IN_YEAR', year: anchor.getUTCFullYear() }
+  if (q.includes('最近') || q.includes('近期')) {
+    return { mode: 'WITHIN_WINDOW', windowMs: 180 * DAY_MS }
+  }
+  if (q.includes('昨天')) return { mode: 'WITHIN_WINDOW', windowMs: DAY_MS }
 
   let m = /\b(last|this|next)\s+year\b/.exec(q)
   if (m) {
