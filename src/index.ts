@@ -1,3 +1,4 @@
+import { appendFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -176,15 +177,37 @@ export function apply(ctx: Context, config: Config) {
 
     let queue: ExtractionQueue | undefined
     if (config.extraction === 'turn_end') {
+      // Extraction runs detached from any visible logger in shipped profiles;
+      // keep a minimal durable trace in the data dir for field debugging.
+      const debugLog = (entry: Record<string, unknown>): void => {
+        try {
+          appendFileSync(join(dataDir, 'extraction-debug.jsonl'),
+            JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n', 'utf8')
+        } catch {
+          // Debug logging must never break extraction.
+        }
+      }
       const pipeline = new ExtractionPipeline({
         store,
         callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, config.extractionMaxTokens ?? 16384),
       })
-      queue = new ExtractionQueue(job => pipeline.extractTurn(job), {
+      queue = new ExtractionQueue(job => pipeline.extractTurn(job).then(result => {
+        debugLog({ kind: 'extracted', session: job.sessionId, turn: job.turn, ...result })
+      }), {
         maxRetries: config.extractionMaxRetries,
-        onSkip: (job, error) => logger.warn(
-          `extraction skipped for session ${job.sessionId} turn ${job.turn}: ${String(error)}`,
-        ),
+        onAttemptFailed: (job, attempt, error) => debugLog({
+          kind: 'attempt-failed', session: job.sessionId, turn: job.turn, attempt,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+        onSkip: (job, error) => {
+          debugLog({
+            kind: 'skipped', session: job.sessionId, turn: job.turn,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          logger.warn(
+            `extraction skipped for session ${job.sessionId} turn ${job.turn}: ${String(error)}`,
+          )
+        },
       })
       ctx.on('session/event', (session, event) => {
         if (event.type !== 'turn/end' || event.data.reason.kind !== 'completed') return
@@ -192,6 +215,7 @@ export function apply(ctx: Context, config: Config) {
         if (header !== undefined) lastRoute = { provider: header.config.provider, model: header.config.model }
         const turnText = buildTurnText(session, event.data.turn)
         if (turnText.trim().length === 0) return
+        debugLog({ kind: 'enqueue', session: session.id, turn: event.data.turn, textChars: turnText.length })
         queue!.enqueue({
           sessionId: session.id,
           turn: event.data.turn,
