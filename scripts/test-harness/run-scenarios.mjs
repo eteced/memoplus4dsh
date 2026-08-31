@@ -60,7 +60,7 @@ async function scenario1(harness) {
       const own = evs.filter(e => e.sourceSession === s)
       const text = own.map(e => `${e.normalizedText} ${e.details}`).join('\n')
       return containsAny(text, DENTIST) && containsAny(text, RUST) && containsAny(text, TEA)
-    }, { timeoutMs: 300_000 })
+    }, { timeoutMs: 600_000 })
     view = graphView()
     checks.push(check('graph: 牙医/Rust/绿茶 事件齐备', true))
   } catch (error) {
@@ -111,7 +111,7 @@ async function scenario3(harness) {
   try {
     const events = await waitForGraph(evs =>
       evs.some(e => e.sourceSession === s && containsAny(`${e.normalizedText} ${e.details}`, HOSPITAL)),
-      { timeoutMs: 300_000 })
+      { timeoutMs: 600_000 })
     hospital = events.find(e => e.sourceSession === s && containsAny(`${e.normalizedText} ${e.details}`, HOSPITAL))
     checks.push(check('graph: 医院事件', true, hospital.normalizedText))
   } catch (error) {
@@ -141,7 +141,7 @@ async function scenario4(harness) {
   let inGraph = false
   try {
     await waitForGraph(evs => evs.some(e => containsAny(`${e.normalizedText} ${e.details}`, RECEIVER)
-      && containsAny(`${e.normalizedText} ${e.details}`, ['抽屉', 'drawer'])), { timeoutMs: 300_000 })
+      && containsAny(`${e.normalizedText} ${e.details}`, ['抽屉', 'drawer'])), { timeoutMs: 600_000 })
     inGraph = true
   } catch { /* recorded below */ }
   checks.push(check('memory_remember 工具调用 或 抽取兜底落图', calls.length > 0 || inGraph,

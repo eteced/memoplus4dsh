@@ -130,9 +130,11 @@ async function callPluginLlm(
     model: resolved.model,
     messages: [message],
     maxTokens,
-    // Bound the call: an endpoint that drops the connection without an error
-    // would otherwise stall the serial extraction queue forever.
-    signal: AbortSignal.timeout(config.extractionCallTimeoutMs ?? 240_000),
+    // Bound the call: an endpoint that stalls without erroring would
+    // otherwise stall the serial extraction queue forever. 120s pairs with
+    // the 8192-token budget: reasoning models either finish well within it
+    // or fail fast into the queue's retry.
+    signal: AbortSignal.timeout(config.extractionCallTimeoutMs ?? 120_000),
   })
   for await (const chunk of stream) {
     if (chunk.type === 'text-delta') {
@@ -195,7 +197,7 @@ export function apply(ctx: Context, config: Config) {
       }
       const pipeline = new ExtractionPipeline({
         store,
-        callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, config.extractionMaxTokens ?? 16384),
+        callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, config.extractionMaxTokens ?? 8192),
       })
       queue = new ExtractionQueue(job => pipeline.extractTurn(job).then(result => {
         debugLog({ kind: 'extracted', session: job.sessionId, turn: job.turn, ...result })
