@@ -24,20 +24,23 @@ afterEach(() => {
 })
 
 describe('renderGoalChange', () => {
-  it('renders lifecycle operations', () => {
-    expect(renderGoalChange({ operation: 'create', objective: '写完测试报告' })!.text).toContain('创建了目标')
-    expect(renderGoalChange({ operation: 'create', objective: '写完测试报告' })!.predicate).toBe('goal_create')
-    expect(renderGoalChange({ operation: 'complete', objective: '写完测试报告' })!.text).toContain('已完成')
-    expect(renderGoalChange({ operation: 'pause', objective: '写完测试报告' })!.text).toContain('已暂停')
-    const blocked = renderGoalChange({ operation: 'block', objective: '写完测试报告', blockedReason: { message: '等待用户提供 API key' } })!
+  it('renders lifecycle operations from the real nested payload (goal field)', () => {
+    expect(renderGoalChange({ operation: 'create', goal: { objective: '写完测试报告' } })!.text).toContain('创建了目标')
+    expect(renderGoalChange({ operation: 'create', goal: { objective: '写完测试报告' } })!.predicate).toBe('goal_create')
+    expect(renderGoalChange({ operation: 'complete', goal: { objective: '写完测试报告' } })!.text).toContain('已完成')
+    expect(renderGoalChange({ operation: 'pause', goal: { objective: '写完测试报告' } })!.text).toContain('已暂停')
+    const blocked = renderGoalChange({ operation: 'block', goal: { objective: '写完测试报告', blockedReason: { message: '等待用户提供 API key' } } })!
     expect(blocked.text).toContain('被阻塞')
     expect(blocked.text).toContain('API key')
   })
 
-  it('renders clear tombstones and rejects payload garbage', () => {
-    expect(renderGoalChange({ operation: 'clear' })!.predicate).toBe('goal_clear')
+  it('renders clear tombstones, tolerates flat shape, rejects payload garbage', () => {
+    expect(renderGoalChange({ operation: 'clear', cleared: { id: 'g1', revision: 3 } } as never)!.predicate).toBe('goal_clear')
+    // Flat snapshot (no nested goal field) is tolerated.
+    expect(renderGoalChange({ operation: 'create', objective: '扁平目标' })!.text).toContain('扁平目标')
     expect(renderGoalChange({ operation: 'update' })).toBeNull()
     expect(renderGoalChange({})).toBeNull()
+    expect(renderGoalChange({ operation: 'create', goal: {} })).toBeNull()
   })
 })
 
@@ -105,8 +108,8 @@ describe('registerProgressBridge', () => {
     const { ctx, emit } = fakeCtx()
     registerProgressBridge(ctx, { store })
 
-    emit('goal/change', { operation: 'create', objective: '重构记忆插件', phase: 'active' })
-    emit('goal/change', { operation: 'complete', objective: '重构记忆插件', phase: 'complete' })
+    emit('goal/change', { operation: 'create', goal: { objective: '重构记忆插件', phase: 'active' } })
+    emit('goal/change', { operation: 'complete', goal: { objective: '重构记忆插件', phase: 'complete' } })
     emit('todo/write', { todos: [{ content: '写文档', status: 'completed' }, { content: '写代码', status: 'in_progress' }] })
     emit('schedule/change', { operation: 'create', schedule: { id: 's1', kind: 'at', prompt: '周五提醒', scheduledAt: '2026-09-04T09:00:00Z' } })
     emit('schedule/change', { operation: 'dispatch', id: 's1' })

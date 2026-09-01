@@ -20,6 +20,7 @@
 - 用官方 DeepSeek API（不发显式 null）即可完全正常；或
 - 等 dsh 上游修复后升级；或
 - 暂时把 `tools: false`（插件工具关闭）——注入 + 抽取链路不受影响，记忆功能仍工作（M4 场景测试在该状态下 S1/S3/S4 全过）。
+- **测试侧**：M8 场景测试新增 `scripts/test-harness/zen-nullstrip-proxy.mjs`（仅测试用的回环代理，删 SSE chunk 里的显式 null 键），实测可完全绕过 F1，goal/todo/schedule 工具在 Zen 端点全部打通。注意：它只用于本地测试，不是给用户部署的方案。
 
 ## S5 — 日程/待办/目标事件桥接（已于 M8 实现）
 

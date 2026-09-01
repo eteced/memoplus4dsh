@@ -44,10 +44,20 @@ export function statePredicateFamily(predicate: string): string | undefined {
 // ---------- structural payload shapes (duck-typed, no upstream imports) ----------
 
 interface GoalSnapshotLike {
-  operation?: string
   objective?: string
   phase?: string
   blockedReason?: { message?: string }
+}
+
+/**
+ * Raw goal/change payload: the snapshot is nested under `goal`
+ * ({ kind, version, operation, goal: GoalSnapshot, ... }); clear tombstones
+ * carry { operation: 'clear', cleared, clearedAt }. A flat snapshot is also
+ * tolerated for forward/backward compatibility.
+ */
+interface GoalChangeLike extends GoalSnapshotLike {
+  operation?: string
+  goal?: GoalSnapshotLike
 }
 
 interface TodoItemLike {
@@ -75,13 +85,14 @@ function truncate(text: string, max: number): string {
 }
 
 /** Chinese rendering of one goal/change event; null when unrecognizable. */
-export function renderGoalChange(data: GoalSnapshotLike): { text: string; predicate: string; entityName: string } | null {
+export function renderGoalChange(data: GoalChangeLike): { text: string; predicate: string; entityName: string } | null {
   if (data.operation === 'clear') {
     return { text: '当前目标已被清除（clear）。', predicate: 'goal_clear', entityName: 'agent 目标' }
   }
-  if (typeof data.objective !== 'string' || data.objective.length === 0) return null
-  const short = truncate(data.objective, 40)
-  const entityName = `目标：${truncate(data.objective, 20)}`
+  const goal = data.goal ?? data
+  if (typeof goal.objective !== 'string' || goal.objective.length === 0) return null
+  const short = truncate(goal.objective, 40)
+  const entityName = `目标：${truncate(goal.objective, 20)}`
   const operation = data.operation ?? 'update'
   switch (operation) {
     case 'create':
@@ -93,11 +104,11 @@ export function renderGoalChange(data: GoalSnapshotLike): { text: string; predic
     case 'resume':
       return { text: `目标「${short}」已恢复进行。`, predicate: 'goal_resume', entityName }
     case 'block': {
-      const reason = typeof data.blockedReason?.message === 'string' ? `：${truncate(data.blockedReason.message, 80)}` : ''
+      const reason = typeof goal.blockedReason?.message === 'string' ? `：${truncate(goal.blockedReason.message, 80)}` : ''
       return { text: `目标「${short}」被阻塞${reason}。`, predicate: 'goal_block', entityName }
     }
     default:
-      return { text: `目标「${short}」状态更新为 ${data.phase ?? operation}。`, predicate: 'goal_update', entityName }
+      return { text: `目标「${short}」状态更新为 ${goal.phase ?? operation}。`, predicate: 'goal_update', entityName }
   }
 }
 
@@ -203,7 +214,7 @@ export function registerProgressBridge(ctx: Context, options: ProgressBridgeOpti
       // depend on (goal/todo/schedule/plan); match structurally.
       switch (event.type as string) {
         case 'goal/change': {
-          const rendered = renderGoalChange(event.data as GoalSnapshotLike)
+          const rendered = renderGoalChange(event.data as GoalChangeLike)
           if (rendered !== null) writeEvent(session.id, rendered.entityName, 'CONCEPT', rendered.predicate, rendered.text)
           break
         }

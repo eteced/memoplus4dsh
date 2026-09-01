@@ -125,6 +125,13 @@ dsh 压缩后模型看不到 todo 工具结果（§1.5），而我们的记忆�
 
 **测试**：10 个测试文件、119 个单测全绿（新增 18 个：bridge 投影/去噪/容错 9、buildTurnText 来源准入 2、PendingJobLog 崩溃恢复 3、DENSE recency 1、"最新"算子 1、状态去重 2）。
 
-**场景验证**：真实 LLM 的 goal 模式跨 session 进度场景（验收标准 §4.2）未在本轮执行——需要启动本地测试实例并消耗 API 额度；单测已覆盖各机制单元行为。建议用户部署后按 §4.2 实测。
+**场景验证（真实 LLM，OpenCode Zen 端点，`scripts/test-harness/run-m8-scenarios.mjs`）**：
 
-**commit**：见 git log（M8 implementation）。
+- 端点限制与对策：Zen 的流式 tool_calls 显式 null 覆盖 bug（known-issues F1）仍然存在，直连时所有工具调用失败。为此写了**仅测试用**的 `zen-nullstrip-proxy.mjs`（回环监听，只删 SSE chunk 里的显式 null 键，其余原样转发）绕过。
+- **S1 goal 进度跨 session PASS**（修复后）：create_goal → block，新 session 问"最新进展"——注入恰为最新状态「被阻塞：等待审核测试报告」，不含过期的"创建了目标"（状态去重生效）；模型回复明确指出 `get_goal` 在新 session 返回空、答案来自长期记忆——跨 session 空白被插件填补的实锤。
+- **S2 todo 快照演进 PASS**：两次 todo_write → 新 session 问"还有什么没做"，注入为最新快照（1/3 完成），回复正确列出未完成项。
+- **S3 对话状态演进 PASS**（无工具，P1 检索侧）：先说"刚启动写第一页"再说"完成 80% 只剩部署"，新 session 问"最新进展"——回复命中 80%/部署，不被过期状态主导（LAST_K + recency）。
+- **S4 崩溃恢复 PASS**：连发事实后不优雅关闭直接 SIGKILL（kill 前 pending 积压 3 行），同 DSH_HOME 重启后全部事实（小白/雪球/墨墨）被补抽。
+- **S1 首跑 FAIL 暴露的 bug 与修复**：bridge 按扁平结构读 goal/change payload，而 dsh 实际载荷是嵌套的（`data.goal.objective`，见真实 session 日志）——renderGoalChange 静默返回 null，goal 事件全丢。修复为解包 `data.goal ?? data`（扁平兼容），单测改用真实载荷形状。**教训：鸭子类型约定必须用真实日志验证，不能靠读上游类型定义想象。**
+
+**commit**：见 git log（M8 implementation + M8 scenario fixes）。
