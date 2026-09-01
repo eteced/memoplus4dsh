@@ -1,0 +1,76 @@
+# M9 — MemoryAgentBench 评测方案（memoplus4dsh + dsh 组合）
+
+> 日期：2026-09-02 状态：方案已定，待实施
+> 目标：用 MemoryAgentBench 官方仓库与数据集，对**最终应用组合（deepseek-harness + memoplus4dsh 插件）**跑出可横向对比的分数。评测 LLM 走 DeepSeek 官方 API（避开 Zen 网关的 F1 工具 bug）。
+> 可比性原则：**数据加载、模板、指标计算全部复用官方代码零修改**；自定义内容只有 agent 适配层与运行编排。
+
+## 1. 官方仓库机制（调研结论）
+
+- 流程（`main.py` + `initialization.py`）：逐 context 处理——`initialize_and_memorize_agent` 逐 chunk 调 `agent.send_message(chunk, memorizing=True)` ingest，然后逐 query 调 `send_message(query, memorizing=False)` 取回答，`metrics_summarization` 累计指标，结果 JSON 落盘（含 `averaged_metrics`）。
+- 数据（`conversation_creator.py` + `utils/eval_data_utils.py`）：HF 数据集 `ai-hyz/MemoryAgentBench`（parquet，75MB），按 `sub_dataset` 过滤，context 按 `chunk_size`（配置 4096 chars）切块；每 context 多个 QA 对。四个 split：Accurate_Retrieval(22) / Test_Time_Learning(6) / Long_Range_Understanding(110) / Conflict_Resolution(8)（examples 数）。
+- 模板（`utils/templates.py`）：`memorize` 包装按子数据集分（统一对话壳 + `{context}` + `{time_stamp}`）；`query` 按 agent 类型分三族（long_context / rag / agentic_memory），措辞不同。**我们走 `rag_agent` 族**——agent_name 含 "rag" 即自动映射（`AGENT_TYPE_MAPPING`）。
+- 指标（`utils/eval_other_utils.py`）：rule-based（F1 / exact match / substring / rouge / edit-distance，按子数据集族路由 `post_process`），**无 LLM judge**，复算零成本、口径稳定。
+- RAG agent 协议（`agent.py`）：memorize 仅累积（格式化 chunk 入库）；query 无对话历史（每次独立检索+回答），`input_len/output_len` 用 tokenizer 计。
+
+## 2. 被测组合定义
+
+dsh（sdk profile）+ memoplus4dsh **默认配置**（extraction: turn_end、injectTopK 8、queryExpansion on、embedding on 多语言模型、progressBridge on）——即普通用户安装后的真实形态，不为评测调参。
+
+## 3. 接入架构
+
+```
+benchmark/run_benchmark.py (Python, 我们的 runner)
+  ├─ 复用官方: conversation_creator / templates / eval_other_utils.metrics_summarization
+  ├─ MemoplusDshAgent (Python)
+  │    └─ stdio JSON-lines ── benchmark/dsh-bench-driver.mjs (Node, 长驻进程)
+  │         └─ @deepseek-ai/dsh-sdk-client → dsh runtime (sdk profile)
+  │              └─ memoplus4dsh 插件（抽取/注入/工具全自动生效）
+  └─ 结果 JSON（结构与官方 main.py 输出一致）→ benchmark/results/（gitignored）
+```
+
+- **官方仓库**：克隆到 `benchmark/MemoryAgentBench/`（gitignored，setup 脚本负责克隆+校验 commit）；我们**不修改官方文件**。`agent.py` 因顶层重依赖（torch/transformers/langchain）不被 import——runner 复刻 `main.py` 的编排逻辑（50 行），数据/模板/指标模块轻依赖可直接 import。
+- **记忆隔离**：单一 benchmark DSH_HOME（`install.sh --profile sdk` 预装一次）；每个 context 开始前重启驱动进程并清空 `<home>/memoplus4dsh/` 与 `<home>/sessions/`——等价于 RAG agents 每 context 重建 vectorstore。
+- **沙箱**：复用 M6 的 sandbox-policy pin（workspaceRoot=benchmark workspace），`DSH_PERMISSION_MODE` 从 env 剥除。
+- **密钥**：`DEEPSEEK_API_KEY` 只走环境变量；base URL `https://api.deepseek.com/v1`（官方）。
+
+### 3.1 memorize 路径
+
+1. 每个 chunk 用官方 `memorize` 模板包装（含 time_stamp，与 RAG agents 输入逐字一致）。
+2. **批量 ingest**：把包装后的 chunk 按 ≤16000 字符拼批，一批一条 user message（追加指令"只需回复：已记录"）。原因：逐 chunk 一次 run 的成本/耗时 ×4（每 run 还有 assistant 回复与抽取调用），而我们 turnText 截断上限是 20k，16k 批量保证不截断、事实完整进抽取。
+3. ingest 结束后**等待抽取队列排空**（poll `extraction-pending.jsonl` 无 pending 行 + debug log 无未完成 job），再进入 query 阶段——否则前几个问题的检索会缺尾部记忆。
+4. `memory_construction_time` = ingest 墙钟总时长（含抽取等待），口径与 RAG agents 的建库时间一致。
+
+### 3.2 query 路径
+
+1. **每个问题一个新 session**（同 DSH_HOME，记忆图共享）：与 RAG agents 的"无对话历史、每次独立检索"协议对齐——评的是记忆系统而非对话上下文；这正是插件的跨 session 价值主张。
+2. query 文本 = `rag_agent` 族 query 模板（含"only give me the answer"等格式指令）。dsh 系统提示不可经 SDK 替换，官方 RAG agents 的 system 指令通过 `format_chat` 进模型——我们把同一指令文本放在 user message 里，模型可见内容等价（文档注明此差异）。
+3. `output` = `finalResponse`；`input_len/output_len` 用 tiktoken 对（注入记忆+query）与 output 计数——**口径与其它 agent 的 API usage 不同，仅影响系统指标（token 数），不影响正确性分数**（文档注明）。
+4. 注入体积受 `injectMaxChars 2000` 默认限制——这是产品默认行为，如实参评。
+
+### 3.3 评测范围与成本
+
+| 阶段 | 子集 | 规模 | 预估 LLM 调用 | 预估时长 |
+|---|---|---|---|---|
+| smoke | factconsolidation_sh_6k | 1 context | ~20 | ~5 min |
+| 正式 1 | Conflict_Resolution（sh/mh × 6k/32k/64k/262k，各 1 sample） | 8 contexts | ~300 | ~1 h |
+| 正式 2 | longmemeval_s*（max_test_samples=5） | 5 contexts | ~300 | ~1.5 h |
+| 可选后续 | longmemeval_s(500)、EventQA、Detective_QA 节选 | — | — | — |
+
+冲突解决（Conflict_Resolution）是"事实演进取最新"场景，直接对应 M8 强化的能力；longmemeval 是长对话精确召回，对应 LoCoMo 类场景。
+
+## 4. 工程清单
+
+- `benchmark/setup.sh`：克隆官方仓库（pin commit）、建 venv（datasets/nltk/tiktoken/rouge_score/editdistance/pyyaml/tqdm/dotenv）、install.sh 预装 sdk profile 到 benchmark dsh-home、预热 embedding 模型下载（hf-mirror 备选）。
+- `benchmark/dsh-bench-driver.mjs`：stdio JSON-lines 协议（`ingest`/`ask`/`health`），基于 test-harness sdk-driver 的 launch/pin 逻辑，DSH_HOME 由 env 指定。
+- `benchmark/agent_memoplus_dsh.py`：MemoplusDshAgent（memorize/ask/wait_queue_drain）。
+- `benchmark/run_benchmark.py`：编排 + 结果 JSON（结构同官方输出）+ 断点续跑（已完成 context 跳过）。
+- `benchmark/README.md`：复现步骤。
+- `.gitignore`：`benchmark/MemoryAgentBench/`、`benchmark/venv/`、`benchmark/results/`、`benchmark/dsh-home/`。
+- `docs/m9-benchmark.md`：结果报告（跑完后写）。
+
+## 5. 风险与备注
+
+- **成本**：deepseek-v4-flash 定价低（<¥1/百万 token 级），首轮 ~600 次调用、几百万 token，成本可忽略；时间是主要约束（串行）。
+- **ingest 批量与公平**：RAG agents 逐 chunk embed（无 LLM），我们批量 LLM 抽取——架构差异决定 ingest 更贵，这如实反映在 `memory_construction_time` 系统指标里，不影响正确性分数的可比性。
+- **nltk 数据**：`chunk_text_into_sentences` 可能需要 punkt 分词数据，setup 时下载（离线则降级为官方代码自带 fallback，如有）。
+- **embedding 模型**：135MB 下载在评测前预热完成；下载失败则插件自动降级关键词检索（分数可能略降，报告如实注明）。
