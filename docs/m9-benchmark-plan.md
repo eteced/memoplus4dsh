@@ -68,6 +68,25 @@ benchmark/run_benchmark.py (Python, 我们的 runner)
 - `.gitignore`：`benchmark/MemoryAgentBench/`、`benchmark/venv/`、`benchmark/results/`、`benchmark/dsh-home/`。
 - `docs/m9-benchmark.md`：结果报告（跑完后写）。
 
+## 6. smoke 发现与对策（2026-09-02）
+
+### F-1【产品级 bug，已修复】推理模型在大输入抽取时无限推理 → 空输出 → 记忆丢失
+
+smoke（factconsolidation_sh_6k）中 17.7k 字符的 ingest 批次抽取 3 次全部返回空内容被跳过（307 条事实丢失），9k 批次成功（148 事件）。对照实验（同一 prompt 直连官方 API）：
+
+- `max_tokens=8192`：`finish_reason=length`，**8192 个 completion token 全是 reasoning**（reasoning_content 3.5 万字符），可见输出 0
+- `max_tokens=32768`：同样 `length` + 全 reasoning + 空输出——**预算升级无解**，deepseek-v4-flash 在密集抽取任务上会无限延长推理
+
+这不止是评测问题：真实用户贴一份 ≥17k 的日志进对话，该轮记忆会在 3 次重试后永久丢失——正中"不能丢关键记忆"的红线。
+
+**修复（产品侧）**：`ExtractionPipeline` 抽取输入分段——turnText（先经既有 20k 头尾截断）按行边界切成 ≤8000 字符的段，逐段抽取、合并结果。9k 实测可成功，8k 留有余量。段间已知实体提示按各段文本独立过滤；任一段失败则整 job 进入既有重试。评测侧批量 ingest 同步从 16k 降到 8k（与产品分段对齐）。
+
+### F-2 进度备注
+
+- 端到端管线（ingest → 抽取 → 查询 → 注入 → 指标 → 结果 JSON）smoke 跑通；结果文件结构与官方一致。
+- 查询延迟 ~15-20s/题（含 query expansion + 注入 + 推理回答）；ingest 9k 批次抽取 ~1-4 min/批。
+- nltk 在此环境有 pathsec 限制，punkt 需手动放入 `venv/nltk_data`（README 已记）。
+
 ## 5. 风险与备注
 
 - **成本**：deepseek-v4-flash 定价低（<¥1/百万 token 级），首轮 ~600 次调用、几百万 token，成本可忽略；时间是主要约束（串行）。

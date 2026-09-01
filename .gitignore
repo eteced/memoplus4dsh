@@ -13,3 +13,8 @@ test/
 .env.*
 !.env.example
 *.log
+# benchmark 评测产物（官方仓库克隆、venv、结果、评测用 dsh home）
+benchmark/MemoryAgentBench/
+benchmark/venv/
+benchmark/results/
+benchmark/dsh-home/
