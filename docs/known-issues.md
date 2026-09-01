@@ -15,6 +15,7 @@
 2. session 日志的 `assistant/chunk`：首个 `tool-call-delta` 的 id/name 正确，续传为 `""`/`null`，`block-end` 拼出空 id/name。
 3. 同端点非流式调用返回正常 tool_calls。
 4. `tool/result` 事件显示 `ToolNotFoundError / UNKNOWN_TOOL / unknown tool ""`。
+5. **2026-09-01 复验（M8 场景测试期间）**：绕过 dsh 直接 curl Zen 原始 SSE，铁证仍在——首个 chunk `"id":"chatcmpl-tool-...","type":"function","function":{"name":"get_weather"}`，续传 chunk 原样携带 `"id":null,"type":null,"function":{"name":null,...}`。这种"缺失字段序列化为显式 null"是 Go 网关（`encoding/json` 无 `omitempty`）的典型特征：DeepSeek 官方 API 省略字段，Zen 的网关层重新序列化时补出了显式 null。
 
 **规避**：
 - 用官方 DeepSeek API（不发显式 null）即可完全正常；或
