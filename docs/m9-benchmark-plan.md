@@ -68,6 +68,16 @@ benchmark/run_benchmark.py (Python, 我们的 runner)
 - `.gitignore`：`benchmark/MemoryAgentBench/`、`benchmark/venv/`、`benchmark/results/`、`benchmark/dsh-home/`。
 - `docs/m9-benchmark.md`：结果报告（跑完后写）。
 
+## 7. 横向对比基线（官方论文 Table 2，GPT-4o-mini 骨架；arXiv:2507.05257v2）
+
+**LME(S*)（Accurate Retrieval，我们跑 longmemeval_s*）**：GPT-4o 32.0 / GPT-4o-mini 30.7 / GPT-4.1-mini 55.7 / Gemini-2.0-Flash 47.0 / Claude-3.7 34.0 / BM25 45.3 / Contriever 15.7 / TE3-Small 48.3 / TE3-Large 50.3 / Qwen3-Emb-4B 43.3 / RAPTOR 34.3 / GraphRAG 35.0 / MemoRAG 20.0 / HippoRAG-v2 50.7 / Mem0 36.0 / Cognee 29.3 / Zep 38.3 / Self-RAG 25.7 / MemGPT 32.0 / MIRIX 37.3 / MIRIX(4.1-mini) 51.0
+
+**FC-SH（Selective Forgetting，我们跑全部 4 长度）**：GPT-4o 60.0 / GPT-4o-mini 45.0 / GPT-4.1-mini 36.0 / Gemini 30.0 / Claude 43.0 / BM25 48.0 / Contriever 18.0 / TE3-S 28.0 / TE3-L 28.0 / Qwen3 29.0 / RAPTOR 14.0 / GraphRAG 14.0 / MemoRAG 21.0 / HippoRAG-v2 54.0 / Mem0 18.0 / Cognee 28.0 / Zep 7.0 / Self-RAG 19.0 / MemGPT 28.0 / MIRIX 14.0 / MIRIX(4.1) 20.0
+
+**FC-MH**：所有 agent ≤ 7%（GPT-4o 5.0、GPT-4o-mini 5.0、Mem0 2.0、HippoRAG 5.0、MIRIX(4.1) 3.0）；论文 Table 4：推理模型 o4-mini 在 6k FC-MH 80.0、32k 仅 14.0。
+
+口径备注：官方 RAG/memory agents 用 GPT-4o-mini 骨架、SF 与 LME(S*) 任务 chunk_size=512（论文 §4.1；仓库 yaml 默认 4096）。我们按仓库 yaml（4096）跑——对我们无实质影响（chunk 经 memorize 模板包装后在我们的 8k 批量里重新拼接，输入文本等价；chunk 粒度只影响按 chunk 检索的 agent）。我们骨架是 deepseek-v4-flash（推理模型），与 GPT-4o-mini 骨架的对比存在模型差异，报告中注明。
+
 ## 6. smoke 发现与对策（2026-09-02）
 
 ### F-1【产品级 bug，已修复】推理模型在大输入抽取时无限推理 → 空输出 → 记忆丢失
