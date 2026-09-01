@@ -35,7 +35,9 @@
 
 | context | 题数 | accuracy（LLM judge） | 状态 |
 |---|---|---|---|
-| LME(S*) ×5 contexts | 300（60/context） | —（judge 复核在跑分后统一执行） | 🔄 跑分中 |
+| LME(S*) ×5 contexts | 300 | **54.67**（multi-session 32.0 / single-session-user 82.2 / single-session-assistant 70.0 / temporal-reasoning 53.3 / knowledge-update 55.6 / preference 56.7） | ✅ |
+
+> judge：官方 `longmem_qa_evaluate.py` 逐字复用（副本 judge_lme.py），judge 模型 deepseek-v4-flash（官方默认 gpt-4o 不可得；yes/no 判定对 judge 模型不敏感——首次复核曾全员判 0，根因是 judge 调用 max_tokens=10 被 thinking 耗尽，即 F-1 同型问题，已在副本中显式禁 thinking 后复跑）。
 
 ## 4. 中间快照与观察
 
