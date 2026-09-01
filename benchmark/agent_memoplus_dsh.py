@@ -27,10 +27,10 @@ class DriverError(RuntimeError):
 class DshDriver:
     """One long-lived node driver process (one dsh runtime lifetime)."""
 
-    def __init__(self, repo_root, node_bin="node"):
+    def __init__(self, repo_root, dsh_home, node_bin="node"):
         self.repo_root = repo_root
         env = dict(os.environ)
-        env["BENCH_DSH_HOME"] = os.path.join(repo_root, "benchmark", "dsh-home")
+        env["BENCH_DSH_HOME"] = dsh_home
         env["BENCH_WORKSPACE"] = os.path.join(repo_root, "benchmark")
         self.proc = subprocess.Popen(
             [node_bin, os.path.join(repo_root, "benchmark", "dsh-bench-driver.mjs")],
@@ -99,7 +99,7 @@ class MemoplusDshAgent:
     # ---------- lifecycle ----------
 
     def __enter__(self):
-        self.driver = DshDriver(self.repo_root, self.node_bin)
+        self.driver = DshDriver(self.repo_root, self.dsh_home, self.node_bin)
         return self
 
     def __exit__(self, *_):

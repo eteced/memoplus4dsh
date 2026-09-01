@@ -53,6 +53,9 @@ def parse_args():
     parser.add_argument("--max_contexts", type=int, default=0)
     parser.add_argument("--max_queries", type=int, default=0,
                         help="global query cap across contexts (0 = no limit)")
+    parser.add_argument("--dsh_home", default=None,
+                        help="benchmark dsh home (default benchmark/dsh-home); "
+                             "use a second home for parallel runs")
     parser.add_argument("--force", action="store_true")
     return parser.parse_args()
 
@@ -100,13 +103,12 @@ def load_existing(path):
     return saved.get("data", []), len(saved.get("data", []))
 
 
-def wipe_memory_state():
+def wipe_memory_state(dsh_home):
     """Fresh memory per context == RAG agents rebuilding their store per context.
 
     Wipes the graph/journal/session state but PRESERVES the models dir
     (pre-warmed 135MB embedding download) and the profile.
     """
-    dsh_home = os.path.join(REPO_ROOT, "benchmark", "dsh-home")
     sessions = os.path.join(dsh_home, "sessions")
     if os.path.exists(sessions):
         shutil.rmtree(sessions)
@@ -137,6 +139,7 @@ def main():
         "retrieve_num": 8,
     }
     out_path = output_path_for(dataset_config)
+    dsh_home = args.dsh_home or os.path.join(REPO_ROOT, "benchmark", "dsh-home")
 
     start_time = time.time()
     creator = ConversationCreator({"agent_name": AGENT_NAME}, dataset_config)
@@ -175,7 +178,7 @@ def main():
             continue
 
         print(f"\n===== context {context_index}: {len(chunks)} chunks, {len(qa_pairs)} queries =====")
-        wipe_memory_state()
+        wipe_memory_state(dsh_home)
 
         memorize_template = get_template(dataset_config["sub_dataset"], "memorize", AGENT_NAME)
         formatted = [
@@ -187,7 +190,7 @@ def main():
             for chunk in chunks
         ]
 
-        with MemoplusDshAgent(REPO_ROOT, context_tag=f"{dataset_config['sub_dataset']}-{context_index}") as agent:
+        with MemoplusDshAgent(REPO_ROOT, context_tag=f"{dataset_config['sub_dataset']}-{context_index}", dsh_home=dsh_home) as agent:
             construction_time = agent.memorize(formatted)
             for local_q_idx, qa in enumerate(tqdm(qa_pairs, desc="queries")):
                 query, answer, qa_pair_id = qa if len(qa) == 3 else (*qa, None)

@@ -17,6 +17,6 @@ test/
 benchmark/MemoryAgentBench/
 benchmark/venv/
 benchmark/results/
-benchmark/dsh-home/
+benchmark/dsh-home*/
 __pycache__/
 *.pyc
