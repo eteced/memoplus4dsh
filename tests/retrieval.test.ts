@@ -197,6 +197,19 @@ describe('Retriever ranking', () => {
     expect(results.map(e => e.normalizedText)).toContain('Alice likes playing the piano.')
   })
 
+  it('recomputes stored vectors whose dimension mismatches the embedder (model switch)', async () => {
+    const store = new MemoryStore({ dir })
+    const id = makeEvent(store, 'Alice', 'Alice adopted a kitten from the shelter.')
+    // Simulate a vector persisted by the old 16-dim model.
+    store.setEventEmbedding(id, new Array(16).fill(0.1))
+    const embedder: TextEmbedder = { ...fakeEmbedder(), dim: 32 }
+    const retriever = new Retriever({ store, embedder, now: () => NOW })
+    const results = await retriever.retrieve('the kitten', { topK: 1 })
+    expect(results).toHaveLength(1)
+    // The stale 16-dim vector was recomputed at the embedder's 32 dims.
+    expect(store.getEvent(id)!.embedding).toHaveLength(32)
+  })
+
   it('expands the query through the LLM and caches results on disk', async () => {
     const store = new MemoryStore({ dir })
     makeEvent(store, 'Alice', 'Alice adopted a kitten from the shelter.')

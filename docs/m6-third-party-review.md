@@ -63,7 +63,7 @@
 ### 留作后续版本的默认候选
 
 - **DENSE 模式补 recency 衰减**：当前无时间意图的 query 完全不看新旧，"去年住北京"与"上月搬上海"同分。改动影响排序质量，需配合场景评测再调，本轮不动。
-- **多语言 embedding 模型**（paraphrase-multilingual-MiniLM-L12-v2）：中文 dense 会有实质提升，代价是下载体积/内存翻倍；建议作为可选配置项在下一版本提供。
+- **多语言 embedding 模型**：~~建议作为可选配置项在下一版本提供~~ 已在 M7 落地——默认切换为 distiluse-base-multilingual-cased-v2（512 维，WordPiece 词表与现有分词器兼容；多语言 MiniLM 因 SentencePiece 词表被排除），`embeddingModel: 'english'` 保留纯英文小模型选项，旧向量按维度自动迁移重算。
 
 ## 4. 安装脚本与发布卫生：发现与修复
 

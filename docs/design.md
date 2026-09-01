@@ -34,7 +34,7 @@ ETMS 的核心**算法**用 TS 重新实现（都是轻量逻辑）；重依赖�
 
 | memoplus (Python) | memoplus4dsh (TS) | 理由 |
 |---|---|---|
-| sentence-transformers MiniLM（torch） | **onnxruntime-node + all-MiniLM-L6-v2 ONNX** | onnxruntime-node 有 win/linux/mac × x64/arm64 预编译二进制；模型首次使用时下载到插件数据目录 |
+| sentence-transformers MiniLM（torch） | **onnxruntime-node + distiluse-base-multilingual-cased-v2 ONNX**（默认多语言；可选 all-MiniLM-L6-v2 纯英文小模型） | onnxruntime-node 有 win/linux/mac × x64/arm64 预编译二进制；模型首次使用时下载到插件数据目录。多语言 MiniLM 词表是 SentencePiece（本项目的极简 WordPiece 分词器无法服务），distiluse 是同档位唯一保留 mBERT WordPiece vocab.txt 的多语言模型。注意其 ONNX 导出只含编码器本体（768 维），ST 的 2_Dense 投影头（768→512 + Tanh，1.5MB safetensors）由插件本地解析并应用——跳过投影头会导致向量语义混乱（M7 实测） |
 | FAISS 索引 | **暴力余弦（Float32Array）** | 个人 agent 记忆规模（数千~数万事件 × 384 维）暴力检索是毫秒级；零原生依赖，任何平台可跑。规模真上去了再换 hnsw |
 | SQLite 事件存储 | **JSONL 追加 + 内存索引 + 周期性快照** | 跨平台、可读可 diff、无需编译；与 dsh 的 session 日志风格一致 |
 | deepseek-v4-flash 抽取 | **复用用户已配置的 LLM（`ctx.llm.stream`）** | 不引入任何新的 key/端点配置；用户用什么模型，抽取就用什么 |

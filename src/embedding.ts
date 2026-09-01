@@ -1,6 +1,13 @@
 /**
- * Local sentence embeddings: onnxruntime-node + all-MiniLM-L6-v2 (quantized
- * ONNX), downloaded lazily on first use into `<dataDir>/models/`.
+ * Local sentence embeddings: onnxruntime-node + a quantized ONNX model,
+ * downloaded lazily on first use into `<dataDir>/models/`.
+ *
+ * Default model: distiluse-base-multilingual-cased-v2 (512-dim, mBERT-cased
+ * WordPiece, ~135MB int8) — chosen because the stronger multilingual MiniLM
+ * uses a SentencePiece tokenizer this minimal stack cannot serve, while
+ * distiluse keeps the same WordPiece vocab.txt + quantized ONNX naming as
+ * all-MiniLM-L6-v2. The English-only all-MiniLM-L6-v2 (384-dim, ~23MB)
+ * remains selectable for resource-constrained installs.
  *
  * Every failure — missing optional dependency, download failure, load or
  * inference error — degrades to an unavailable embedder; retrieval then runs
@@ -16,11 +23,49 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-/** Embedding dimension of all-MiniLM-L6-v2. */
+/** Embedding dimension of all-MiniLM-L6-v2 (the English preset). */
 export const EMBEDDING_DIM = 384
 
 /** Max tokens per text, including [CLS]/[SEP]. */
 export const MAX_SEQ_LEN = 128
+
+/** A downloadable embedding model preset. */
+export interface EmbeddingModelSpec {
+  /** HuggingFace repo id. */
+  repo: string
+  /** Final embedding dimension. */
+  dim: number
+  /**
+   * Transformer hidden size when it differs from the final dim: the ONNX
+   * export carries only the encoder body, and the ST Dense head is applied
+   * locally after pooling (see `projectionFile`).
+   */
+  hiddenDim?: number
+  /**
+   * Sentence-transformers Dense head (safetensors with linear.weight /
+   * linear.bias, F32, Tanh) applied after mean-pooling.
+   */
+  projectionFile?: string
+  /** Download cap per file (the multilingual int8 build is ~135MB). */
+  maxFileBytes: number
+}
+
+export const EMBEDDING_MODELS = {
+  multilingual: {
+    repo: 'sentence-transformers/distiluse-base-multilingual-cased-v2',
+    dim: 512,
+    hiddenDim: 768,
+    projectionFile: '2_Dense/model.safetensors',
+    maxFileBytes: 256 * 1024 * 1024,
+  },
+  english: {
+    repo: 'sentence-transformers/all-MiniLM-L6-v2',
+    dim: EMBEDDING_DIM,
+    maxFileBytes: 64 * 1024 * 1024,
+  },
+} as const satisfies Record<string, EmbeddingModelSpec>
+
+export type EmbeddingModelName = keyof typeof EMBEDDING_MODELS
 
 /**
  * Async batch embedder. `embed` returns null whenever the backend is
@@ -28,6 +73,11 @@ export const MAX_SEQ_LEN = 128
  */
 export interface TextEmbedder {
   embed(texts: string[]): Promise<Float32Array[] | null>
+  /**
+   * Vector dimension when known; retrieval uses it to detect stale vectors
+   * persisted by a different model and recompute them.
+   */
+  readonly dim?: number
 }
 
 /** The always-unavailable embedder (keyword-only retrieval). */
@@ -35,12 +85,10 @@ export const NULL_EMBEDDER: TextEmbedder = {
   embed: () => Promise.resolve(null),
 }
 
-const MODEL_REPO = 'sentence-transformers/all-MiniLM-L6-v2'
-
 /**
  * Quantized model candidates by platform, best first; the unoptimized
- * `onnx/model.onnx` is the universal fallback (the repo has no single
- * `model_quantized.onnx`).
+ * `onnx/model.onnx` is the universal fallback. Both presets' repos use this
+ * same naming.
  */
 function modelCandidates(arch: string = process.arch): string[] {
   const quantized = arch === 'arm64' ? 'onnx/model_qint8_arm64.onnx' : 'onnx/model_quint8_avx2.onnx'
@@ -57,9 +105,11 @@ export interface OnnxEmbedderOptions {
   modelsDir: string
   /** HuggingFace base URL or mirror (default https://huggingface.co). */
   hfBaseUrl?: string
+  /** Model preset (default multilingual). */
+  model?: EmbeddingModelSpec
   /** fetch override (tests). */
   fetchImpl?: typeof fetch
-  /** Maximum bytes accepted per downloaded file. */
+  /** Maximum bytes accepted per downloaded file (defaults to the preset's cap). */
   maxFileBytes?: number
 }
 
@@ -158,6 +208,28 @@ interface EmbedderInit {
   session: OrtSession
   tokenizer: WordPieceTokenizer
   ort: OrtModule
+  /** ST Dense head (W [outDim×inDim] row-major, bias, tanh) when the preset has one. */
+  projection?: { weight: Float32Array; bias: Float32Array; inDim: number; outDim: number }
+}
+
+/** Parse the F32 tensors of a safetensors file (the only dtype ST emits here). */
+export function parseSafetensors(buffer: Uint8Array): Map<string, { shape: number[]; data: Float32Array }> {
+  const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+  const headerLen = Number(view.getBigUint64(0, true))
+  const header = JSON.parse(new TextDecoder().decode(buffer.subarray(8, 8 + headerLen))) as Record<string,
+    { dtype: string; shape: number[]; data_offsets: [number, number] }>
+  const tensors = new Map<string, { shape: number[]; data: Float32Array }>()
+  const base = 8 + headerLen
+  for (const [name, meta] of Object.entries(header)) {
+    if (name === '__metadata__') continue
+    if (meta.dtype !== 'F32') throw new Error(`safetensors dtype ${meta.dtype} not supported`)
+    const [start, end] = meta.data_offsets
+    const bytes = buffer.subarray(base + start, base + end)
+    const copy = new Uint8Array(bytes.byteLength)
+    copy.set(bytes)
+    tensors.set(name, { shape: meta.shape, data: new Float32Array(copy.buffer) })
+  }
+  return tensors
 }
 
 /**
@@ -167,6 +239,7 @@ interface EmbedderInit {
 export class OnnxEmbedder implements TextEmbedder {
   private readonly modelsDir: string
   private readonly baseUrl: string
+  private readonly spec: EmbeddingModelSpec
   private readonly fetchImpl: typeof fetch
   private readonly maxFileBytes: number
   private initPromise: Promise<EmbedderInit | null> | undefined
@@ -174,8 +247,13 @@ export class OnnxEmbedder implements TextEmbedder {
   constructor(options: OnnxEmbedderOptions) {
     this.modelsDir = options.modelsDir
     this.baseUrl = (options.hfBaseUrl ?? 'https://huggingface.co').replace(/\/$/, '')
+    this.spec = options.model ?? EMBEDDING_MODELS.multilingual
     this.fetchImpl = options.fetchImpl ?? fetch
-    this.maxFileBytes = options.maxFileBytes ?? 64 * 1024 * 1024
+    this.maxFileBytes = options.maxFileBytes ?? this.spec.maxFileBytes
+  }
+
+  get dim(): number {
+    return this.spec.dim
   }
 
   async embed(texts: string[]): Promise<Float32Array[] | null> {
@@ -197,12 +275,28 @@ export class OnnxEmbedder implements TextEmbedder {
       const outputs = await session.run(feeds)
       const hidden = outputs['last_hidden_state']
       const sentence = outputs['sentence_embedding']
+      const dim = this.spec.dim
       if (sentence !== undefined) {
         // Some exports embed pooling in the graph; still L2-normalize.
-        return texts.map((_, i) => l2Normalize(Float32Array.from(sentence.data.slice(i * EMBEDDING_DIM, (i + 1) * EMBEDDING_DIM) as Float32Array)))
+        return texts.map((_, i) => l2Normalize(Float32Array.from(sentence.data.slice(i * dim, (i + 1) * dim) as Float32Array)))
       }
       if (hidden === undefined) return null
-      return texts.map((_, i) => meanPool(hidden.data as Float32Array, i, batch[i]!.attentionMask))
+      // The ONNX export is the encoder body only: pool at the hidden size,
+      // then apply the ST Dense head (linear + tanh) when the preset has one.
+      const hiddenDim = this.spec.hiddenDim ?? dim
+      const projection = init.projection
+      return texts.map((_, i) => {
+        const pooled = meanPool(hidden.data as Float32Array, i, batch[i]!.attentionMask, hiddenDim)
+        if (projection === undefined) return pooled
+        const out = new Float32Array(projection.outDim)
+        for (let o = 0; o < projection.outDim; o++) {
+          let sum = projection.bias[o]!
+          const row = o * projection.inDim
+          for (let k = 0; k < projection.inDim; k++) sum += projection.weight[row + k]! * pooled[k]!
+          out[o] = Math.tanh(sum)
+        }
+        return l2Normalize(out)
+      })
     } catch {
       return null
     }
@@ -213,10 +307,15 @@ export class OnnxEmbedder implements TextEmbedder {
     return this.initPromise
   }
 
+  /** Per-model cache dir: presets must never share downloaded files. */
+  private modelDir(): string {
+    return join(this.modelsDir, this.spec.repo.split('/').pop()!)
+  }
+
   private async initInner(): Promise<EmbedderInit | null> {
     const ort = (await import('onnxruntime-node').catch(() => null)) as OrtModule | null
     if (ort === null) return null
-    await mkdir(this.modelsDir, { recursive: true })
+    await mkdir(this.modelDir(), { recursive: true })
     const vocabPath = await this.ensureFile(STATIC_FILES.vocab)
     const configPath = await this.ensureFile(STATIC_FILES.tokenizerConfig)
     const config = JSON.parse(await readFile(configPath, 'utf8')) as { do_lower_case?: boolean }
@@ -233,14 +332,24 @@ export class OnnxEmbedder implements TextEmbedder {
       }
     }
     if (session === null) return null
-    return { session, tokenizer, ort }
+    let projection: EmbedderInit['projection']
+    if (this.spec.projectionFile !== undefined) {
+      const tensors = parseSafetensors(new Uint8Array(await readFile(await this.ensureFile(this.spec.projectionFile))))
+      const weight = tensors.get('linear.weight')
+      const bias = tensors.get('linear.bias')
+      if (weight === undefined || bias === undefined || weight.shape.length !== 2) {
+        throw new Error('projection file lacks linear.weight/linear.bias')
+      }
+      projection = { weight: weight.data, bias: bias.data, outDim: weight.shape[0]!, inDim: weight.shape[1]! }
+    }
+    return { session, tokenizer, ort, projection }
   }
 
   /** Download one model file when absent (tmp + rename; bounded size). */
   private async ensureFile(remoteName: string): Promise<string> {
-    const local = join(this.modelsDir, remoteName.split('/').pop()!)
+    const local = join(this.modelDir(), remoteName.split('/').pop()!)
     if (existsSync(local)) return local
-    const url = `${this.baseUrl}/${MODEL_REPO}/resolve/main/${remoteName}`
+    const url = `${this.baseUrl}/${this.spec.repo}/resolve/main/${remoteName}`
     const response = await this.fetchImpl(url)
     if (!response.ok || response.body === null) {
       throw new Error(`model download failed: ${url} -> HTTP ${response.status}`)
@@ -249,7 +358,7 @@ export class OnnxEmbedder implements TextEmbedder {
     if (bytes.byteLength === 0 || bytes.byteLength > this.maxFileBytes) {
       throw new Error(`model download size out of bounds: ${url} (${bytes.byteLength} bytes)`)
     }
-    const tmp = join(this.modelsDir, `.dl-${createHash('sha1').update(url).digest('hex').slice(0, 12)}.tmp`)
+    const tmp = join(this.modelDir(), `.dl-${createHash('sha1').update(url).digest('hex').slice(0, 12)}.tmp`)
     await writeFile(tmp, bytes)
     await rename(tmp, local)
     return local
@@ -257,18 +366,18 @@ export class OnnxEmbedder implements TextEmbedder {
 }
 
 /** Mean-pool one batch row's last_hidden_state over its attention mask, L2-normalized. */
-export function meanPool(hidden: Float32Array, row: number, attentionMask: bigint[]): Float32Array {
-  const out = new Float32Array(EMBEDDING_DIM)
+export function meanPool(hidden: Float32Array, row: number, attentionMask: bigint[], dim: number = EMBEDDING_DIM): Float32Array {
+  const out = new Float32Array(dim)
   let count = 0
-  const rowOffset = row * MAX_SEQ_LEN * EMBEDDING_DIM
+  const rowOffset = row * MAX_SEQ_LEN * dim
   for (let t = 0; t < MAX_SEQ_LEN; t++) {
     if (attentionMask[t] === 0n) continue
     count++
-    const offset = rowOffset + t * EMBEDDING_DIM
-    for (let d = 0; d < EMBEDDING_DIM; d++) out[d]! += hidden[offset + d]!
+    const offset = rowOffset + t * dim
+    for (let d = 0; d < dim; d++) out[d]! += hidden[offset + d]!
   }
   if (count === 0) return out
-  for (let d = 0; d < EMBEDDING_DIM; d++) out[d]! /= count
+  for (let d = 0; d < dim; d++) out[d]! /= count
   return l2Normalize(out)
 }
 

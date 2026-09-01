@@ -279,7 +279,7 @@ export class Retriever {
   private eventVector(event: MemoryEvent): Float32Array | undefined {
     const cached = this.vectorCache.get(event.id)
     if (cached !== undefined) return cached
-    if (event.embedding !== undefined) {
+    if (event.embedding !== undefined && !this.isStale(event.embedding)) {
       const vec = Float32Array.from(event.embedding)
       this.vectorCache.set(event.id, vec)
       return vec
@@ -287,9 +287,16 @@ export class Retriever {
     return undefined
   }
 
+  /** A persisted vector from a different model (dimension mismatch) is stale. */
+  private isStale(embedding: number[]): boolean {
+    return this.embedder.dim !== undefined && embedding.length !== this.embedder.dim
+  }
+
   /** Compute and persist embeddings for events that lack one. */
   private async ensureEmbeddings(events: MemoryEvent[]): Promise<void> {
-    const missing = events.filter(ev => this.vectorCache.get(ev.id) === undefined && ev.embedding === undefined)
+    const missing = events.filter(ev =>
+      this.vectorCache.get(ev.id) === undefined
+      && (ev.embedding === undefined || this.isStale(ev.embedding)))
     if (missing.length === 0) return
     const vectors = await this.embedder.embed(missing.map(ev => this.eventText(ev)))
     if (vectors === null) return

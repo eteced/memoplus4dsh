@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { l2Normalize, meanPool, NULL_EMBEDDER, WordPieceTokenizer } from '../src/embedding.js'
+import { EMBEDDING_MODELS, l2Normalize, meanPool, NULL_EMBEDDER, OnnxEmbedder, parseSafetensors, WordPieceTokenizer } from '../src/embedding.js'
 
 // Tiny WordPiece vocab sufficient for the test strings.
 const VOCAB = [
@@ -59,5 +59,56 @@ describe('pooling helpers', () => {
 describe('NULL_EMBEDDER', () => {
   it('is always unavailable', async () => {
     expect(await NULL_EMBEDDER.embed(['anything'])).toBeNull()
+  })
+})
+
+describe('model presets', () => {
+  it('defaults to the multilingual preset (512-dim distiluse with a 768->512 projection)', () => {
+    const embedder = new OnnxEmbedder({ modelsDir: '/tmp/unused' })
+    expect(embedder.dim).toBe(512)
+    expect(EMBEDDING_MODELS.multilingual.repo).toContain('distiluse-base-multilingual')
+    expect(EMBEDDING_MODELS.multilingual.hiddenDim).toBe(768)
+    expect(EMBEDDING_MODELS.multilingual.projectionFile).toBe('2_Dense/model.safetensors')
+  })
+
+  it('keeps the English preset selectable (384-dim MiniLM)', () => {
+    const embedder = new OnnxEmbedder({ modelsDir: '/tmp/unused', model: EMBEDDING_MODELS.english })
+    expect(embedder.dim).toBe(384)
+    expect(EMBEDDING_MODELS.english.repo).toContain('all-MiniLM-L6-v2')
+  })
+
+  it('downloads from the preset repo into a per-model directory', async () => {
+    // No onnxruntime needed for this assertion: the fetch mock 404s, so init
+    // fails after the first download attempt — the URL is what we check.
+    const urls: string[] = []
+    const embedder = new OnnxEmbedder({
+      modelsDir: '/tmp/unused',
+      fetchImpl: (url) => {
+        urls.push(String(url))
+        return Promise.resolve(new Response(null, { status: 404 }))
+      },
+    })
+    expect(await embedder.embed(['x'])).toBeNull()
+    expect(urls[0]).toContain('/sentence-transformers/distiluse-base-multilingual-cased-v2/')
+  })
+})
+
+describe('parseSafetensors', () => {
+  it('parses F32 tensors with shapes and data', () => {
+    const header = JSON.stringify({
+      'linear.weight': { dtype: 'F32', shape: [1, 2], data_offsets: [0, 8] },
+      __metadata__: { format: 'pt' },
+    })
+    const headerBytes = new TextEncoder().encode(header)
+    const buffer = new Uint8Array(8 + headerBytes.length + 8)
+    new DataView(buffer.buffer).setBigUint64(0, BigInt(headerBytes.length), true)
+    buffer.set(headerBytes, 8)
+    new DataView(buffer.buffer).setFloat32(8 + headerBytes.length, 1.5, true)
+    new DataView(buffer.buffer).setFloat32(8 + headerBytes.length + 4, -2, true)
+    const tensors = parseSafetensors(buffer)
+    const weight = tensors.get('linear.weight')!
+    expect(weight.shape).toEqual([1, 2])
+    expect([...weight.data]).toEqual([1.5, -2])
+    expect(tensors.has('__metadata__')).toBe(false)
   })
 })

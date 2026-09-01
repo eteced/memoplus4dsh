@@ -29,7 +29,8 @@
 
 - **抽取消耗 API 额度**：每个完成的 turn 触发一次抽取调用（另有检索时的查询扩展，按 query 磁盘缓存）。在意成本可 `extraction: 'off'` 或 `queryExpansion: false`。
 - **端点 flaky 时的行为**：抽取调用 120s 超时 + 有界重试（5s/30s backoff）后跳过并记录到 `<dataDir>/extraction-debug.jsonl`；被跳过的 turn 不会补抽（重启后也不会——已知限制）。debug 日志只增不轮转，长期运行可自行清理。
-- **注入延迟**：pre-step 检索含一次（可缓存的）扩展 LLM 调用（1024 token / 30s 上限）和本地 embedding 推理；首次检索触发 ~23MB 模型下载。
+- **注入延迟**：pre-step 检索含一次（可缓存的）扩展 LLM 调用（1024 token / 30s 上限）和本地 embedding 推理；首次检索触发 ~135MB 多语言模型下载（`embeddingModel: 'english'` 可降到 ~23MB 纯英文模型）。
+- **embedding 维度迁移**：切换 `embeddingModel` 预设后，旧模型持久化的向量会被自动识别（维度不匹配）并在下次检索时按需重算，无需手动清数据。
 - **单实例假设**：同一 `dataDir` 只应由一个 dsh 实例使用。两个实例同时跑同一数据目录时，后做快照的一方会覆盖另一方的 journal 增量（M6 审查 M4）。插件热重载已排空队列，进程内场景安全。
 - **embedding 初始化失败被缓存到进程重启**：首次检索时若模型下载失败（网络抖动），本次进程生命周期内一直走关键词降级（M6 审查 minor）。重启 dsh 即恢复重试。
-- **中文 dense 信号弱**：默认 all-MiniLM-L6-v2 是英文 uncased 模型，CJK 覆盖有限（已做逐字切分缓解）；中文检索主要由 CJK bigram 关键词通道兜底，效果可用但 dense 通道贡献小。对中文占比高的用户，后续版本考虑换 multilingual 模型。
+- **大模型 API 不可达 HuggingFace 时**：用 `hfBaseUrl` 配置镜像（如 `https://hf-mirror.com`）。

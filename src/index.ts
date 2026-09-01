@@ -13,7 +13,7 @@ import { MemoryStore } from './store.js'
 import { ExtractionPipeline, ExtractionQueue } from './extraction.js'
 import type { ExtractionJob } from './extraction.js'
 import { registerBridges } from './bridges.js'
-import { OnnxEmbedder, NULL_EMBEDDER } from './embedding.js'
+import { OnnxEmbedder, NULL_EMBEDDER, EMBEDDING_MODELS } from './embedding.js'
 import type { TextEmbedder } from './embedding.js'
 import { Retriever, createQueryExpander } from './retrieval.js'
 import { createPreStepHandler } from './inject.js'
@@ -46,6 +46,13 @@ export interface Config {
   tools?: boolean
   /** Local ONNX embeddings; default true. Failure degrades to keyword-only retrieval. */
   embedding?: boolean
+  /**
+   * Embedding model preset: 'multilingual' (default, distiluse-base-multilingual-cased-v2,
+   * 512-dim, ~135MB download, 50+ languages incl. Chinese) or 'english'
+   * (all-MiniLM-L6-v2, 384-dim, ~23MB). Switching presets recomputes stored
+   * vectors lazily (dimension mismatch is detected and re-embedded).
+   */
+  embeddingModel?: 'multilingual' | 'english'
   /** HuggingFace base URL or mirror for the embedding model download. */
   hfBaseUrl?: string
   /** LLM query expansion during retrieval; default true. */
@@ -171,7 +178,11 @@ export function apply(ctx: Context, config: Config) {
 
     const embedder: TextEmbedder = config.embedding === false
       ? NULL_EMBEDDER
-      : new OnnxEmbedder({ modelsDir: join(dataDir, 'models'), hfBaseUrl: config.hfBaseUrl })
+      : new OnnxEmbedder({
+        modelsDir: join(dataDir, 'models'),
+        hfBaseUrl: config.hfBaseUrl,
+        model: EMBEDDING_MODELS[config.embeddingModel ?? 'multilingual'],
+      })
 
     const retriever = new Retriever({
       store,
