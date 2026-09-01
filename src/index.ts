@@ -159,6 +159,13 @@ async function callPluginLlm(
     model: resolved.model,
     messages: [message],
     maxTokens,
+    // Extraction/expansion are structured tasks: thinking is pure waste here
+    // and, worse, deepseek-v4-flash spirals into unbounded reasoning on dense
+    // extraction inputs, exhausting any token budget with EMPTY visible
+    // output (M9 F-1; verified 8k→32k budgets). dsh maps effort 'off' to
+    // wire `thinking: 'disabled'` (llm-deepseek serialize.ts); the user's
+    // main conversation is unaffected (per-call option).
+    reasoningEffort: 'off' as never,
     // Bound the call: an endpoint that stalls without erroring would
     // otherwise stall the serial extraction queue forever. 120s pairs with
     // the 8192-token budget: reasoning models either finish well within it
