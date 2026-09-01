@@ -12,6 +12,7 @@ import {
   extractSpeakers,
   formatKnownEntities,
   parseExtractionOutput,
+  segmentTurnText,
   resolveEventTime,
 } from '../src/extraction.js'
 import type { ExtractionJob } from '../src/extraction.js'
@@ -304,6 +305,42 @@ describe('ExtractionPipeline', () => {
     'PERSON|User|_|painted|landscape|last year|User painted a landscape last year.|_',
     'PERSON|User|_|is|hobbyist painter|_|User is a hobbyist painter.|_',
   ].join('\n')
+
+  it('segments large turn text and merges per-segment rows (M9 F-1)', async () => {
+    const store = new MemoryStore({ dir })
+    // Two segments worth of text: many long lines crossing the 8k boundary.
+    const lineA = `User: ${'fact-a '.repeat(900)}`
+    const lineB = `Assistant: ${'fact-b '.repeat(900)}`
+    const turnText = Array.from({ length: 6 }, (_, i) => (i % 2 === 0 ? lineA : lineB)).join('\n')
+    expect(turnText.length).toBeGreaterThan(8000)
+    const prompts: string[] = []
+    const pipeline = new ExtractionPipeline({
+      store,
+      callLlm: async (prompt) => {
+        prompts.push(prompt)
+        return LLM_OUTPUT
+      },
+    })
+    const result = await pipeline.extractTurn(makeJob({ turnText }))
+    // More than one LLM call was made; every prompt is within the segment size.
+    expect(prompts.length).toBeGreaterThan(1)
+    for (const p of prompts) expect(p.length).toBeLessThan(8000 + 4000 + 500)
+    // Rows from all segments merged (dedup is the store's entity resolution).
+    expect(result.eventsAdded).toBe(prompts.length * 2)
+  })
+
+  it('keeps segment boundaries on message lines, hard-slicing only oversized lines', async () => {
+    const many = Array.from({ length: 100 }, (_, i) => `User: line ${i} ${'x'.repeat(90)}`).join('\n')
+    const segments = segmentTurnText(many)
+    expect(segments.length).toBeGreaterThan(1)
+    for (const s of segments) expect(s.length).toBeLessThanOrEqual(8000)
+    // No message line was split across segments.
+    expect(segments.join('\n')).toBe(many)
+    const huge = `User: ${'y'.repeat(20000)}`
+    const sliced = segmentTurnText(huge)
+    expect(sliced.length).toBeGreaterThan(1)
+    expect(sliced.join('')).toBe(huge)
+  })
 
   it('extracts rows into the store with dual time anchors and source refs', async () => {
     const store = new MemoryStore({ dir })

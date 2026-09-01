@@ -85,7 +85,7 @@ class MemoplusDshAgent:
     """The benchmarked combination: dsh + memoplus4dsh with default config."""
 
     def __init__(self, repo_root, context_tag, node_bin="node",
-                 batch_chars=16000, dsh_home=None):
+                 batch_chars=8000, dsh_home=None):
         self.repo_root = repo_root
         self.context_tag = context_tag
         self.batch_chars = batch_chars

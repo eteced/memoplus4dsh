@@ -201,6 +201,14 @@ export const MIN_FACT_LENGTH = 12
  */
 export const MAX_TURN_TEXT_CHARS = 20_000
 
+/**
+ * Per-call extraction segment size. deepseek-v4-flash reasons unboundedly
+ * on dense extraction inputs ≥ ~17k chars and exhausts ANY output budget
+ * with empty visible content (M9 F-1, verified at 8k/32k budgets); ~9k
+ * works. Segmenting keeps every turn extractable regardless of length.
+ */
+export const EXTRACTION_SEGMENT_CHARS = 8_000
+
 /** Truncate turn text to {@link MAX_TURN_TEXT_CHARS}, keeping head and tail. */
 export function capTurnText(turnText: string): string {
   if (turnText.length <= MAX_TURN_TEXT_CHARS) return turnText
@@ -208,6 +216,37 @@ export function capTurnText(turnText: string): string {
   const head = Math.floor((MAX_TURN_TEXT_CHARS - marker.length) * 0.6)
   const tail = MAX_TURN_TEXT_CHARS - marker.length - head
   return turnText.slice(0, head) + marker + turnText.slice(turnText.length - tail)
+}
+
+/**
+ * Split turn text into ≤{@link EXTRACTION_SEGMENT_CHARS} segments on line
+ * boundaries (turn text is newline-joined `Speaker: ...` messages). A single
+ * line longer than the limit is hard-sliced.
+ */
+export function segmentTurnText(turnText: string): string[] {
+  if (turnText.length <= EXTRACTION_SEGMENT_CHARS) return [turnText]
+  const segments: string[] = []
+  let current = ''
+  for (const line of turnText.split('\n')) {
+    if (line.length > EXTRACTION_SEGMENT_CHARS) {
+      if (current.length > 0) {
+        segments.push(current)
+        current = ''
+      }
+      for (let i = 0; i < line.length; i += EXTRACTION_SEGMENT_CHARS) {
+        segments.push(line.slice(i, i + EXTRACTION_SEGMENT_CHARS))
+      }
+      continue
+    }
+    if (current.length > 0 && current.length + 1 + line.length > EXTRACTION_SEGMENT_CHARS) {
+      segments.push(current)
+      current = line
+    } else {
+      current = current.length > 0 ? current + '\n' + line : line
+    }
+  }
+  if (current.length > 0) segments.push(current)
+  return segments
 }
 
 /**
@@ -266,16 +305,23 @@ export class ExtractionPipeline {
   /** Extract one turn into the store. Throws when the LLM yields no usable text. */
   async extractTurn(job: ExtractionJob): Promise<ExtractionResult> {
     const turnText = capTurnText(job.turnText)
-    const known = formatKnownEntities(this.store.listEntities(), turnText)
-    // Replacement-function form: turn text may contain $-patterns.
-    const prompt = EXTRACTION_PROMPT_TURN
-      .replace('{turn_text}', () => turnText)
-      .replace('{known_entities}', () => known)
-    const raw = (await this.callLlm(prompt, job)).trim()
-    if (raw.length === 0) throw new Error('extraction produced empty content')
-    const parsed = parseExtractionOutput(raw)
-    coerceSpeakerTypes(parsed, extractSpeakers(turnText))
-    const rows = parsed.events.filter(row => row.fact.length >= MIN_FACT_LENGTH)
+    const speakers = extractSpeakers(turnText)
+    // Large turns are segmented (M9 F-1): reasoning models spiral into
+    // empty output on dense inputs; each segment is extracted independently
+    // and the rows are merged.
+    const rows: ExtractedRow[] = []
+    for (const segment of segmentTurnText(turnText)) {
+      const known = formatKnownEntities(this.store.listEntities(), segment)
+      // Replacement-function form: turn text may contain $-patterns.
+      const prompt = EXTRACTION_PROMPT_TURN
+        .replace('{turn_text}', () => segment)
+        .replace('{known_entities}', () => known)
+      const raw = (await this.callLlm(prompt, job)).trim()
+      if (raw.length === 0) throw new Error('extraction produced empty content')
+      const parsed = parseExtractionOutput(raw)
+      coerceSpeakerTypes(parsed, speakers)
+      rows.push(...parsed.events.filter(row => row.fact.length >= MIN_FACT_LENGTH))
+    }
 
     let entitiesCreated = 0
     let entitiesReused = 0
