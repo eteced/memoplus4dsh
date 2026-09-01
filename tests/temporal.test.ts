@@ -168,4 +168,17 @@ describe('temporalBonus mention weight', () => {
     const oldMention = eventAt(null, '2025-01-01T00:00:00.000Z')
     expect(temporalBonus(noEventTime, op, BASE)).toBeGreaterThan(temporalBonus(oldMention, op, BASE))
   })
+
+  it('gives DENSE queries a small mention-recency term (m8 P1-A)', () => {
+    const op = resolveTemporalQuery('anything about gardening?', BASE)
+    expect(op.mode).toBe('DENSE')
+    const fresh = eventAt(null, '2026-08-30T00:00:00.000Z')
+    const stale = eventAt(null, '2025-06-01T00:00:00.000Z')
+    const freshBonus = temporalBonus(fresh, op, BASE)
+    const staleBonus = temporalBonus(stale, op, BASE)
+    expect(freshBonus).toBeGreaterThan(staleBonus)
+    // Capped well below the entity bonus (0.5): recency breaks ties, not ranks.
+    expect(freshBonus).toBeLessThanOrEqual(0.3)
+    expect(staleBonus).toBeGreaterThan(0)
+  })
 })

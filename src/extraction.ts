@@ -11,6 +11,7 @@
 import type { Entity, EntityType, MemoryStore, NewEvent, TimePrecision } from './store.js'
 import { ENTITY_TYPES } from './store.js'
 import { extractTimeExpr, resolveTimeExpr } from './temporal.js'
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 
 /**
  * Single-turn extraction prompt. Ported verbatim-in-spirit from memoplus
@@ -389,5 +390,69 @@ export class ExtractionQueue {
     }
     this.skippedCount++
     this.onSkip?.(job, lastError)
+  }
+}
+
+/**
+ * Durable pending-job log (m8 P2): one JSONL line per enqueue and one
+ * settle tombstone per terminal outcome (success or skip). On restart,
+ * jobs without a tombstone were interrupted mid-flight and are requeued —
+ * a crashed process no longer silently loses a turn's memories.
+ *
+ * The settle tombstone is written synchronously right after the job's
+ * terminal callback; the crash window between the store writes inside
+ * `extractTurn` and the tombstone is tiny, and a duplicate re-extraction
+ * only costs one LLM call plus duplicate rows, never corruption.
+ *
+ * All I/O is best-effort: persistence must never break extraction.
+ */
+export class PendingJobLog {
+  constructor(private readonly filePath: string) {}
+
+  /** Jobs enqueued but never settled; truncates the file for a fresh start. */
+  loadPending(): ExtractionJob[] {
+    if (!existsSync(this.filePath)) return []
+    const pending = new Map<string, ExtractionJob>()
+    try {
+      for (const line of readFileSync(this.filePath, 'utf8').split('\n')) {
+        if (line.trim().length === 0) continue
+        try {
+          const entry = JSON.parse(line) as
+            | { kind: 'pending'; job: ExtractionJob }
+            | { kind: 'settled'; sessionId: string; turn: number }
+          const key = entry.kind === 'pending' ? `${entry.job.sessionId}:${entry.job.turn}` : `${entry.sessionId}:${entry.turn}`
+          if (entry.kind === 'pending') pending.set(key, entry.job)
+          else pending.delete(key)
+        } catch {
+          // Skip corrupt lines; a half-written tail line is expected after a crash.
+        }
+      }
+    } catch {
+      return []
+    }
+    try {
+      writeFileSync(this.filePath, '', 'utf8')
+    } catch {
+      // Truncation failure only means the next restart re-reads old lines.
+    }
+    return [...pending.values()]
+  }
+
+  /** Append one enqueue record. */
+  recordEnqueue(job: ExtractionJob): void {
+    this.append({ kind: 'pending', job })
+  }
+
+  /** Append one settle tombstone (success or skip — both are terminal). */
+  recordSettled(sessionId: string, turn: number): void {
+    this.append({ kind: 'settled', sessionId, turn })
+  }
+
+  private append(entry: Record<string, unknown>): void {
+    try {
+      appendFileSync(this.filePath, JSON.stringify(entry) + '\n', 'utf8')
+    } catch {
+      // Losing the log degrades crash recovery, never extraction itself.
+    }
   }
 }

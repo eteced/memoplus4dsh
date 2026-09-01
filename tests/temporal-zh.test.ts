@@ -66,4 +66,12 @@ describe('resolveTemporalQuery — Chinese constructs', () => {
       .toEqual({ mode: 'WITHIN_WINDOW', windowMs: 86_400_000 })
     expect(resolveTemporalQuery('随便聊聊', BASE)).toEqual({ mode: 'DENSE' })
   })
+
+  it('detects 最新/最近一次/上次 as LAST_K, not the 最近 window (m8 P1-B)', () => {
+    expect(resolveTemporalQuery('任务的最新进展是什么？', BASE)).toEqual({ mode: 'LAST_K', k: 1 })
+    expect(resolveTemporalQuery('最近一次做到哪了？', BASE)).toEqual({ mode: 'LAST_K', k: 1 })
+    expect(resolveTemporalQuery('我上次说的方案是哪个？', BASE)).toEqual({ mode: 'LAST_K', k: 1 })
+    // 最近 alone keeps the 180-day window.
+    expect(resolveTemporalQuery('我最近去过哪里？', BASE).mode).toBe('WITHIN_WINDOW')
+  })
 })

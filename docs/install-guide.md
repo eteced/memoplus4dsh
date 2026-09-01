@@ -9,7 +9,7 @@ git clone <repo-url> memoplus4dsh
 cd memoplus4dsh
 npm install        # onnxruntime-node 是可选依赖，装不上不阻塞（检索退化为纯关键词）
 npm run build      # 产出 lib/
-npm test           # 可选：100 个单测应全绿
+npm test           # 可选：119 个单测应全绿
 ```
 
 ## 2. 装入 dsh profile

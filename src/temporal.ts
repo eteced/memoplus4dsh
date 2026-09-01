@@ -320,6 +320,9 @@ export function resolveTemporalQuery(query: string, anchor: Date): TemporalOp {
   // Minimal Chinese query-side constructs (universal time words).
   if (q.includes('去年')) return { mode: 'IN_YEAR', year: anchor.getUTCFullYear() - 1 }
   if (q.includes('今年')) return { mode: 'IN_YEAR', year: anchor.getUTCFullYear() }
+  // "最新/最近一次/上次" must be checked before 最近 (最近一次 contains 最近);
+  // they ask for the newest state, not a window (m8 P1-B).
+  if (q.includes('最新') || q.includes('最近一次') || q.includes('上次')) return { mode: 'LAST_K', k: 1 }
   if (q.includes('最近') || q.includes('近期')) {
     return { mode: 'WITHIN_WINDOW', windowMs: 180 * DAY_MS }
   }
@@ -422,14 +425,22 @@ export function temporalMatch(event: MemoryEvent, op: TemporalOp, anchor: Date):
  * Ranking bonus for one event under a temporal operator (ported weights).
  * Mention-anchor matches count at a lower weight so pure mentions never
  * outrank events that actually occurred in the period.
+ *
+ * DENSE (no temporal intent) still earns a small mention-recency term
+ * (m8 P1-A): progress-style memories evolve, and the newest state should
+ * win ties against stale ones. Capped at 0.3 — below the entity bonus
+ * (0.5) and far below the keyword channel (2.0), so old facts are never
+ * buried, just consistently de-preferred on near-ties.
  */
 export function temporalBonus(event: MemoryEvent, op: TemporalOp, anchor: Date): number {
-  if (op.mode === 'DENSE') return 0
   const { event: eventTime, mention: mentionTime } = eventAnchors(event)
   const daysFrom = (t: Date | undefined): number | undefined =>
     t === undefined ? undefined : Math.abs(t.getTime() - anchor.getTime()) / DAY_MS
   const dEvent = daysFrom(eventTime)
   const dMention = daysFrom(mentionTime)
+  if (op.mode === 'DENSE') {
+    return dMention === undefined ? 0 : 0.3 / (1 + dMention / 30)
+  }
   if (op.mode === 'LAST_K') {
     // Events without an event time still have a mention time (always set);
     // "the last time we spoke" should not ignore them.

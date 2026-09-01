@@ -82,7 +82,7 @@ memoplus4dsh/
 │   ├── temporal.ts         # 时间表达式解析（相对时间/last year/recently 等）
 │   ├── inject.ts           # systemPrompt section + agent/pre-step 动态注入
 │   ├── tools.ts            # memory_search / memory_remember 工具
-│   └── bridges.ts          # schedule/goal/todo 事件桥接进记忆图（占位，未实现）
+│   └── bridges.ts          # goal/todo/schedule/plan 进度事件桥接进记忆图（M8 实现）
 ├── scripts/
 │   ├── install.sh / uninstall.sh    # dsh plugin add 封装 + 默认配置（bash，Linux/macOS）
 │   └── test-harness/       # 本地测试 dsh 实例管理（见 §4）

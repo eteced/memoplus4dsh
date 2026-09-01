@@ -160,6 +160,47 @@ describe('Retriever ranking', () => {
       .toBeLessThan(texts.indexOf('The bakery closed early that morning.'))
   })
 
+  it('keeps only the newest bridge state event per entity+family (m8 P1-C)', async () => {
+    const store = new MemoryStore({ dir })
+    const goal = store.createOrResolve('目标：重构插件', 'CONCEPT').entity
+    const addState = (predicate: string, text: string, mentionTime: string) => store.addEvent({
+      subjectEntityIds: [goal.id], objectEntityIds: [],
+      predicate, normalizedText: text, details: '', timeExpr: '',
+      eventTime: mentionTime, eventTimePrecision: 'second',
+      mentionTime, sourceSession: 's1', sourceTurn: -1,
+    })
+    addState('goal_create', '创建了目标「重构插件」。', '2026-08-20T10:00:00.000Z')
+    addState('goal_block', '目标「重构插件」被阻塞：缺 API key。', '2026-08-25T10:00:00.000Z')
+    addState('goal_complete', '目标「重构插件」已完成。', '2026-08-30T10:00:00.000Z')
+    makeEvent(store, 'Alice', 'Alice likes gardening on weekends.')
+    const retriever = new Retriever({ store, now: () => NOW })
+    const results = await retriever.retrieve('目标 重构插件 进展 gardening', { topK: 5 })
+    const texts = results.map(e => e.normalizedText)
+    // Only the newest goal state survives; history stays in the graph.
+    expect(texts).toContain('目标「重构插件」已完成。')
+    expect(texts).not.toContain('目标「重构插件」被阻塞：缺 API key。')
+    expect(texts).not.toContain('创建了目标「重构插件」。')
+    expect(store.listEvents().filter(e => e.predicate.startsWith('goal_'))).toHaveLength(3)
+    // Non-state events are untouched by the dedup.
+    expect(texts).toContain('Alice likes gardening on weekends.')
+  })
+
+  it('state dedup can be disabled', async () => {
+    const store = new MemoryStore({ dir })
+    const goal = store.createOrResolve('目标：重构插件', 'CONCEPT').entity
+    for (const [predicate, mentionTime] of [['goal_create', '2026-08-20T10:00:00.000Z'], ['goal_complete', '2026-08-30T10:00:00.000Z']] as const) {
+      store.addEvent({
+        subjectEntityIds: [goal.id], objectEntityIds: [],
+        predicate, normalizedText: `状态 ${predicate}`, details: '', timeExpr: '',
+        eventTime: mentionTime, eventTimePrecision: 'second',
+        mentionTime, sourceSession: 's1', sourceTurn: -1,
+      })
+    }
+    const retriever = new Retriever({ store, now: () => NOW, stateDedup: false })
+    const results = await retriever.retrieve('目标 重构插件 状态', { topK: 5 })
+    expect(results.filter(e => e.predicate.startsWith('goal_'))).toHaveLength(2)
+  })
+
   it('expands one hop through entities shared with the top hits', async () => {
     const store = new MemoryStore({ dir })
     const alice = store.createOrResolve('Alice', 'PERSON').entity

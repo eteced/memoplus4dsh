@@ -21,14 +21,14 @@
 - 等 dsh 上游修复后升级；或
 - 暂时把 `tools: false`（插件工具关闭）——注入 + 抽取链路不受影响，记忆功能仍工作（M4 场景测试在该状态下 S1/S3/S4 全过）。
 
-## S5 — 日程/待办/目标事件桥接未实现（roadmap）
+## S5 — 日程/待办/目标事件桥接（已于 M8 实现）
 
-`src/bridges.ts` 目前只有接口占位。schedule/todo/goal 等 dsh 内部事件**不会**进入记忆图；agent 只能靠当前 session 上下文回答日程问题。计划：F1 修复后（工具可用才有意义）实现 `registerBridges`，把 `schedule/change`、`todo/write`、`goal/change` 投影为记忆事件（sourceSession 前缀标记桥接来源，sourceTurn=-1）。
+`src/bridges.ts` 在 M8 落地：goal/change、todo/write、schedule/change、plan/mode 全部投影为记忆事件（详见 docs/m8-progress-memory-eval.md）。检索层对状态族事件做"同实体同族只留最新"去重，历史仍完整保留在图中。
 
 ## 其他
 
 - **抽取消耗 API 额度**：每个完成的 turn 触发一次抽取调用（另有检索时的查询扩展，按 query 磁盘缓存）。在意成本可 `extraction: 'off'` 或 `queryExpansion: false`。
-- **端点 flaky 时的行为**：抽取调用 120s 超时 + 有界重试（5s/30s backoff）后跳过并记录到 `<dataDir>/extraction-debug.jsonl`；被跳过的 turn 不会补抽（重启后也不会——已知限制）。debug 日志只增不轮转，长期运行可自行清理。
+- **端点 flaky 时的行为**：抽取调用 120s 超时 + 有界重试（5s/30s backoff）后跳过并记录到 `<dataDir>/extraction-debug.jsonl`。M8 起队列持久化（`<dataDir>/extraction-pending.jsonl`）：进程崩溃/重启后未完成的 job 会自动补抽；但被主动 skip（重试耗尽）的 turn 不会重试——已知限制。debug 日志只增不轮转，长期运行可自行清理。
 - **注入延迟**：pre-step 检索含一次（可缓存的）扩展 LLM 调用（1024 token / 30s 上限）和本地 embedding 推理；首次检索触发 ~135MB 多语言模型下载（`embeddingModel: 'english'` 可降到 ~23MB 纯英文模型）。
 - **embedding 维度迁移**：切换 `embeddingModel` 预设后，旧模型持久化的向量会被自动识别（维度不匹配）并在下次检索时按需重算，无需手动清数据。
 - **单实例假设**：同一 `dataDir` 只应由一个 dsh 实例使用。两个实例同时跑同一数据目录时，后做快照的一方会覆盖另一方的 journal 增量（M6 审查 M4）。插件热重载已排空队列，进程内场景安全。

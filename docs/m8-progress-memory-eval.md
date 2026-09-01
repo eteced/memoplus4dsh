@@ -113,4 +113,18 @@ dsh 压缩后模型看不到 todo 工具结果（§1.5），而我们的记忆�
 
 ## 5. 实施记录
 
-（实施完成后填写：变更文件清单、测试结果、commit 号。）
+2026-09-01 实施完成，全部方案落地，commit 见本节末尾。
+
+**变更文件**：
+
+- `src/bridges.ts`（重写）：P0-A 进度事件桥。`registerProgressBridge` 监听 `session/event`，结构化（鸭子类型）读取 goal/change、todo/write、schedule/change、plan/mode 四类 payload——插件不依赖 dsh 的 goal/todo/schedule/plan 包，上游类型变化降级为跳过事件而非编译错误。todo 快照按内容签名去噪；schedule 的 delete/dispatch 用会话内 id→prompt 映射补全提醒文本。状态族谓词（`goal_*`/`todo_snapshot`/`schedule_*`/`plan_mode`）导出 `statePredicateFamily` 供检索去重。
+- `src/index.ts`：P0-B `buildTurnText` 纳入 `source.kind === 'goal'`（Goal: 前缀）与 `source.plugin === 'schedule'`（Schedule: 前缀）消息，本插件注入与 runtime-context 快照继续排除；P2 接入 `PendingJobLog`（enqueue 落盘、成功/skip 写 tombstone、启动时 requeue 无 tombstone 的 job）；新增配置 `progressBridge`、`stateDedup`。
+- `src/temporal.ts`：P1-A DENSE 模式 mention recency 项（`0.3/(1+days/30)`，上限低于 entityBonus）；P1-B `最新/最近一次/上次` → `LAST_K k=1`（检查顺序在"最近"之前，因子串包含关系）。
+- `src/retrieval.ts`：P1-C `dedupStateEvents`——按 （主体实体， 状态族） 只保留 mentionTime 最新的事件（ISO 字符串字典序即时间序），在 MMR/topK 截断前应用；`RetrieverOptions.stateDedup` 默认 true。
+- `src/extraction.ts`：`PendingJobLog`（JSONL pending/tombstone 日志，崩溃尾行容错，load 后截断）。与方案的偏差：未实现"requeue 前查 extraction-debug.jsonl 防重复"——tombstone 在 `extractTurn` 返回后同步写入，崩溃窗口极小，重复代价仅一次 LLM 调用 + 重复行（不损坏数据），简化成立。
+
+**测试**：10 个测试文件、119 个单测全绿（新增 18 个：bridge 投影/去噪/容错 9、buildTurnText 来源准入 2、PendingJobLog 崩溃恢复 3、DENSE recency 1、"最新"算子 1、状态去重 2）。
+
+**场景验证**：真实 LLM 的 goal 模式跨 session 进度场景（验收标准 §4.2）未在本轮执行——需要启动本地测试实例并消耗 API 额度；单测已覆盖各机制单元行为。建议用户部署后按 §4.2 实测。
+
+**commit**：见 git log（M8 implementation）。

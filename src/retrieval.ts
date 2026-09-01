@@ -17,6 +17,7 @@ import type { Entity, MemoryEvent, MemoryStore } from './store.js'
 import { cosineSimilarity } from './store.js'
 import type { TextEmbedder } from './embedding.js'
 import { NULL_EMBEDDER } from './embedding.js'
+import { statePredicateFamily } from './bridges.js'
 import type { TemporalOp } from './temporal.js'
 import { resolveTemporalQuery, temporalBonus, temporalMatch } from './temporal.js'
 
@@ -177,6 +178,12 @@ export interface RetrieverOptions {
   expandQuery?: (query: string) => Promise<string[]>
   /** Clock hook (tests): the temporal anchor defaults to now. */
   now?: () => Date
+  /**
+   * Latest-only dedup for bridge state events (goal/todo/schedule/plan):
+   * per (entity, state family) only the newest mention is returned. The full
+   * history stays in the graph; this only shapes retrieval. Default true.
+   */
+  stateDedup?: boolean
 }
 
 export interface RetrieveOptions {
@@ -192,12 +199,39 @@ interface ScoredEvent {
   idfMass: number
 }
 
+/**
+ * Latest-only dedup for bridge state events (m8 P1-C): within one
+ * (subject entity, state family) group only the newest-mention event keeps
+ * its slot; the full history stays in the graph and remains reachable via
+ * temporal queries. Non-state events pass through; score order is preserved.
+ */
+export function dedupStateEvents(scored: ScoredEvent[]): ScoredEvent[] {
+  const latestByGroup = new Map<string, MemoryEvent>()
+  for (const item of scored) {
+    const ev = item.event
+    const family = statePredicateFamily(ev.predicate)
+    if (family === undefined || ev.subjectEntityIds.length === 0) continue
+    const key = `${ev.subjectEntityIds[0]}|${family}`
+    const current = latestByGroup.get(key)
+    // mentionTime is ISO-8601: lexicographic order is chronological.
+    if (current === undefined || ev.mentionTime > current.mentionTime) latestByGroup.set(key, ev)
+  }
+  if (latestByGroup.size === 0) return scored
+  return scored.filter(item => {
+    const ev = item.event
+    const family = statePredicateFamily(ev.predicate)
+    if (family === undefined || ev.subjectEntityIds.length === 0) return true
+    return latestByGroup.get(`${ev.subjectEntityIds[0]}|${family}`) === ev
+  })
+}
+
 /** Hybrid retriever over one {@link MemoryStore}. */
 export class Retriever {
   private readonly store: MemoryStore
   private readonly embedder: TextEmbedder
   private readonly expandQuery?: (query: string) => Promise<string[]>
   private readonly now: () => Date
+  private readonly stateDedup: boolean
   /** In-memory event-vector cache; store ops persist it across restarts. */
   private readonly vectorCache = new Map<string, Float32Array>()
 
@@ -206,6 +240,7 @@ export class Retriever {
     this.embedder = options.embedder ?? NULL_EMBEDDER
     this.expandQuery = options.expandQuery
     this.now = options.now ?? (() => new Date())
+    this.stateDedup = options.stateDedup ?? true
   }
 
   /**
@@ -249,12 +284,13 @@ export class Retriever {
     }
 
     const scored = this.scoreCandidates([...candidates], entityIds, op, anchor, qwords, expanded, keyDescriptors, queryVec)
+    const ranked = this.stateDedup ? dedupStateEvents(scored) : scored
     if (isListQuestion(query)) {
       // topSlice already embedded every event when the embedder works;
       // without it the MMR penalty is 0 and order is score order.
-      return this.diverseRerank(scored, topK)
+      return this.diverseRerank(ranked, topK)
     }
-    return scored.slice(0, topK).map(s => s.event)
+    return ranked.slice(0, topK).map(s => s.event)
   }
 
   /** Known entities whose name or alias appears in the (lowercased) query. */

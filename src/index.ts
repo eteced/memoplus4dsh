@@ -10,7 +10,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session'
 import type { Session } from '@deepseek-ai/dsh-session'
 import { MemoryStore } from './store.js'
-import { ExtractionPipeline, ExtractionQueue } from './extraction.js'
+import { ExtractionPipeline, ExtractionQueue, PendingJobLog } from './extraction.js'
 import type { ExtractionJob } from './extraction.js'
 import { registerBridges } from './bridges.js'
 import { OnnxEmbedder, NULL_EMBEDDER, EMBEDDING_MODELS } from './embedding.js'
@@ -44,6 +44,13 @@ export interface Config {
   injection?: boolean
   /** memory_search / memory_remember tools; default true. */
   tools?: boolean
+  /** Bridge goal/todo/schedule/plan progress events into the graph; default true. */
+  progressBridge?: boolean
+  /**
+   * Latest-only retrieval dedup for bridge state events (per entity+state
+   * family); history stays in the graph. Default true.
+   */
+  stateDedup?: boolean
   /** Local ONNX embeddings; default true. Failure degrades to keyword-only retrieval. */
   embedding?: boolean
   /**
@@ -79,6 +86,13 @@ function blockText(block: ContentBlock): string | undefined {
  * Rebuild one turn's text from the session log: user and assistant text
  * between the turn's `turn/start` and its `turn/end`, labelled for the
  * extraction prompt's speaker rules.
+ *
+ * Sources admitted beyond genuine user input (m8 P0-B): goal-round prompts
+ * (`source.kind === 'goal'` — they carry the objective and round number,
+ * the core context of long-horizon progress) and schedule dispatch reminders
+ * (`source.plugin === 'schedule'`). Workspace-instruction/runtime-context
+ * snapshots and this plugin's own memory injections stay excluded (the
+ * latter would feed memories back into extraction).
  */
 export function buildTurnText(session: Session, turn: number): string {
   const events = session.events
@@ -94,12 +108,19 @@ export function buildTurnText(session: Session, turn: number): string {
   for (const event of events) {
     if (startSeq >= 0 && event.seq < startSeq) continue
     if (event.type === 'user/message') {
-      // Only genuine user input: workspace-instruction/runtime-context
-      // snapshots also arrive as user/message events inside the turn and
-      // would swamp the extraction prompt.
-      if (event.data.source.kind !== 'user') continue
+      const source = event.data.source
+      // 'goal' kind is contributed by dsh-goal via declaration merging; it is
+      // absent from our installed dsh-llm types, hence the string compare.
+      const kind: string = source.kind
+      let label: string | undefined
+      if (kind === 'user') label = 'User'
+      else if (kind === 'goal') label = 'Goal'
+      else if (kind === 'plugin' && 'plugin' in source && source.plugin === 'schedule') label = 'Schedule'
+      // Anything else (runtime-context snapshots, this plugin's injections,
+      // other plugins) is not conversation content for extraction.
+      if (label === undefined) continue
       const text = event.data.content.map(blockText).filter(Boolean).join('\n')
-      if (text.length > 0) lines.push(`User: ${text}`)
+      if (text.length > 0) lines.push(`${label}: ${text}`)
     } else if (event.type === 'assistant/message' && event.data.turn === turn) {
       const text = event.data.message.content.map(blockText).filter(Boolean).join('\n')
       if (text.length > 0) lines.push(`Assistant: ${text}`)
@@ -173,8 +194,8 @@ export function apply(ctx: Context, config: Config) {
         'When the user asks you to remember something, you MUST call the memory_remember tool with the fact as one self-contained sentence.',
     })
 
-    // M-later: bridges from schedule/goal/todo events (none registered in M2/M3).
-    const bridges = registerBridges(store)
+    // Progress bridge: goal/todo/schedule/plan events -> memory events (m8 P0-A).
+    const bridges = config.progressBridge === false ? [] : registerBridges(ctx, store)
 
     const embedder: TextEmbedder = config.embedding === false
       ? NULL_EMBEDDER
@@ -187,6 +208,7 @@ export function apply(ctx: Context, config: Config) {
     const retriever = new Retriever({
       store,
       embedder,
+      stateDedup: config.stateDedup !== false,
       expandQuery: config.queryExpansion === false
         ? undefined
         : createQueryExpander({
@@ -214,7 +236,10 @@ export function apply(ctx: Context, config: Config) {
         store,
         callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, config.extractionMaxTokens ?? 8192),
       })
+      // Durable pending log: interrupted jobs are requeued on restart (m8 P2).
+      const pendingLog = new PendingJobLog(join(dataDir, 'extraction-pending.jsonl'))
       queue = new ExtractionQueue(job => pipeline.extractTurn(job).then(result => {
+        pendingLog.recordSettled(job.sessionId, job.turn)
         debugLog({ kind: 'extracted', session: job.sessionId, turn: job.turn, ...result })
       }), {
         maxRetries: config.extractionMaxRetries,
@@ -223,6 +248,7 @@ export function apply(ctx: Context, config: Config) {
           error: error instanceof Error ? error.message : String(error),
         }),
         onSkip: (job, error) => {
+          pendingLog.recordSettled(job.sessionId, job.turn)
           debugLog({
             kind: 'skipped', session: job.sessionId, turn: job.turn,
             error: error instanceof Error ? error.message : String(error),
@@ -232,6 +258,12 @@ export function apply(ctx: Context, config: Config) {
           )
         },
       })
+      // Requeue jobs interrupted by a previous shutdown/crash.
+      for (const job of pendingLog.loadPending()) {
+        debugLog({ kind: 'requeue', session: job.sessionId, turn: job.turn })
+        pendingLog.recordEnqueue(job)
+        queue.enqueue(job)
+      }
       ctx.on('session/event', (session, event) => {
         if (event.type !== 'turn/end' || event.data.reason.kind !== 'completed') return
         const header = session.requestHeader()
@@ -239,13 +271,15 @@ export function apply(ctx: Context, config: Config) {
         const turnText = buildTurnText(session, event.data.turn)
         if (turnText.trim().length === 0) return
         debugLog({ kind: 'enqueue', session: session.id, turn: event.data.turn, textChars: turnText.length })
-        queue!.enqueue({
+        const job: ExtractionJob = {
           sessionId: session.id,
           turn: event.data.turn,
           turnText,
           mentionTime: new Date(event.time).toISOString(),
           route: lastRoute,
-        })
+        }
+        pendingLog.recordEnqueue(job)
+        queue!.enqueue(job)
       })
     }
 

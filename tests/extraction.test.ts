@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, appendFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -7,6 +7,7 @@ import {
   ExtractionPipeline,
   ExtractionQueue,
   KNOWN_ENTITIES_MAX_CHARS,
+  PendingJobLog,
   coerceSpeakerTypes,
   extractSpeakers,
   formatKnownEntities,
@@ -259,6 +260,42 @@ describe('ExtractionQueue', () => {
     await queue.whenIdle()
     expect(ran).toEqual([1, 1])
     expect(queue.skipped).toBe(1)
+  })
+})
+
+describe('PendingJobLog', () => {
+  let dir: string
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'memoplus4dsh-pending-'))
+  })
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('returns unsettled jobs on restart and truncates the file', () => {
+    const path = join(dir, 'pending.jsonl')
+    const log = new PendingJobLog(path)
+    log.recordEnqueue(makeJob({ turn: 1 }))
+    log.recordEnqueue(makeJob({ turn: 2 }))
+    log.recordSettled('session-1', 1)
+    // Simulated restart: a fresh instance reads the same file.
+    const revived = new PendingJobLog(path)
+    const pending = revived.loadPending()
+    expect(pending.map(j => j.turn)).toEqual([2])
+    // The file was truncated; a second load sees nothing.
+    expect(new PendingJobLog(path).loadPending()).toEqual([])
+  })
+
+  it('tolerates a corrupt tail line from a crashed write', () => {
+    const path = join(dir, 'pending.jsonl')
+    const log = new PendingJobLog(path)
+    log.recordEnqueue(makeJob({ turn: 3 }))
+    appendFileSync(path, '{"kind":"pending","job":{"sess', 'utf8')
+    expect(new PendingJobLog(path).loadPending().map(j => j.turn)).toEqual([3])
+  })
+
+  it('returns empty when the file does not exist', () => {
+    expect(new PendingJobLog(join(dir, 'nope.jsonl')).loadPending()).toEqual([])
   })
 })
 

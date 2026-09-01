@@ -63,6 +63,8 @@ Set under the plugin's `config:` in the profile's `cordis.patch.yml`:
 | `injectTopK` | `8` | Max memories injected per turn |
 | `injectMaxChars` | `2000` | Character cap for the injected memory block |
 | `tools` | `true` | Register `memory_search` / `memory_remember` tools |
+| `progressBridge` | `true` | Bridge goal/todo/schedule/plan progress events into the memory graph (M8) |
+| `stateDedup` | `true` | Retrieval keeps only the newest bridge state event per entity+family; history stays in the graph |
 | `embedding` | `true` | Local ONNX embeddings; failure degrades to keyword-only retrieval |
 | `embeddingModel` | `multilingual` | `multilingual` = distiluse-base-multilingual-cased-v2 (512-dim, ~135MB first-download, 50+ languages incl. Chinese); `english` = all-MiniLM-L6-v2 (384-dim, ~23MB). Switching re-embeds stored vectors lazily |
 | `hfBaseUrl` | `https://huggingface.co` | Mirror base URL for the embedding model download |
