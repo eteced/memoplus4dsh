@@ -10,6 +10,7 @@
 - **记忆隔离**：每个 context 开始前清空插件数据与 session（保留预热的 embedding 模型），等价于 RAG agents 每 context 重建存储。
 - **查询协议**：每个问题一个新 dsh session（无对话历史，记忆经图共享）——与官方 RAG agents 的无状态查询协议对齐。
 - **系统指标口径差异**：我们的 `input_len/output_len` 是 tiktoken 计数（其它 agent 用 API usage）；只影响 token 系统指标，不影响正确性分数。ingest 为 LLM 抽取（按 ~8k 字符批量），其墙钟时间记入 `memory_construction_time`——架构差异使该项天然高于 embed 类 agent，仅作参考。
+- **LME(S*) 主指标是 LLM judge**：官方 `llm_based_eval/longmem_qa_evaluate.py`（按题型 yes/no 判定"回答是否包含正确答案"，judge 模型 gpt-4o）。rule-based exact_match 对简洁度敏感（我们的模型回答偏详细，EM 会失真偏低），不作为 LME 主指标。我们将在跑分完成后用**同一官方脚本**对结果文件复核；judge 模型若无法使用 gpt-4o 则改用 deepseek-v4-flash 并在报告中注明（yes/no 判定对 judge 模型不敏感）。
 - **骨架模型差异**：官方 Table 2 的 RAG/memory agents 用 GPT-4o-mini；我们用 deepseek-v4-flash（推理模型）。对比时应注意模型能力差异混入。
 - 官方 SF/LME(S*) 任务 chunk_size=512（论文 §4.1），仓库 yaml 默认 4096：对按 chunk 检索的 agent 有影响，对我们无实质影响（chunk 包装后在我们 8k 批量内重拼，输入文本等价）。
 
@@ -32,9 +33,9 @@
 
 > 官方 Table 2：15.7（Contriever）–55.7（GPT-4.1-mini）；RAG 类最好 HippoRAG-v2 50.7 / TE3-Large 50.3；Mem0 36.0。
 
-| context | 题数 | accuracy | 状态 |
+| context | 题数 | accuracy（LLM judge） | 状态 |
 |---|---|---|---|
-| LME(S*) ×5 contexts | 300（60/context） | — | 🔄 跑分中 |
+| LME(S*) ×5 contexts | 300（60/context） | —（judge 复核在跑分后统一执行） | 🔄 跑分中 |
 
 ## 4. 中间快照与观察
 
