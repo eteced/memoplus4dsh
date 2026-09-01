@@ -43,13 +43,57 @@
 
 （跑分完成后替换为正式分析）
 
+### 定性分析（基于已完成 config 的逐题抽查）
+
+- **FC-SH/FC-MH 答对的题**：反事实链式答案正确（如 'Belgium'、'Rodez'），注入恰含最新状态（状态去重生效），多跳问题由实体图一跳扩展同时供出链两端事实。
+- **FC-MH 答错的题（主导失败模式）**：模型回退到**参数化常识**而非知识池——如 gold 'Italy' 答 'United States of America'、gold 'rugby' 答 'American football'。指令明确要求"只从知识池回答"，但推理模型在链式推理中偶尔短路到自身知识。这是骨架模型行为问题而非检索失败（SH 同事实能答对）。
+- **评测噪声（公平性备注）**：官方 memorize 模板尾句 "Assistant: I have learned the facts..." 会被我们的抽取管道变成记忆事件（"Assistant stated that it has learned the facts..."），在图里产生少量垃圾事件并占用检索席位。embed 类 agent 不受影响（它们不经过 LLM 抽取）。对我们略有不利，分数仍在此噪声下取得。
 - **FC-MH 6k 完成：EM 75.0（100 题）**——这是全场最难的任务：Table 2 所有 agent ≤7.0，论文专门用推理模型验证也仅 o4-mini 80.0（32k 跌到 14.0）。我们与 o4-mini 同档（75.0 vs 80.0），是所有"记忆系统"的 10 倍以上（Mem0 2.0、HippoRAG-v2 5.0、MIRIX(4.1) 3.0）。多跳 + 状态更新恰好命中实体图一跳扩展 + 状态去重的架构设计。
 - **FC-SH 全部四个长度完成：6k 83.0 / 32k 81.0 / 64k 78.0 / 262k 83.0（各 100 题）**——均远超 Table 2 全体（最高 GPT-4o 60.0；RAG/记忆类最高 HippoRAG-v2 54.0、Mem0 18.0）。且**长度几乎无影响**（262k 与 6k 持平），相比论文中"长度增加性能骤降"的普遍现象（o4-mini 80.0→14.0），本组合的实体-时间图 + 状态去重架构在 Selective Forgetting 轴上表现突出。注意 o4-mini 的 6k FC-SH/MH 也是高分——推理骨架有贡献，MH 系列是下一道检验。
 - F-1 修复（抽取禁 thinking + 分段）是本次评测能跑通的前提，已并入产品代码。
 
 ## 5. 与官方基线对比表
 
-（跑分完成后填充：LME(S*) 与 FC-SH/FC-MH 全表，含 Table 2 全部 agent 行 + 本组合行）
+> 基线为论文 Table 2（arXiv:2507.05257v2，RAG/记忆类骨架 GPT-4o-mini）；本组合骨架 deepseek-v4-flash（推理模型）。FC 指标 = exact_match（rule-based）；LME 指标 = 官方 LLM judge accuracy。
+
+### 5.1 Selective Forgetting（FC-SH / FC-MH，各 4 长度平均；本组合按长度列出）
+
+| Agent | FC-SH | FC-MH |
+|---|---|---|
+| **memoplus4dsh + dsh（本组合）** | **83.0 / 81.0 / 78.0 / 83.0（6k/32k/64k/262k，均值 81.25）** | **75.0 / — / — / —（均值 —）** |
+| GPT-4o（长上下文） | 60.0 | 5.0 |
+| GPT-4o-mini（长上下文） | 45.0 | 5.0 |
+| GPT-4.1-mini（长上下文） | 36.0 | 5.0 |
+| Claude-3.7-Sonnet | 43.0 | 2.0 |
+| Gemini-2.0-Flash | 30.0 | 3.0 |
+| BM25 | 48.0 | 3.0 |
+| Text-Embed-3-Large | 28.0 | 4.0 |
+| HippoRAG-v2 | 54.0 | 5.0 |
+| Mem0 | 18.0 | 2.0 |
+| Cognee | 28.0 | 3.0 |
+| Zep | 7.0 | 3.0 |
+| MIRIX (4.1-mini) | 20.0 | 3.0 |
+| o4-mini（Table 4，仅 6k/32k 验证） | —（MH 6k 80.0 / 32k 14.0） | 80.0 / 14.0 |
+
+**本组合 FC-SH 均值 81.25**（最高基线 60.0，+21.3pt）；**FC-MH 6k 75.0**（最高基线 7.0，+68pt；o4-mini 同档 80.0）。
+
+### 5.2 Accurate Retrieval（LME(S*)，LLM judge accuracy）
+
+| Agent | LME(S*) |
+|---|---|
+| **memoplus4dsh + dsh（本组合）** | **54.67** |
+| GPT-4.1-mini（长上下文） | 55.7 |
+| HippoRAG-v2 | 50.7 |
+| Text-Embed-3-Large | 50.3 |
+| Text-Embed-3-Small | 48.3 |
+| Gemini-2.0-Flash | 47.0 |
+| BM25 | 45.3 |
+| Zep | 38.3 |
+| MIRIX | 37.3 |
+| Mem0 | 36.0 |
+| GPT-4o / GPT-4o-mini / Claude-3.7 | 32.0 / 30.7 / 34.0 |
+
+**本组合 54.67，与全场最高（55.7）差 1.0pt，超过全部 RAG/记忆类 agent。**
 
 ## 6. 成本与延迟
 
