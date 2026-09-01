@@ -1,0 +1,56 @@
+# M9 — MemoryAgentBench 评测报告（memoplus4dsh + deepseek-harness）
+
+> 日期：2026-09-02 状态：**跑分进行中，分数为中间快照**
+> 被测组合：dsh sdk profile + memoplus4dsh（默认配置，deepseek-v4-flash @ DeepSeek 官方 API）
+> 方案与口径：docs/m9-benchmark-plan.md；复现：benchmark/README.md
+
+## 1. 方法论摘要（可比性声明）
+
+- **官方代码零修改**：数据加载（`conversation_creator`）、memorize/query 模板（`utils/templates.py`，rag_agent 族）、指标计算（`utils/eval_other_utils.metrics_summarization`）全部复用官方仓库（commit `fe1735d`）原样代码；结果 JSON 结构与官方 `main.py` 输出一致。
+- **记忆隔离**：每个 context 开始前清空插件数据与 session（保留预热的 embedding 模型），等价于 RAG agents 每 context 重建存储。
+- **查询协议**：每个问题一个新 dsh session（无对话历史，记忆经图共享）——与官方 RAG agents 的无状态查询协议对齐。
+- **系统指标口径差异**：我们的 `input_len/output_len` 是 tiktoken 计数（其它 agent 用 API usage）；只影响 token 系统指标，不影响正确性分数。ingest 为 LLM 抽取（按 ~8k 字符批量），其墙钟时间记入 `memory_construction_time`——架构差异使该项天然高于 embed 类 agent，仅作参考。
+- **骨架模型差异**：官方 Table 2 的 RAG/memory agents 用 GPT-4o-mini；我们用 deepseek-v4-flash（推理模型）。对比时应注意模型能力差异混入。
+- 官方 SF/LME(S*) 任务 chunk_size=512（论文 §4.1），仓库 yaml 默认 4096：对按 chunk 检索的 agent 有影响，对我们无实质影响（chunk 包装后在我们 8k 批量内重拼，输入文本等价）。
+
+## 2. 结果：Selective Forgetting（FactConsolidation）
+
+> 官方 Table 2 该维度全员低迷：FC-SH 最高 GPT-4o 60.0（其余 agent ≤54.0），FC-MH 全员 ≤7.0；o4-mini 在 6k FC-MH 80.0、32k 14.0（Table 4）。
+
+| config | 上下文长度 | 题数 | exact_match | 状态 |
+|---|---|---|---|---|
+| FC-SH 6k | 6k | 100 | （跑分中，见下节快照） | 🔄 |
+| FC-SH 32k | 32k | 100 | — | ⏳ |
+| FC-SH 64k | 64k | 100 | — | ⏳ |
+| FC-SH 262k | 262k | 100 | — | ⏳ |
+| FC-MH 6k | 6k | 100 | — | ⏳ |
+| FC-MH 32k | 32k | 100 | — | ⏳ |
+| FC-MH 64k | 64k | 100 | — | ⏳ |
+| FC-MH 262k | 262k | 100 | — | ⏳ |
+
+## 3. 结果：Accurate Retrieval（LongMemEval S*）
+
+> 官方 Table 2：15.7（Contriever）–55.7（GPT-4.1-mini）；RAG 类最好 HippoRAG-v2 50.7 / TE3-Large 50.3；Mem0 36.0。
+
+| context | 题数 | accuracy | 状态 |
+|---|---|---|---|
+| LME(S*) ×5 contexts | 300（60/context） | — | 🔄 跑分中 |
+
+## 4. 中间快照与观察
+
+（跑分完成后替换为正式分析）
+
+- FC-SH 6k 前 43 题 EM 95.3——远高于 Table 2 全体（最高 60.0）。注意 6k 是最短长度，且 Table 4 显示短上下文本就可解；需看 32k/64k/262k 的衰减曲线才有结论。
+- F-1 修复（抽取禁 thinking + 分段）是本次评测能跑通的前提，已并入产品代码。
+
+## 5. 与官方基线对比表
+
+（跑分完成后填充：LME(S*) 与 FC-SH/FC-MH 全表，含 Table 2 全部 agent 行 + 本组合行）
+
+## 6. 成本与延迟
+
+（跑分完成后填充：总 LLM 调用数、token 用量、ingest/query 墙钟、与 RAG 类 agent 的架构性成本差异讨论）
+
+## 7. 结论与对产品的影响
+
+（跑分完成后填充）
