@@ -101,12 +101,25 @@ def load_existing(path):
 
 
 def wipe_memory_state():
-    """Fresh memory per context == RAG agents rebuilding their store per context."""
+    """Fresh memory per context == RAG agents rebuilding their store per context.
+
+    Wipes the graph/journal/session state but PRESERVES the models dir
+    (pre-warmed 135MB embedding download) and the profile.
+    """
     dsh_home = os.path.join(REPO_ROOT, "benchmark", "dsh-home")
-    for name in ("memoplus4dsh", "sessions"):
-        target = os.path.join(dsh_home, name)
-        if os.path.exists(target):
-            shutil.rmtree(target)
+    sessions = os.path.join(dsh_home, "sessions")
+    if os.path.exists(sessions):
+        shutil.rmtree(sessions)
+    plugin_data = os.path.join(dsh_home, "memoplus4dsh")
+    if os.path.exists(plugin_data):
+        for name in os.listdir(plugin_data):
+            if name == "models":
+                continue
+            target = os.path.join(plugin_data, name)
+            if os.path.isdir(target):
+                shutil.rmtree(target)
+            else:
+                os.remove(target)
 
 
 def main():
