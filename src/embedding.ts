@@ -88,12 +88,15 @@ export class WordPieceTokenizer {
     return id
   }
 
-  /** Basic tokenization: lowercase, split punctuation, split on whitespace. */
+  /** Basic tokenization: lowercase, split punctuation and CJK chars, split on whitespace. */
   private basicTokens(text: string): string[] {
     let cleaned = text
     if (this.lowercase) cleaned = cleaned.toLowerCase()
     // Split every punctuation/symbol char onto its own token (BERT-style).
     cleaned = cleaned.replace(/([!-/:-@[-`{-~])/g, ' $1 ')
+    // Split CJK ideographs onto per-char tokens (BERT basic tokenizer
+    // behavior); a whole Chinese run would otherwise collapse into one [UNK].
+    cleaned = cleaned.replace(/([一-鿿豈-﫿])/g, ' $1 ')
     return cleaned.split(/\s+/).filter(t => t.length > 0)
   }
 

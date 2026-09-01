@@ -194,6 +194,22 @@ export function formatKnownEntities(
 export const MIN_FACT_LENGTH = 12
 
 /**
+ * Hard cap on one turn's text going into the extraction prompt. A user
+ * pasting a large log would otherwise send an unbounded (and unbounded-cost)
+ * prompt each turn. Head and tail are kept; the middle is elided.
+ */
+export const MAX_TURN_TEXT_CHARS = 20_000
+
+/** Truncate turn text to {@link MAX_TURN_TEXT_CHARS}, keeping head and tail. */
+export function capTurnText(turnText: string): string {
+  if (turnText.length <= MAX_TURN_TEXT_CHARS) return turnText
+  const marker = '\n…[middle truncated]…\n'
+  const head = Math.floor((MAX_TURN_TEXT_CHARS - marker.length) * 0.6)
+  const tail = MAX_TURN_TEXT_CHARS - marker.length - head
+  return turnText.slice(0, head) + marker + turnText.slice(turnText.length - tail)
+}
+
+/**
  * Resolve a verbatim time expression to (ISO time, precision), relative to
  * `base` (the turn's mention time). Delegates to the temporal module; when
  * the expression is empty, tries to recover one from the fact text.
@@ -248,14 +264,16 @@ export class ExtractionPipeline {
 
   /** Extract one turn into the store. Throws when the LLM yields no usable text. */
   async extractTurn(job: ExtractionJob): Promise<ExtractionResult> {
-    const known = formatKnownEntities(this.store.listEntities(), job.turnText)
+    const turnText = capTurnText(job.turnText)
+    const known = formatKnownEntities(this.store.listEntities(), turnText)
+    // Replacement-function form: turn text may contain $-patterns.
     const prompt = EXTRACTION_PROMPT_TURN
-      .replace('{turn_text}', job.turnText)
-      .replace('{known_entities}', known)
+      .replace('{turn_text}', () => turnText)
+      .replace('{known_entities}', () => known)
     const raw = (await this.callLlm(prompt, job)).trim()
     if (raw.length === 0) throw new Error('extraction produced empty content')
     const parsed = parseExtractionOutput(raw)
-    coerceSpeakerTypes(parsed, extractSpeakers(job.turnText))
+    coerceSpeakerTypes(parsed, extractSpeakers(turnText))
     const rows = parsed.events.filter(row => row.fact.length >= MIN_FACT_LENGTH)
 
     let entitiesCreated = 0
@@ -295,6 +313,12 @@ export class ExtractionPipeline {
 export interface ExtractionQueueOptions {
   /** Retries after the first attempt; the job is skipped once exhausted. Default 2. */
   maxRetries?: number
+  /**
+   * Delay before retry attempt N (1-based), in ms; the last entry repeats.
+   * Default [5000, 30000]: immediate retries mostly re-hit the same
+   * rate-limit/timeout while burning another full prompt.
+   */
+  retryDelayMs?: number[]
   /** Called when a job is skipped after exhausting retries. */
   onSkip?: (job: ExtractionJob, error: unknown) => void
   /** Called after each failed attempt (before retrying or skipping). */
@@ -309,6 +333,7 @@ export interface ExtractionQueueOptions {
 export class ExtractionQueue {
   private readonly run: (job: ExtractionJob) => Promise<unknown>
   private readonly maxRetries: number
+  private readonly retryDelayMs: number[]
   private readonly onSkip?: (job: ExtractionJob, error: unknown) => void
   private readonly onAttemptFailed?: (job: ExtractionJob, attempt: number, error: unknown) => void
   private chain: Promise<void> = Promise.resolve()
@@ -318,6 +343,7 @@ export class ExtractionQueue {
   constructor(run: (job: ExtractionJob) => Promise<unknown>, options: ExtractionQueueOptions = {}) {
     this.run = run
     this.maxRetries = options.maxRetries ?? 2
+    this.retryDelayMs = options.retryDelayMs ?? [5_000, 30_000]
     this.onSkip = options.onSkip
     this.onAttemptFailed = options.onAttemptFailed
   }
@@ -349,6 +375,10 @@ export class ExtractionQueue {
     const attempts = 1 + this.maxRetries
     let lastError: unknown
     for (let attempt = 1; attempt <= attempts; attempt++) {
+      if (attempt > 1) {
+        const delay = this.retryDelayMs[attempt - 2] ?? this.retryDelayMs[this.retryDelayMs.length - 1] ?? 0
+        if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay))
+      }
       try {
         await this.run(job)
         return

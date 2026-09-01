@@ -9,6 +9,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEST_DIR="${MEMOPLUS4DSH_TEST_DIR:-$(cd "$SCRIPT_DIR/../../.." && pwd)/test}"
 
+# Guard against a dangerous MEMOPLUS4DSH_TEST_DIR (this script rm -rf's under it).
+if [[ -z "$TEST_DIR" || "$TEST_DIR" == "/" || "$TEST_DIR" != *test* ]]; then
+  echo "reset-test.sh: refusing to operate on suspicious TEST_DIR='$TEST_DIR'" >&2
+  echo "  (must be non-empty, not '/', and contain 'test')" >&2
+  exit 1
+fi
+
 "$SCRIPT_DIR/stop-test.sh"
 
 echo "==> removing $TEST_DIR/dsh-home"

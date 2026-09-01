@@ -95,6 +95,15 @@ describe('resolveTemporalQuery', () => {
     expect(resolveTemporalQuery('the last time we spoke', BASE)).toEqual({ mode: 'LAST_K', k: 1 })
     expect(resolveTemporalQuery('anything about gardening?', BASE)).toEqual({ mode: 'DENSE' })
   })
+
+  it('treats a bare "this"/"past" as no temporal intent', () => {
+    // A unit-less "this"/"past" must not become a 180-day hard filter.
+    expect(resolveTemporalQuery('how do I fix this error?', BASE)).toEqual({ mode: 'DENSE' })
+    expect(resolveTemporalQuery('what does this function do?', BASE)).toEqual({ mode: 'DENSE' })
+    // With a unit the window still applies.
+    expect(resolveTemporalQuery('what broke in the past 3 days?', BASE))
+      .toEqual({ mode: 'WITHIN_WINDOW', windowMs: 3 * 24 * 60 * 60 * 1000 })
+  })
 })
 
 function eventAt(eventTime: string | null, mentionTime: string): MemoryEvent {
@@ -150,5 +159,13 @@ describe('temporalBonus mention weight', () => {
     const eventHit = eventAt('2026-06-10T00:00:00.000Z', '2026-01-01T00:00:00.000Z')
     const mentionHit = eventAt('2026-01-10T00:00:00.000Z', '2026-06-10T00:00:00.000Z')
     expect(temporalBonus(eventHit, op, BASE)).toBeGreaterThan(temporalBonus(mentionHit, op, BASE))
+  })
+
+  it('falls back to the mention anchor for LAST_K when no event time exists', () => {
+    const op = resolveTemporalQuery('the last time we spoke', BASE)
+    const noEventTime = eventAt(null, '2026-08-30T00:00:00.000Z')
+    expect(temporalBonus(noEventTime, op, BASE)).toBeGreaterThan(0)
+    const oldMention = eventAt(null, '2025-01-01T00:00:00.000Z')
+    expect(temporalBonus(noEventTime, op, BASE)).toBeGreaterThan(temporalBonus(oldMention, op, BASE))
   })
 })

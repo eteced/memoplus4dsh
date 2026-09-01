@@ -7,8 +7,10 @@
 // Credential policy: DEEPSEEK_API_KEY must come from the environment; it is
 // never written to any file. Missing key => immediate exit.
 
-import { readFileSync, existsSync, appendFileSync, mkdirSync } from 'node:fs'
+import { readFileSync, existsSync, appendFileSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { DeepSeekHarness } from '@deepseek-ai/dsh-sdk-client'
 
@@ -36,12 +38,50 @@ export function requireEnv() {
 }
 
 /**
+ * Pin sandbox-policy in the sdk profile's cordis.patch.yml to
+ * workspace-write with workspaceRoot = TEST_DIR, using the same managed
+ * marker block as start-test.sh (`dsh-test-harness`). Without this the base
+ * bundle default `mode: !!js process.env.DSH_PERMISSION_MODE ?? ...` applies,
+ * and a permissive DSH_PERMISSION_MODE in the caller's shell would leave the
+ * test instance's filesystem unrestricted. Idempotent; skipped (with a
+ * warning) when the sdk profile has not been created yet — in that case run
+ * `scripts/install.sh --profile sdk --dsh-home <test>/dsh-home` first.
+ */
+function pinSandboxPolicy() {
+  const patchFile = join(DSH_HOME, 'profiles', 'sdk', 'cordis.patch.yml')
+  if (!existsSync(patchFile)) {
+    console.error('sdk-driver: WARNING sdk profile cordis.patch.yml not found; sandbox-policy NOT pinned.')
+    console.error('sdk-driver: run scripts/install.sh --profile sdk --dsh-home ' + DSH_HOME + ' first.')
+    return
+  }
+  const blockFile = join(tmpdir(), `dsh-test-harness-block-${process.pid}.yml`)
+  writeFileSync(blockFile, [
+    '- id: sandbox-policy',
+    '  config:',
+    '    mode: workspace-write',
+    `    workspaceRoot: '${TEST_DIR}'`,
+    '',
+  ].join('\n'), 'utf8')
+  try {
+    execFileSync('python3', [
+      join(REPO_ROOT, 'scripts', '_patch_yml.py'), patchFile, 'dsh-test-harness', 'add', blockFile,
+    ], { stdio: 'inherit' })
+  } finally {
+    rmSync(blockFile, { force: true })
+  }
+}
+
+/**
  * Launch one runtime (or return a handle to launch lazily). The caller owns
  * `close()`. Timeouts are generous: the endpoint is a reasoning model whose
  * replies can be slow.
  */
 export function launch() {
   const { apiKey, baseUrl } = requireEnv()
+  pinSandboxPolicy()
+  // Never let DSH_* permission overrides from the caller's shell leak into the
+  // test runtime — the sandbox mode is pinned in the profile patch above.
+  const { DSH_PERMISSION_MODE: _dropped, ...safeEnv } = process.env
   return new DeepSeekHarness({
     dshBin: DSH_BIN,
     dshHome: DSH_HOME,
@@ -49,7 +89,7 @@ export function launch() {
     processCwd: TEST_DIR,
     cwd: TEST_DIR,
     env: {
-      ...process.env,
+      ...safeEnv,
       DSH_HOME,
       DEEPSEEK_API_KEY: apiKey,
       DEEPSEEK_BASE_URL: baseUrl,

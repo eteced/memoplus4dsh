@@ -101,6 +101,8 @@ export function registerMemoryTools(ctx: Context, deps: MemoryToolsDeps): () => 
         render: (_args, value) => [{ type: 'text', text: `Remembered (id ${value.id}).` }],
       },
       async execute(args, exec) {
+        const fact = args.fact.trim()
+        if (fact.length === 0) throw new Error('memory_remember: fact must not be empty')
         const at = now()
         const timeExpr = args.time_expr?.trim() ?? ''
         const resolved = timeExpr.length > 0 ? resolveTimeExpr(timeExpr, at) : undefined
@@ -108,7 +110,7 @@ export function registerMemoryTools(ctx: Context, deps: MemoryToolsDeps): () => 
           subjectEntityIds: [],
           objectEntityIds: [],
           predicate: 'remembered',
-          normalizedText: args.fact,
+          normalizedText: fact,
           details: '',
           timeExpr,
           eventTime: resolved !== undefined && resolved.precision !== 'unknown' ? resolved.time.toISOString() : null,

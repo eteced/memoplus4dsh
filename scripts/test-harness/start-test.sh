@@ -56,7 +56,8 @@ fi
 # we launch with cwd=$TEST_DIR and also restate the row explicitly so the
 # policy does not depend on the caller's directory.
 PATCH_FILE="$DSH_HOME/profiles/web/cordis.patch.yml"
-BLOCK_FILE="$(mktemp /tmp/dsh-test-harness-block.XXXXXX.yml)"
+# macOS/BSD mktemp requires the X's at the end of the template (no suffix).
+BLOCK_FILE="$(mktemp "${TMPDIR:-/tmp}/dsh-test-harness-block.XXXXXX")"
 trap 'rm -f "$BLOCK_FILE"' EXIT
 cat > "$BLOCK_FILE" <<EOF
 - id: sandbox-policy
@@ -65,6 +66,15 @@ cat > "$BLOCK_FILE" <<EOF
     workspaceRoot: '$TEST_DIR'
 EOF
 python3 "$PLUGIN_DIR/scripts/_patch_yml.py" "$PATCH_FILE" "dsh-test-harness" add "$BLOCK_FILE"
+
+# Pin the same sandbox policy for the sdk profile used by the M4 scenario
+# tests (sdk-driver.mjs). Its dsh-home is created at test launch time, so this
+# only applies when the profile already exists (install.sh --profile sdk);
+# sdk-driver.mjs re-applies the pin before every launch to cover later resets.
+SDK_PATCH_FILE="$DSH_HOME/profiles/sdk/cordis.patch.yml"
+if [[ -f "$SDK_PATCH_FILE" ]]; then
+  python3 "$PLUGIN_DIR/scripts/_patch_yml.py" "$SDK_PATCH_FILE" "dsh-test-harness" add "$BLOCK_FILE"
+fi
 
 # --- boot-free proof the plugin is in the composed tree ----------------------
 echo "==> composed config entries matching memoplus4dsh / sandbox-policy:"
@@ -112,7 +122,7 @@ echo "    log:   $LOG_FILE"
 # object).
 BASE_URL="${URL%%\?*}"
 BASE_URL="${BASE_URL%/}"
-COOKIE_JAR="$(mktemp /tmp/dsh-test-cookies.XXXXXX.txt)"
+COOKIE_JAR="$(mktemp "${TMPDIR:-/tmp}/dsh-test-cookies.XXXXXX")"
 trap 'rm -f "$BLOCK_FILE" "$COOKIE_JAR"' EXIT
 curl -s -c "$COOKIE_JAR" -o /dev/null "$URL"
 INVENTORY="$(curl -s -b "$COOKIE_JAR" -X POST "$BASE_URL/api/pluginInventory/list" \

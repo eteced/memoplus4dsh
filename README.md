@@ -31,7 +31,8 @@ Two model-facing tools are also registered: `memory_search` (active recall) and 
 ## Requirements
 
 - dsh `0.1.2-alpha.3` (the version this plugin is built and verified against; dsh is pre-release and may break compat)
-- Node `^22.19 || >=24`
+- Node `^22.19 || >=24` and `python3` (used by the install scripts to edit `cordis.patch.yml`)
+- Linux or macOS for the install/uninstall scripts (bash). On Windows the plugin itself runs fine — install manually: `npm install <this dir>` in the profile directory and add the plugin block to the profile's `cordis.patch.yml` as shown in [docs/install-guide.md](docs/install-guide.md)
 - Optional: `onnxruntime-node` (declared as an optional dependency) for local embeddings; without it retrieval degrades to keyword-only, nothing breaks
 
 ## Install
@@ -59,12 +60,12 @@ Set under the plugin's `config:` in the profile's `cordis.patch.yml`:
 |---|---|---|
 | `extraction` | `turn_end` | `turn_end` extracts facts after every completed turn; `off` disables extraction |
 | `injection` | `true` | Inject top-k relevant memories at the first step of each turn |
-| `injectTopK` | (set by install: 8) | Max memories injected per turn |
+| `injectTopK` | `8` | Max memories injected per turn |
 | `injectMaxChars` | `2000` | Character cap for the injected memory block |
 | `tools` | `true` | Register `memory_search` / `memory_remember` tools |
 | `embedding` | `true` | Local ONNX MiniLM embeddings; failure degrades to keyword-only retrieval |
 | `hfBaseUrl` | `https://huggingface.co` | Mirror base URL for the embedding model download |
-| `queryExpansion` | `true` | LLM query expansion during retrieval (results cached on disk per query) |
+| `queryExpansion` | `true` | LLM query expansion during retrieval (1 sample, 1024-token/30s bounded call, results cached on disk per query) |
 | `dataDir` | `<dsh-home>/memoplus4dsh` | Plugin data directory (journal, snapshots, model cache, expansion cache) |
 | `extractionProvider` / `extractionModel` | session's own route | Override the model route used for extraction/expansion calls |
 | `extractionMaxTokens` | `8192` | Output cap for extraction calls (reasoning models need the headroom) |

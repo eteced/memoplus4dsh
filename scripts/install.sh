@@ -39,6 +39,7 @@ MARKER="memoplus4dsh"
 # Node/npm must be on PATH; set NODE_BIN to prepend a specific bin directory.
 if [[ -n "${NODE_BIN:-}" && -x "$NODE_BIN/npm" ]]; then export PATH="$NODE_BIN:$PATH"; fi
 command -v npm >/dev/null || { echo "install.sh: npm not found on PATH (or set NODE_BIN)" >&2; exit 1; }
+command -v python3 >/dev/null || { echo "install.sh: python3 not found on PATH (needed to patch cordis.patch.yml)" >&2; exit 1; }
 
 echo "==> building plugin in $PLUGIN_DIR"
 (cd "$PLUGIN_DIR" && npm run build)
@@ -78,7 +79,8 @@ echo "==> linking plugin into profile (npm install file: dep)"
 (cd "$PROFILE_DIR" && npm install --no-audit --no-fund "$PLUGIN_DIR")
 
 echo "==> mounting plugin in $PATCH_FILE"
-BLOCK_FILE="$(mktemp /tmp/memoplus4dsh-patch-block.XXXXXX.yml)"
+# macOS/BSD mktemp requires the X's at the end of the template (no suffix).
+BLOCK_FILE="$(mktemp "${TMPDIR:-/tmp}/memoplus4dsh-patch-block.XXXXXX")"
 trap 'rm -f "$BLOCK_FILE"' EXIT
 cat > "$BLOCK_FILE" <<'EOF'
 - insert:

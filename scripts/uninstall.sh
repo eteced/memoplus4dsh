@@ -38,13 +38,21 @@ if [[ ! -d "$PROFILE_DIR" ]]; then
 fi
 
 if [[ -f "$PATCH_FILE" ]]; then
+  command -v python3 >/dev/null || { echo "uninstall.sh: python3 not found on PATH (needed to patch cordis.patch.yml)" >&2; exit 1; }
   echo "==> unmounting plugin from $PATCH_FILE"
   python3 "$PLUGIN_DIR/scripts/_patch_yml.py" "$PATCH_FILE" "$MARKER" remove
 fi
 
-if [[ -f "$PROFILE_DIR/package.json" ]] && command -v npm >/dev/null; then
-  echo "==> removing npm file: dependency"
-  (cd "$PROFILE_DIR" && npm uninstall --no-audit --no-fund memoplus4dsh) || true
+if [[ -f "$PROFILE_DIR/package.json" ]]; then
+  if command -v npm >/dev/null; then
+    echo "==> removing npm file: dependency"
+    (cd "$PROFILE_DIR" && npm uninstall --no-audit --no-fund memoplus4dsh) || true
+  else
+    echo "WARNING: npm not found on PATH; skipping 'npm uninstall'." >&2
+    echo "         The node_modules symlink is still removed below, but a stale" >&2
+    echo "         \"memoplus4dsh\": \"file:...\" entry may remain in" >&2
+    echo "         $PROFILE_DIR/package.json — remove it by hand." >&2
+  fi
 fi
 # npm uninstall is a no-op when the dependency is already gone; make sure the
 # symlink itself is gone either way.

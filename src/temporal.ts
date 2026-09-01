@@ -132,6 +132,13 @@ export function resolveTimeExpr(expr: string, base: Date): ResolvedTime {
       const diff = (wd - currentWd + 7) % 7
       return day(new Date(base.getTime() + (diff + 7) * DAY_MS))
     }
+    if (modifier === '上') {
+      // 上周X is the X of the previous calendar week (Mon–Sun): when the
+      // weekday already passed this week, the recent-past branch would land
+      // 7 days too late.
+      const diff = currentWd + 7 - wd
+      return day(new Date(base.getTime() - diff * DAY_MS))
+    }
     let diff = (currentWd - wd + 7) % 7
     if (diff === 0) diff = 7
     return day(new Date(base.getTime() - diff * DAY_MS))
@@ -328,7 +335,10 @@ export function resolveTemporalQuery(query: string, anchor: Date): TemporalOp {
   if (m) return { mode: 'IN_YEAR', year: Number(m[1]) }
 
   m = ORDINAL_RE.exec(q)
-  if (m) {
+  // A bare "this"/"past" with no unit carries no temporal intent ("how do I
+  // fix this error?"); treating it as a 180-day window would silently
+  // hard-filter older memories out of retrieval.
+  if (m && !(m[3] === undefined && (m[1]!.toLowerCase() === 'this' || m[1]!.toLowerCase() === 'past'))) {
     const keyword = m[1]!.toLowerCase()
     const num = m[2] !== undefined ? Number(m[2]) : 1
     const unit = (m[3] ?? '').toLowerCase()
@@ -421,7 +431,10 @@ export function temporalBonus(event: MemoryEvent, op: TemporalOp, anchor: Date):
   const dEvent = daysFrom(eventTime)
   const dMention = daysFrom(mentionTime)
   if (op.mode === 'LAST_K') {
-    return dEvent === undefined ? 0 : 0.25 / (1 + dEvent / 14)
+    // Events without an event time still have a mention time (always set);
+    // "the last time we spoke" should not ignore them.
+    const d = dEvent ?? dMention
+    return d === undefined ? 0 : 0.25 / (1 + d / 14)
   }
   if (op.mode === 'IN_YEAR') return 0
   if (op.mode === 'IN_MONTH' || op.mode === 'IN_SEASON') {

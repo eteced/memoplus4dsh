@@ -74,8 +74,7 @@ memoplus4dsh/
 ├── package.json            # npm 包：memoplus4dsh，Cordis 插件入口
 ├── tsconfig.json
 ├── src/
-│   ├── index.ts            # 插件入口：name/inject/apply，组装各模块
-│   ├── config.ts           # 插件 config schema（检索 top-k、注入开关等）
+│   ├── index.ts            # 插件入口：name/inject/apply + Config 接口，组装各模块
 │   ├── store.ts            # 记忆图存储：JSONL 追加 + 内存索引 + 快照
 │   ├── extraction.ts       # turn/end 异步抽取（LLM prompt + pipe 解析）
 │   ├── embedding.ts        # onnxruntime-node MiniLM；失败降级纯关键词
@@ -83,13 +82,12 @@ memoplus4dsh/
 │   ├── temporal.ts         # 时间表达式解析（相对时间/last year/recently 等）
 │   ├── inject.ts           # systemPrompt section + agent/pre-step 动态注入
 │   ├── tools.ts            # memory_search / memory_remember 工具
-│   └── bridges.ts          # schedule/goal/todo 事件桥接进记忆图
+│   └── bridges.ts          # schedule/goal/todo 事件桥接进记忆图（占位，未实现）
 ├── scripts/
-│   ├── install.sh / install.ps1    # dsh plugin add 封装 + 默认配置
-│   ├── uninstall.sh / uninstall.ps1
+│   ├── install.sh / uninstall.sh    # dsh plugin add 封装 + 默认配置（bash，Linux/macOS）
 │   └── test-harness/       # 本地测试 dsh 实例管理（见 §4）
-├── tests/                  # vitest 单测 + MockAdapter 集成测试
-├── docs/                   # 本文件 + API 文档 + 测试报告
+├── tests/                  # vitest 单测
+├── docs/                   # 本文件 + 各里程碑记录 + 测试报告
 ├── README.md
 ├── LICENSE.md              # 已有（Modified MIT）
 └── .gitignore
@@ -99,12 +97,10 @@ memoplus4dsh/
 
 ### 4.1 本地测试实例（scripts/test-harness/）
 
-- `start-test.sh`：用独立 `DSH_HOME=<repo>/test-harness/dsh-home` 启动 dsh web，工作目录锁定 `<workspace>/test`，绑定 127.0.0.1
-- **权限硬限制**：
-  - sandbox-policy 固定 `workspace-write` + workspaceRoot=测试目录（文件写被 fs-sandbox 拦截，进程被 bwrap/Landlock 限制在 workspace + /tmp）
-  - 再加一个测试专用的 `tools/pre-execute` guard 插件：硬拒绝任何目标路径在 `/tmp` 和测试目录之外的工具调用（双保险）
-- **访问控制**：dsh web 自带 launch token 认证（URL 带 `?token=`）+ HMAC cookie；测试脚本生成 32 字节随机 token 存测试目录（gitignored），端口随机（如 3xxxx），仅绑回环
-- `stop-test.sh` / `reset-test.sh`：停止进程 + 删除测试 DSH_HOME 和测试数据，随时可重置
+- `start-test.sh`：用独立 `DSH_HOME=<workspace>/test/dsh-home` 启动 dsh web，工作目录锁定 `<workspace>/test`，绑定 127.0.0.1、随机端口
+- **权限硬限制**：web 与 sdk 两个 profile 的 `cordis.patch.yml` 都固定写入 sandbox-policy 块（`mode: workspace-write` + 显式 `workspaceRoot`=测试目录，marker 托管、幂等）；sdk-driver 启动时还会从子进程环境中剥掉 `DSH_PERMISSION_MODE`，防止环境变量把权限模式提权。文件写被 fs-sandbox 拦截，进程被 bwrap/Landlock 限制在 workspace + /tmp
+- **访问控制**：dsh web 自带 launch token 认证（32 字节随机，URL 带 `?token=`）+ HMAC cookie；认证 URL 由 start 脚本从日志抓取存 `<test-dir>/run/web.url`（gitignored），仅绑回环
+- `stop-test.sh` / `reset-test.sh`：停止进程（kill 前校验 PID 身份）+ 删除测试 DSH_HOME 和测试数据（路径防呆校验），随时可重置
 
 ### 4.2 自动化测试
 

@@ -136,6 +136,30 @@ describe('Retriever ranking', () => {
     expect(results).toHaveLength(1)
   })
 
+  it('boosts events from the same turn as a top-ranked anchor (dialogue locality)', async () => {
+    const store = new MemoryStore({ dir })
+    // Anchor: strong lexical match for the query, in session s1 turn 5.
+    makeEvent(store, 'Alice', 'Alice adopted a kitten in the morning.', {
+      sourceSession: 's1', sourceTurn: 5,
+    })
+    // Same turn as the anchor; shares only the generic word "morning".
+    makeEvent(store, 'Carol', 'The paperwork was filed that morning.', {
+      sourceSession: 's1', sourceTurn: 5,
+    })
+    // Identical lexical profile, but from an unrelated session/turn.
+    makeEvent(store, 'Dave', 'The bakery closed early that morning.', {
+      sourceSession: 's2', sourceTurn: 9,
+    })
+    const retriever = new Retriever({ store, now: () => NOW })
+    const results = await retriever.retrieve('What happened in the morning when Alice adopted the kitten?', { topK: 3 })
+    const texts = results.map(e => e.normalizedText)
+    expect(texts[0]).toContain('kitten')
+    // Turn-locality must lift the same-turn event above the unrelated one.
+    expect(texts.indexOf('The paperwork was filed that morning.')).toBeGreaterThanOrEqual(0)
+    expect(texts.indexOf('The paperwork was filed that morning.'))
+      .toBeLessThan(texts.indexOf('The bakery closed early that morning.'))
+  })
+
   it('expands one hop through entities shared with the top hits', async () => {
     const store = new MemoryStore({ dir })
     const alice = store.createOrResolve('Alice', 'PERSON').entity

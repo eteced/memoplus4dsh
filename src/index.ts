@@ -24,8 +24,8 @@ export const name = 'memoplus4dsh'
 export interface Config {
   /** When to run extraction: after every completed turn, or never. */
   extraction: 'turn_end' | 'off'
-  /** Max memories injected per user message. */
-  injectTopK: number
+  /** Max memories injected per user message (default 8). */
+  injectTopK?: number
   /** Plugin data directory; defaults to `<dsh-home>/memoplus4dsh/`. */
   dataDir?: string
   /** Provider route for extraction/expansion calls; defaults to the session's own route. */
@@ -36,7 +36,7 @@ export interface Config {
   extractionMaxRetries?: number
   /** Output token cap for extraction calls (reasoning models need a large budget). */
   extractionMaxTokens?: number
-  /** Per-call timeout for extraction/expansion calls (default 240s). */
+  /** Per-call timeout for extraction/expansion calls (default 120s). */
   extractionCallTimeoutMs?: number
   /** Journal ops between snapshot compactions. */
   snapshotThreshold?: number
@@ -113,6 +113,7 @@ async function callPluginLlm(
   route: Route | undefined,
   prompt: string,
   maxTokens: number,
+  timeoutMs?: number,
 ): Promise<string> {
   const resolved = config.extractionProvider !== undefined && config.extractionModel !== undefined
     ? { provider: config.extractionProvider, model: config.extractionModel }
@@ -134,7 +135,7 @@ async function callPluginLlm(
     // otherwise stall the serial extraction queue forever. 120s pairs with
     // the 8192-token budget: reasoning models either finish well within it
     // or fail fast into the queue's retry.
-    signal: AbortSignal.timeout(config.extractionCallTimeoutMs ?? 120_000),
+    signal: AbortSignal.timeout(timeoutMs ?? config.extractionCallTimeoutMs ?? 120_000),
   })
   for await (const chunk of stream) {
     if (chunk.type === 'text-delta') {
@@ -179,7 +180,10 @@ export function apply(ctx: Context, config: Config) {
         ? undefined
         : createQueryExpander({
           cachePath: join(dataDir, 'query-expansion-cache.json'),
-          callLlm: prompt => callPluginLlm(ctx, config, lastRoute, prompt, 4096),
+          // Expansion output is ≤12 short lines: 1024 tokens cover a reasoning
+          // model's thinking for that; 30s keeps the pre-step critical path
+          // responsive when the endpoint degrades (failure → no expansion).
+          callLlm: prompt => callPluginLlm(ctx, config, lastRoute, prompt, 1024, 30_000),
         }),
     })
 
@@ -238,7 +242,7 @@ export function apply(ctx: Context, config: Config) {
       const handler = createPreStepHandler({
         store,
         maxChars: config.injectMaxChars,
-        retrieve: query => retriever.retrieve(query, { topK: config.injectTopK }),
+        retrieve: query => retriever.retrieve(query, { topK: config.injectTopK ?? 8 }),
       })
       ctx.on('agent/pre-step', (payload, next) => {
         const header = payload.agent.session.requestHeader()
@@ -251,16 +255,22 @@ export function apply(ctx: Context, config: Config) {
 
     logger.info(`memory plugin loaded (data: ${store.filePath}, extraction: ${config.extraction})`)
 
-    return () => {
+    return async () => {
       disposeTools?.()
       for (const bridge of bridges) bridge.dispose()
+      // Drain pending extraction jobs before the final checkpoint; each is
+      // bounded by its own call timeout, so this terminates.
+      try {
+        await queue?.whenIdle()
+      } catch {
+        // The queue never rejects; guard anyway.
+      }
       // Best-effort durable checkpoint; the journal itself is already safe.
       try {
         store.close()
       } catch (error) {
         logger.warn(`snapshot on dispose failed: ${String(error)}`)
       }
-      void queue
     }
   })
 }

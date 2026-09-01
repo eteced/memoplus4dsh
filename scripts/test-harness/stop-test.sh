@@ -18,6 +18,19 @@ if ! kill -0 "$PID" 2>/dev/null; then
   exit 0
 fi
 
+# PIDs get reused; only kill a process that still looks like our dsh instance.
+if [[ -r "/proc/$PID/cmdline" ]]; then
+  CMDLINE="$(tr '\0' ' ' < "/proc/$PID/cmdline")"
+else
+  # /proc fallback for non-Linux systems (e.g. macOS).
+  CMDLINE="$(ps -p "$PID" -o args= 2>/dev/null || true)"
+fi
+if [[ "$CMDLINE" != *dsh* ]]; then
+  echo "stale pid file (pid $PID reused by a non-dsh process: ${CMDLINE:-unknown}); removing" >&2
+  rm -f "$PID_FILE"
+  exit 0
+fi
+
 echo "==> stopping dsh web (pid $PID)"
 kill "$PID"
 for _ in $(seq 1 10); do

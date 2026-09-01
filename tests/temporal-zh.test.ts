@@ -36,6 +36,19 @@ describe('resolveTimeExpr — Chinese constructs', () => {
     expect(withTime.precision).toBe('day')
   })
 
+  it('resolves 上周X to the previous calendar week', () => {
+    // Friday 2026-09-04: this week's Wednesday (09-02) already passed, so
+    // 上周三 is the previous week's Wednesday, not 09-02.
+    const friday = new Date('2026-09-04T12:00:00.000Z')
+    expect(iso(resolveTimeExpr('上周三', friday).time)).toBe('2026-08-26T12:00:00.000Z')
+    // Said on Wednesday itself, 上周三 is 7 days back.
+    const wednesday = new Date('2026-09-02T12:00:00.000Z')
+    expect(iso(resolveTimeExpr('上周三', wednesday).time)).toBe('2026-08-26T12:00:00.000Z')
+    // 上周五 said on Tuesday: this week's Friday is still ahead, so the
+    // most recent Friday already is last week's.
+    expect(iso(resolveTimeExpr('上周五', BASE).time)).toBe('2026-08-28T12:00:00.000Z')
+  })
+
   it('resolves "N 天/周/个月前"', () => {
     expect(iso(resolveTimeExpr('三天前', BASE).time)).toBe('2026-08-29T12:00:00.000Z')
     expect(iso(resolveTimeExpr('两周前', BASE).time)).toBe('2026-08-18T12:00:00.000Z')

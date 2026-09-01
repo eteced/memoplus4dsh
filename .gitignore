@@ -5,8 +5,9 @@ coverage/
 data/
 *.onnx
 # 测试 harness 的本地实例（含 token/credentials）
-test-harness/dsh-home/
-test-harness/*.token
+test/
+**/dsh-home/
+**/run/web.url
 # 凭证与环境
 .env
 .env.*

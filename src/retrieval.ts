@@ -110,7 +110,7 @@ export interface QueryExpanderOptions {
   callLlm: (prompt: string) => Promise<string>
   /** Disk cache path; expansion results are keyed by normalized query text. */
   cachePath: string
-  /** Number of samples whose union is cached. Default 2. */
+  /** Number of samples whose union is cached. Default 1. */
   samples?: number
 }
 
@@ -120,7 +120,9 @@ export interface QueryExpanderOptions {
  * must not poison the cache). LLM/IO failures degrade to no expansion.
  */
 export function createQueryExpander(options: QueryExpanderOptions): (query: string) => Promise<string[]> {
-  const samples = options.samples ?? 2
+  // One sample by default: a second sampling pass doubles latency/cost on the
+  // pre-step critical path for a marginal recall gain.
+  const samples = options.samples ?? 1
   const loadCache = (): Record<string, string[]> => {
     if (!existsSync(options.cachePath)) return {}
     try {
@@ -144,7 +146,8 @@ export function createQueryExpander(options: QueryExpanderOptions): (query: stri
     const words = new Set<string>()
     try {
       for (let i = 0; i < Math.max(1, samples); i++) {
-        const content = await options.callLlm(QUERY_EXPANSION_PROMPT.replace('{query}', query))
+        // Replacement-function form: user text may contain $-patterns.
+        const content = await options.callLlm(QUERY_EXPANSION_PROMPT.replace('{query}', () => query))
         for (const line of content.split('\n')) {
           const cleaned = line.trim().replace(/^[-•]\s*/, '').trim()
           if (cleaned.length > 0) for (const w of wordsOf(cleaned)) words.add(w)
@@ -408,7 +411,7 @@ export class Retriever {
     for (const anchorItem of anchors.slice(0, 5)) {
       const ev = anchorItem.event
       if (ev.sourceSession.length > 0 && ev.sourceTurn >= 0) {
-        const key = `${ev.sourceSession}${ev.sourceTurn}`
+        const key = `${ev.sourceSession}|${ev.sourceTurn}`
         anchorTurnScore.set(key, Math.max(anchorTurnScore.get(key) ?? 0, anchorItem.score))
       }
     }
@@ -426,7 +429,7 @@ export class Retriever {
         let loc = 0
         if (ev.sourceSession.length > 0 && ev.sourceTurn >= 0) {
           for (const [key, aScore] of anchorTurnScore) {
-            const [sess, turnStr] = key.split('')
+            const [sess, turnStr] = key.split('|')
             if (sess !== ev.sourceSession) continue
             const dt = ev.sourceTurn - Number(turnStr)
             const adt = Math.abs(dt)

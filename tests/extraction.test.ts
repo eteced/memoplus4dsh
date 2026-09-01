@@ -224,7 +224,7 @@ describe('ExtractionQueue', () => {
     const queue = new ExtractionQueue(async () => {
       attempts++
       if (attempts < 3) throw new Error('boom')
-    }, { maxRetries: 2 })
+    }, { maxRetries: 2, retryDelayMs: [0] })
     queue.enqueue(makeJob())
     await queue.whenIdle()
     expect(attempts).toBe(3)
@@ -242,6 +242,7 @@ describe('ExtractionQueue', () => {
       },
       {
         maxRetries: 1,
+        retryDelayMs: [0],
         onSkip: job => skipped.push(job),
         onAttemptFailed: (_job, attempt) => failedAttempts.push(attempt),
       },
