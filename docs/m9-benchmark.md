@@ -1,9 +1,23 @@
 # M9 — MemoryAgentBench 评测报告（memoplus4dsh + deepseek-harness）
 
-> 日期：2026-09-02 状态：**全部完成**（FC-SH ×4 + FC-MH ×4 + LME(S*)，共 1031 题）
+> 日期：2026-09-03 状态：**第一轮成绩因污染作废，加固后重跑中**
 > 被测组合：dsh sdk profile + memoplus4dsh（默认配置，deepseek-v4-flash @ DeepSeek 官方 API）
 > 方案与口径：docs/m9-benchmark-plan.md；复现：benchmark/README.md
-> **头条结果：FC-SH 均值 81.25（基线最佳 60.0）；FC-MH 均值 76.0（基线最佳 7.0）；LME(S*) 54.67（与基线最佳 55.7 持平）。**
+
+## 0. 完整性审计与第一轮作废声明（2026-09-03）
+
+**第一轮的 FC-SH/FC-MH/LME 分数全部作废**，原因：
+
+1. 查询阶段模型（v4-flash 推理模型）在难题上进入"侦探模式"，用 `bash`/`read`/`grep` 工具在文件系统里自行调查。评测沙箱 workspace 是 `benchmark/`，其中有一个 **模型自己创建的 `conflict_resolution.parquet`**（第一轮 sh_6k 期间生成，含全部 8 个 context 的 context+questions+**answers**）。
+2. 留存日志可审计的 mh_262k：**100 个查询 session 中 81 个打开过数据集文件并读到了 answers 列**（如 q92 读 answers 后答对 'Mikhail Gorbachev'）。更早 config 的 session 日志因 per-context wipe 已删，无法回溯，保守起见全部作废。
+3. 另有 3 个 LME session 通过 `~/.cache/huggingface` 的 HF 缓存读到了数据集（读路径未被 sandbox 限制覆盖）。
+
+**根因**：评测 harness 没禁文件系统工具——在一个会主动调查的推理模型面前，这等于开卷考试。**这不是插件记忆能力的测量值，无效。**
+
+**修复（第二轮）**：
+- benchmark sdk profile 禁用 `tool-bash` / `tool-fs` / `tool-fs-search` / `tool-web`（cordis.patch.yml marker 块，`disabled: true`）；插件自带 `memory_search`/`memory_remember` 保留（它们才是被测对象）。
+- 删除模型创建的 `conflict_resolution.parquet`；wipe 逻辑改为归档 session 日志（`sessions-archive/`）而非删除，保证第二轮全程可审计。
+- 第二轮跑完后逐 session 复查工具调用（应只剩 memory_* 工具）。
 
 ## 1. 方法论摘要（可比性声明）
 
@@ -21,14 +35,14 @@
 
 | config | 上下文长度 | 题数 | exact_match | 状态 |
 |---|---|---|---|---|
-| FC-SH 6k | 6k | 100 | **83.0** | ✅ |
-| FC-SH 32k | 32k | 100 | **81.0** | ✅ |
-| FC-SH 64k | 64k | 100 | **78.0** | ✅ |
-| FC-SH 262k | 262k | 100 | **83.0** | ✅ |
-| FC-MH 6k | 6k | 100 | **75.0** | ✅ |
-| FC-MH 32k | 32k | 100 | **74.0** | ✅ |
-| FC-MH 64k | 64k | 100 | **76.0** | ✅ |
-| FC-MH 262k | 262k | 100 | **79.0** | ✅ |
+| FC-SH 6k | 6k | 100 | ~~83.0~~（第一轮，作废） | 🔄 重跑中 |
+| FC-SH 32k | 32k | 100 | ~~81.0~~（第一轮，作废） | 🔄 重跑中 |
+| FC-SH 64k | 64k | 100 | ~~78.0~~（第一轮，作废） | 🔄 重跑中 |
+| FC-SH 262k | 262k | 100 | ~~83.0~~（第一轮，作废） | 🔄 重跑中 |
+| FC-MH 6k | 6k | 100 | ~~75.0~~（第一轮，作废） | 🔄 重跑中 |
+| FC-MH 32k | 32k | 100 | ~~74.0~~（第一轮，作废） | 🔄 重跑中 |
+| FC-MH 64k | 64k | 100 | ~~76.0~~（第一轮，作废） | 🔄 重跑中 |
+| FC-MH 262k | 262k | 100 | ~~79.0~~（第一轮，作废；81% session 确认读到 answers 列） | 🔄 重跑中 |
 
 ## 3. 结果：Accurate Retrieval（LongMemEval S*）
 
@@ -54,6 +68,7 @@
 ## 5. 与官方基线对比表
 
 > 基线为论文 Table 2（arXiv:2507.05257v2，RAG/记忆类骨架 GPT-4o-mini）；本组合骨架 deepseek-v4-flash（推理模型）。FC 指标 = exact_match（rule-based）；LME 指标 = 官方 LLM judge accuracy。
+> ⚠️ 下表"本组合"数值为**第一轮（已作废）**，仅作存档；有效成绩以第二轮（§0 修复后）为准，完成后更新。
 
 ### 5.1 Selective Forgetting（FC-SH / FC-MH，各 4 长度平均；本组合按长度列出）
 
