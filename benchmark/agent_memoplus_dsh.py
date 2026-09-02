@@ -48,24 +48,26 @@ class DshDriver:
             env=env,
             text=True,
             bufsize=1,
-            process_group=True,  # own group: a hung turn can be killed wholesale
         )
 
     def restart(self):
         """Kill the runtime (and its hung turn) and boot a fresh one.
 
         Memory lives in the on-disk graph, so a restart loses nothing but the
-        pathological in-flight turn itself.
+        pathological in-flight turn itself. process_group is EPERM in this
+        environment, so the dsh child is cleaned up by binary name (only one
+        bench runtime exists at a time).
         """
-        import signal
         try:
-            os.killpg(self.proc.pid, signal.SIGKILL)
+            self.proc.kill()
         except (ProcessLookupError, PermissionError):
             pass
         try:
             self.proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             pass
+        subprocess.run(["pkill", "-f", "dsh-install/node_modules/.bin/dsh"],
+                       check=False, capture_output=True)
         self.start()
 
     def _call(self, cmd, session=None, text=None, timeout=None):
