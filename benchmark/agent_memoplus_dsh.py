@@ -109,7 +109,16 @@ class DshDriver:
                 return resp
         raise DriverError(f"driver call timed out after {timeout or 600}s (cmd={cmd})")
 
-    def close(self):
+    def call(self, cmd, session=None, text=None, timeout=None):
+        """_call with one driver-restart retry on transient runtime boot exits."""
+        try:
+            return self._call(cmd, session=session, text=text, timeout=timeout)
+        except DriverError as error:
+            if "runtime exited" not in str(error):
+                raise
+            print(f"[driver] runtime exited during {cmd}; restarting driver once")
+            self.restart()
+            return self._call(cmd, session=session, text=text, timeout=timeout)
         try:
             self._call("close", timeout=120)
         except DriverError:
@@ -167,7 +176,7 @@ class MemoplusDshAgent:
     def _send_batch(self, chunks, batch_no):
         text = "\n".join(chunks) + "\n\n（以上是需要记忆的材料，只需回复：已记录）"
         session = f"bench-ingest-{self.context_tag}-{batch_no}"
-        self.driver._call("ingest", session=session, text=text)
+        self.driver.call("ingest", session=session, text=text)
 
     def wait_queue_drain(self, timeout=1800, poll=3.0):
         """Wait until the durable extraction queue has no unsettled jobs."""
@@ -216,7 +225,7 @@ class MemoplusDshAgent:
         session = f"bench-q{self._query_count}-{self.context_tag}"
         start = time.time()
         try:
-            resp = self.driver._call("ask", session=session, text=query, timeout=900)
+            resp = self.driver.call("ask", session=session, text=query, timeout=900)
         except DriverError as error:
             query_time = time.time() - start
             print(f"\n[ask] query failed after {query_time:.0f}s ({error}); recorded as wrong answer")
