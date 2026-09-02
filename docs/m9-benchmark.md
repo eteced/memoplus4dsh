@@ -50,9 +50,10 @@
 
 | context | 题数 | accuracy（LLM judge） | 状态 |
 |---|---|---|---|
-| LME(S*) ×5 contexts | 300 | **54.67**（multi-session 32.0 / single-session-user 82.2 / single-session-assistant 70.0 / temporal-reasoning 53.3 / knowledge-update 55.6 / preference 56.7） | ✅ |
+| LME(S*) ×5 contexts（第二轮，加固后） | 300 | **56.67**（multi-session 42.7 / single-session-user 82.2 / single-session-assistant 60.0 / temporal-reasoning 52.0 / knowledge-update 62.2 / preference 53.3） | ✅ |
 
-> judge：官方 `longmem_qa_evaluate.py` 逐字复用（副本 judge_lme.py），judge 模型 deepseek-v4-flash（官方默认 gpt-4o 不可得；yes/no 判定对 judge 模型不敏感——首次复核曾全员判 0，根因是 judge 调用 max_tokens=10 被 thinking 耗尽，即 F-1 同型问题，已在副本中显式禁 thinking 后复跑）。
+> judge：官方 `longmem_qa_evaluate.py` 逐字复用（副本 judge_lme.py），judge 模型 deepseek-v4-flash。第二轮全程零非记忆工具成功调用（str_replace_editor 尝试 10 次全被守卫拦截）。
+> 对照：第一轮（作废）为 54.67——污染不仅没帮上忙，侦探循环反而浪费了部分问题（900s 超时记错）；加固后干净成绩反而更高。
 
 ## 4. 中间快照与观察
 
@@ -95,7 +96,7 @@
 
 | Agent | LME(S*) |
 |---|---|
-| **memoplus4dsh + dsh（本组合）** | **54.67** |
+| **memoplus4dsh + dsh（本组合，第二轮有效成绩）** | **56.67** |
 | GPT-4.1-mini（长上下文） | 55.7 |
 | HippoRAG-v2 | 50.7 |
 | Text-Embed-3-Large | 50.3 |
@@ -107,7 +108,7 @@
 | Mem0 | 36.0 |
 | GPT-4o / GPT-4o-mini / Claude-3.7 | 32.0 / 30.7 / 34.0 |
 
-**本组合 54.67，与全场最高（55.7）差 1.0pt，超过全部 RAG/记忆类 agent。**
+**本组合 56.67，超过全场最佳（GPT-4.1-mini 55.7），为 LME(S*) 维度第一。**
 
 ## 6. 成本与延迟
 
