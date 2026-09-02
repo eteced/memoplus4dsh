@@ -53,7 +53,7 @@ def _read_session(path):
 def audit(archive_dir):
     """Audit one archived context directory. Returns (ok, report)."""
     root = Path(archive_dir)
-    sessions = sorted(root.glob("*/session.jsonl.zstd"))
+    sessions = sorted(root.rglob("session.jsonl.zstd"))
     report = {
         "dir": str(root),
         "sessions": len(sessions),
@@ -84,8 +84,7 @@ def audit(archive_dir):
             calls[name] += 1
             if name not in MEMORY_TOOLS:
                 succeeded = result_by_call.get(cid, False)
-                denied[cid and f"{sid}:{name}" or f"{sid}:{name}"] += 0  # counted below
-                denied[f"{name}"] += 1
+                denied[name] += 1
                 if succeeded:
                     report["successful_nonmemory_tools"].append(
                         {"session": sid, "tool": name,
