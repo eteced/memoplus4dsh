@@ -13,6 +13,7 @@ Protocol compliance with the official MemoryAgentBench harness:
 
 import json
 import os
+import select
 import subprocess
 import sys
 import time
@@ -29,19 +30,43 @@ class DshDriver:
 
     def __init__(self, repo_root, dsh_home, node_bin="node"):
         self.repo_root = repo_root
+        self.dsh_home = dsh_home
+        self.node_bin = node_bin
+        self.proc = None
+        self._next_id = 0
+        self.start()
+
+    def start(self):
         env = dict(os.environ)
-        env["BENCH_DSH_HOME"] = dsh_home
-        env["BENCH_WORKSPACE"] = os.path.join(repo_root, "benchmark")
+        env["BENCH_DSH_HOME"] = self.dsh_home
+        env["BENCH_WORKSPACE"] = os.path.join(self.repo_root, "benchmark")
         self.proc = subprocess.Popen(
-            [node_bin, os.path.join(repo_root, "benchmark", "dsh-bench-driver.mjs")],
+            [self.node_bin, os.path.join(self.repo_root, "benchmark", "dsh-bench-driver.mjs")],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             env=env,
             text=True,
             bufsize=1,
+            process_group=True,  # own group: a hung turn can be killed wholesale
         )
-        self._next_id = 0
+
+    def restart(self):
+        """Kill the runtime (and its hung turn) and boot a fresh one.
+
+        Memory lives in the on-disk graph, so a restart loses nothing but the
+        pathological in-flight turn itself.
+        """
+        import signal
+        try:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        self.start()
 
     def _call(self, cmd, session=None, text=None, timeout=None):
         self._next_id += 1
@@ -54,21 +79,33 @@ class DshDriver:
         assert self.proc.stdin and self.proc.stdout
         self.proc.stdin.write(json.dumps(payload) + "\n")
         self.proc.stdin.flush()
+        # select-based read: a bare readline() blocks forever and would
+        # silently defeat the deadline (observed: a 330-step pathological
+        # query hung the runner for 75+ minutes despite a 600s "timeout").
+        fd = self.proc.stdout.fileno()
         deadline = time.time() + (timeout or 600)
+        buf = ""
         while time.time() < deadline:
-            line = self.proc.stdout.readline()
-            if line == "":
+            remaining = deadline - time.time()
+            ready, _, _ = select.select([fd], [], [], min(5.0, max(0.1, remaining)))
+            if not ready:
+                continue
+            chunk = os.read(fd, 65536)
+            if not chunk:
                 raise DriverError(f"driver process exited (cmd={cmd})")
-            try:
-                resp = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if resp.get("id") != req_id:
-                continue
-            if not resp.get("ok"):
-                raise DriverError(resp.get("error", "unknown driver error"))
-            return resp
-        raise DriverError(f"driver call timed out (cmd={cmd})")
+            buf += chunk.decode("utf-8", "replace")
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
+                try:
+                    resp = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if resp.get("id") != req_id:
+                    continue
+                if not resp.get("ok"):
+                    raise DriverError(resp.get("error", "unknown driver error"))
+                return resp
+        raise DriverError(f"driver call timed out after {timeout or 600}s (cmd={cmd})")
 
     def close(self):
         try:
@@ -166,11 +203,35 @@ class MemoplusDshAgent:
     # ---------- query ----------
 
     def ask(self, query):
-        """Answer one query in a fresh session; official output dict shape."""
+        """Answer one query in a fresh session; official output dict shape.
+
+        A driver failure (e.g. the per-query timeout on a pathological
+        agentic loop) is recorded as a wrong-but-present answer instead of
+        crashing the whole run: the harness skips nothing, and one hung
+        question must not hold the benchmark hostage.
+        """
         self._query_count += 1
         session = f"bench-q{self._query_count}-{self.context_tag}"
         start = time.time()
-        resp = self.driver._call("ask", session=session, text=query)
+        try:
+            resp = self.driver._call("ask", session=session, text=query, timeout=900)
+        except DriverError as error:
+            query_time = time.time() - start
+            print(f"\n[ask] query failed after {query_time:.0f}s ({error}); recorded as wrong answer")
+            # The node driver is still awaiting the hung turn and would not
+            # serve the next query: restart the runtime (memory is on disk).
+            try:
+                self.driver.restart()
+            except Exception as restart_error:  # noqa: BLE001
+                print(f"[ask] driver restart failed: {restart_error}")
+            return {
+                "output": "",
+                "input_len": 0,
+                "output_len": 0,
+                "memory_construction_time": 0,
+                "query_time_len": query_time,
+                "injected": "",
+            }
         query_time = time.time() - start
         output = resp.get("reply", "")
         injected = resp.get("injected", "")
