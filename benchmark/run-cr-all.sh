@@ -19,6 +19,6 @@ for cfg in \
 do
   echo "================ $cfg ================"
   ./venv/bin/python run_benchmark.py \
-    --dataset_config "MemoryAgentBench/configs/data_conf/$cfg" || echo "FAILED: $cfg"
+    --dataset_config "MemoryAgentBench/configs/data_conf/$cfg" || { echo "FAILED (aborting): $cfg"; exit 1; }
 done
 echo "ALL DONE"

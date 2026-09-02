@@ -124,6 +124,42 @@ def wipe_memory_state(dsh_home):
                 os.remove(target)
 
 
+def archive_sessions(dsh_home, tag):
+    """Move this context's session logs + guard denial log into
+    results/sessions-archive/<tag>/ for the audit trail (user requirement:
+    中间过程全留存). Returns the archive dir."""
+    archive_root = os.path.join(REPO_ROOT, "benchmark", "results", "sessions-archive", tag)
+    sessions = os.path.join(dsh_home, "sessions")
+    if os.path.exists(sessions):
+        shutil.move(sessions, archive_root)
+    else:
+        os.makedirs(archive_root, exist_ok=True)
+    denials = os.path.join(dsh_home, "bench-guard-denials.jsonl")
+    if os.path.exists(denials):
+        den_dir = os.path.join(REPO_ROOT, "benchmark", "results", "guard-denials")
+        os.makedirs(den_dir, exist_ok=True)
+        shutil.move(denials, os.path.join(den_dir, tag + ".jsonl"))
+    return archive_root
+
+
+def audit_context(dsh_home, tag):
+    """Archive then audit; abort the run on any anomaly (fail fast, save tokens)."""
+    sys.path.insert(0, os.path.join(REPO_ROOT, "benchmark"))
+    from audit_sessions import audit
+    archive_dir = archive_sessions(dsh_home, tag)
+    ok, report = audit(archive_dir)
+    report_path = os.path.join(REPO_ROOT, "benchmark", "results", "audit", tag + ".json")
+    os.makedirs(os.path.dirname(report_path), exist_ok=True)
+    with open(report_path, "w") as fh:
+        json.dump(report, fh, ensure_ascii=False, indent=2)
+    print(f"\n[audit] {tag}: {'PASS' if ok else 'FAIL'} "
+          f"(tools: {report['tool_calls']}, denied attempts: {report['denied_attempts']})")
+    if not ok:
+        raise RuntimeError(
+            f"AUDIT FAIL for {tag}: successful non-memory tools or suspicious content found; "
+            f"see {report_path}. Aborting the run to save tokens.")
+
+
 def main():
     args = parse_args()
     config_path = args.dataset_config
@@ -207,6 +243,9 @@ def main():
                              metrics, time_cost_list, start_time)
                 if args.max_queries > 0 and (context_query_start + local_q_idx + 1) >= args.max_queries:
                     break
+        # Per-context audit (user requirement: 跑一次审计一次): archive the
+        # session logs and verify no answer came from anything but memory.
+        audit_context(dsh_home, f"{dataset_config['sub_dataset']}-ctx{context_index}")
         query_index = query_index_end
 
     print(f"\nResults: {out_path}")

@@ -1,0 +1,7 @@
+{
+  "name": "bench-tool-whitelist",
+  "version": "0.1.0",
+  "description": "Benchmark-only guard: whitelist memory tools, deny everything else (tools/pre-execute).",
+  "type": "module",
+  "main": "index.js"
+}
