@@ -20,3 +20,4 @@ benchmark/results/
 benchmark/dsh-home*/
 __pycache__/
 *.pyc
+benchmark/outputs/
