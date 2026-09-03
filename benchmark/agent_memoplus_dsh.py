@@ -119,6 +119,8 @@ class DshDriver:
             print(f"[driver] runtime exited during {cmd}; restarting driver once")
             self.restart()
             return self._call(cmd, session=session, text=text, timeout=timeout)
+
+    def close(self):
         try:
             self._call("close", timeout=120)
         except DriverError:
