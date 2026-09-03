@@ -4,7 +4,7 @@ Unified long-term memory plugin for [DeepSeek Harness](https://github.com/deepse
 
 One coherent entity-time fused memory graph for everything an agent needs to remember — facts, preferences, plans, and events from conversations — instead of scattered per-day markdown files. The core algorithms are ported from the memoplus/ETMS research codebase, validated on LoCoMo (82.9% under the mem0 protocol).
 
-**Status: v0.1 implemented.** Intro (method + benchmark results): [docs/intro.md](docs/intro.md). Architecture: [docs/design.md](docs/design.md). Known issues: [docs/known-issues.md](docs/known-issues.md).
+**Status: v0.1 implemented.** Tech report: [docs/tech-report.md](docs/tech-report.md). Intro (method + benchmark results): [docs/intro.md](docs/intro.md). Architecture: [docs/design.md](docs/design.md). Known issues: [docs/known-issues.md](docs/known-issues.md).
 
 ## How it works
 
