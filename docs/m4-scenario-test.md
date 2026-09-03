@@ -19,7 +19,7 @@ key 只经环境变量注入，不落任何文件）。
 | S2 | 跨 session 召回（重启进程后新会话三问） | ⚠️ 2/3 | Rust、绿茶两问回复正确且注入相关；"预约"问注入含牙医预约但回复为空（F1，模型选择调 memory_search） |
 | S3 | 时间语义（昨天医院 → 最近去过哪） | ✅ PASS | eventTime=昨天 day 精度；回复正确区分"未来预约 vs 已发生的事件" |
 | S4 | 主动记忆（帮我记住接收器 → 新会话问） | ✅ PASS | 图含"无线鼠标接收器在书桌第二个抽屉里"；新会话回复"放在书桌的第二个抽屉里 🎯"（memory_remember 工具路径被 F1 阻断，抽取兜底生效） |
-| S5 | 日程桥接 | ✅ PASS（信息项） | schedule_create 不可用（sdk profile 未挂 schedule 插件 + F1）；bridges 未实现，评审会未进图——如实记录的已知缺口 |
+| S5 | 日程桥接 | ✅ PASS（信息项） | schedule_create 不可用（sdk profile 未挂 schedule 插件 + F1）；bridges 未实现，评审会未进图——如实记录的已知缺口（**已于 M8 实现并验证**，见 docs/m8-progress-memory-eval.md） |
 | S6 | 负面对照（没聊过的自行车品牌） | ✅ PASS | agent 未编造品牌；图内无自行车事件 |
 
 **插件侧证据链（每场均验证）**：记忆图 jsonl 有对应事件（内容 + 双时间锚）；session 日志有 `source.plugin=memoplus4dsh` 的注入消息且内容与问题相关；agent 回复含正确答案（除 F1 导致的空回复）。
@@ -53,7 +53,11 @@ reasoning 常开不可关；抽取调用间歇性 burning 全部预算返回空 
 
 ## 已知缺口（不阻塞发布）
 
-- bridges.ts 未实现：schedule/todo/goal 事件不进记忆图（S5 记录）。dsh 侧日程进图需等 F1 修复后才有意义。
+> ⚠️ 本节写于 M4（2026-09-01），以下条目状态以 known-issues.md 为准：
+> - bridges **已于 M8 实现**（goal/todo/schedule/plan 事件进记忆图，场景测试 S1/S2 通过，M9 第二轮 benchmark 中持续工作）。
+> - F1 经核实为 Zen 网关层的显式 null 序列化问题；**用 DeepSeek 官方 API 不受影响**（known-issues.md F1 有三方字节级对照证据）。
+
+- ~~bridges.ts 未实现：schedule/todo/goal 事件不进记忆图（S5 记录）。dsh 侧日程进图需等 F1 修复后才有意义。~~ → 已于 M8 实现，见 docs/m8-progress-memory-eval.md；F1 与桥接无关（桥接走 session 事件，不走工具调用）。
 - 注入排序在"最近在学什么"类问题上会把高 recency 的无关事件排在前面（时间加成），但 top-8 内仍含正确条目——可接受的噪音。
 - 查询扩展在该端点上产出偏弱（单次 1-2 词），缓存正常；对结果影响有限。
 - 端对端对话驱动依赖 SDK 子进程方式；web RPC 驱动未使用（SDK 更可控，已足够）。
