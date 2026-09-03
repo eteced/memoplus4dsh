@@ -62,7 +62,7 @@ describe('registerMemoryTools', () => {
     const store = new MemoryStore({ dir })
     const retriever = new Retriever({ store, now: () => NOW })
     const dispose = registerMemoryTools(ctx, { store, retriever, now: () => NOW })
-    expect([...registered.keys()].sort()).toEqual(['memory_remember', 'memory_search'])
+    expect([...registered.keys()].sort()).toEqual(['memory_remember', 'memory_search', 'memory_visualize'])
     dispose()
     expect(registered.size).toBe(0)
   })

@@ -1,7 +1,13 @@
 # M10 — 记忆图可视化（交互式 HTML）
 
-> 日期：2026-09-04 状态：方案（实施前文档）
+> 日期：2026-09-04 状态：**已实施并验证**（2026-09-05）
 > 需求：用户希望可视化现有记忆——产出一张有交互的 HTML 图。
+>
+> 验证记录：`npm run build` 通过；`npx vitest run` 全量 124 过（含 `tests/visualize.test.ts` 3 例）；
+> headless Chromium 截图验证——大图（LME benchmark 真实库，7065 实体 / 7830 事件，图区按上限展示 1200）
+> 与小图（1 实体）均正常渲染，无 JS 错误。
+> 实施中发现并修复一个 bug：嵌入 JS 中 `relayout()` 首次调用早于 `let needsDraw` 声明（TDZ 报错导致整页不渲染），
+> 已将声明前移（`src/visualize.ts`）。
 
 ## 设计
 

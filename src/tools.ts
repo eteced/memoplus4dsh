@@ -13,6 +13,9 @@ import type { MemoryStore } from './store.js'
 import type { Retriever } from './retrieval.js'
 import { resolveTimeExpr } from './temporal.js'
 import { formatMemoryLine } from './inject.js'
+import { renderGraphHTML } from './visualize.js'
+import { writeFile } from 'node:fs/promises'
+import { join, dirname } from 'node:path'
 
 const SEARCH_OUTPUT_SCHEMA = {
   type: 'array',
@@ -33,6 +36,16 @@ const REMEMBER_OUTPUT_SCHEMA = {
   properties: {
     id: { type: 'string', required: true },
     stored: { type: 'boolean', required: true, const: true },
+  },
+} as const
+
+const VISUALIZE_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    path: { type: 'string', required: true },
+    entities: { type: 'number', required: true },
+    events: { type: 'number', required: true },
   },
 } as const
 
@@ -57,8 +70,10 @@ export interface MemoryToolsDeps {
 }
 
 /**
- * Register both memory tools on `ctx.tools`.
- * @returns the aggregate disposer removing both registrations.
+ * Register the memory tools on `ctx.tools`: `memory_search` (active recall),
+ * `memory_remember` (explicit writes) and `memory_visualize` (interactive
+ * HTML graph of the current memory, docs/m10-visualization.md).
+ * @returns the aggregate disposer removing all registrations.
  */
 export function registerMemoryTools(ctx: Context, deps: MemoryToolsDeps): () => void {
   const now = deps.now ?? (() => new Date())
@@ -120,6 +135,25 @@ export function registerMemoryTools(ctx: Context, deps: MemoryToolsDeps): () => 
           sourceTurn: -1,
         })
         return { id: event.id, stored: true as const }
+      },
+    })),
+    ctx.tools.register(defineTool({
+      name: 'memory_visualize',
+      description: 'Render the long-term memory graph as an interactive HTML page (entities, events, time anchors) '
+        + 'and return the file path. Use when the user asks to see/visualize their memories.',
+      parameters: {},
+      output: {
+        schema: VISUALIZE_OUTPUT_SCHEMA,
+        render: (_args, value) => [{
+          type: 'text',
+          text: `Memory graph rendered: ${value.path} (${value.entities} entities, ${value.events} events). Open it in a browser.`,
+        }],
+      },
+      async execute(_args, exec) {
+        const html = renderGraphHTML(deps.store.listEntities(), deps.store.listEvents())
+        const out = join(dirname(deps.store.filePath), 'memory-graph.html')
+        await writeFile(out, html, 'utf8')
+        return { path: out, entities: deps.store.listEntities().length, events: deps.store.listEvents().length }
       },
     })),
   ]
