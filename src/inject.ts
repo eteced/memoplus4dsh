@@ -83,7 +83,12 @@ export function formatMemoryLine(event: MemoryEvent, store: MemoryStore): string
     ? event.timeExpr
     : event.eventTime ?? event.mentionTime.slice(0, 10)
   const details = event.details.length > 0 ? ` (${event.details})` : ''
-  return `- [${time}] ${event.normalizedText}${details}`
+  // Superseded values stay visible (history transparency) but must be
+  // MARKED — benchmark evidence (mini-4 mh q0): old and new values listed
+  // side by side with identical timestamps, and the model picked the stale
+  // one because nothing told it which is current.
+  const stale = event.supersededBy !== undefined ? ' [superseded — newer value exists]' : ''
+  return `- [${time}] ${event.normalizedText}${details}${stale}`
 }
 
 /** The injected memory block, or undefined when there is nothing to say. */

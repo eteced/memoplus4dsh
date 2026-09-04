@@ -273,3 +273,30 @@ describe('createPreStepHandler', () => {
     expect(decision.kind === 'enter' && decision.messages).toHaveLength(2)
   })
 })
+
+describe('superseded marker (mini-4 mh q0 lesson)', () => {
+  it('marks superseded events so stale values are visually distinct', () => {
+    const store = new MemoryStore({ dir })
+    const e1 = seedStore(store)
+    const alice = store.findEntityByName('Alice')!
+    const e2 = store.addEvent({
+      subjectEntityIds: [alice.id],
+      objectEntityIds: [],
+      predicate: 'likes',
+      normalizedText: 'Alice likes coffee.',
+      details: '',
+      timeExpr: '',
+      eventTime: null,
+      eventTimePrecision: 'unknown',
+      mentionTime: '2026-09-02T12:00:00.000Z',
+      sourceSession: 's1',
+      sourceTurn: 1,
+    })
+    store.markSuperseded(e1.id, e2.id)
+    const message = formatMemoryMessage([e1, e2], store, 2000)!
+    const block = message.content[0]!
+    const text = block.type === 'text' ? block.text : ''
+    expect(text).toContain('superseded')
+    expect(text).toContain('Alice likes coffee.')
+  })
+})

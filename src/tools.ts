@@ -9,7 +9,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-tools'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { MemoryStore } from './store.js'
+import type { MemoryEvent, MemoryStore } from './store.js'
 import type { Retriever } from './retrieval.js'
 import { resolveTimeExpr } from './temporal.js'
 import { formatMemoryLine } from './inject.js'
@@ -96,12 +96,16 @@ export function registerMemoryTools(ctx: Context, deps: MemoryToolsDeps): () => 
           ? `${args.query} ${args.time_range.trim()}`
           : args.query
         const events = await deps.retriever.retrieve(query, { topK: 10, queryTime: now() })
+        // Superseded values are marked so the model can tell current from
+        // stale when both surface (see inject.ts formatMemoryLine).
+        const staleTag = (ev: MemoryEvent): string =>
+          ev.supersededBy !== undefined ? ' [superseded — newer value exists]' : ''
         const items = events.map((event): SearchResultItem => ({
           fact: event.normalizedText,
           time: event.timeExpr.length > 0
             ? event.timeExpr
             : event.eventTime ?? event.mentionTime.slice(0, 10),
-          details: event.details,
+          details: event.details + staleTag(event),
         }))
         // Multi-hop support (m11 mini-3): a chain question ("the country of
         // the spouse of the author of X") can only be answered hop by hop, so
@@ -122,7 +126,7 @@ export function registerMemoryTools(ctx: Context, deps: MemoryToolsDeps): () => 
               related.push({
                 fact: ev.normalizedText,
                 time: ev.timeExpr.length > 0 ? ev.timeExpr : ev.eventTime ?? ev.mentionTime.slice(0, 10),
-                details: `(via ${entity.canonicalName})${ev.details.length > 0 ? ` ${ev.details}` : ''}`,
+                details: `(via ${entity.canonicalName})${ev.details.length > 0 ? ` ${ev.details}` : ''}${staleTag(ev)}`,
               })
             }
           }
