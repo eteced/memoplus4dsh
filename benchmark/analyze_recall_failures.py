@@ -113,11 +113,14 @@ def load_zstd_jsonl(path):
     return events
 
 
-def session_file(sub_dataset, query_id):
+def session_file(sub_dataset, query_id, archive_tag=None):
     # driver 的会话命名是 1-based（agent_memoplus_dsh.py 先 += 1 再命名），
     # query_id 是 0-based —— bench-q{query_id+1} 才是该题的会话。
+    # 归档目录带轮次标签（如 factconsolidation_sh_6k-m11v2-ctx0）；
+    # archive_tag=None 兼容无标签的旧归档（{sub}-ctx0）。
+    mid = f"-{archive_tag}" if archive_tag else ""
     pattern = os.path.join(
-        ARCHIVE, f"{sub_dataset}-ctx*", "**", f"bench-q{query_id + 1}-*", "session.jsonl.zstd")
+        ARCHIVE, f"{sub_dataset}{mid}-ctx*", "**", f"bench-q{query_id + 1}-*", "session.jsonl.zstd")
     hits = glob.glob(pattern, recursive=True)
     return hits[0] if hits else None
 
@@ -160,6 +163,7 @@ def main():
     }
 
     name_filter = sys.argv[1] if len(sys.argv) > 1 else ""
+    archive_tag = sys.argv[2] if len(sys.argv) > 2 else None
     cases = []
     for path in sorted(glob.glob(os.path.join(RESULTS, "Conflict_Resolution", "*.json"))) + \
             sorted(glob.glob(os.path.join(RESULTS, "Accurate_Retrieval", "*.json"))):
@@ -195,7 +199,7 @@ def main():
                 cases.append(case)
                 continue
             # 2) memory_search 结果
-            sf = session_file(sub, entry.get("query_id"))
+            sf = session_file(sub, entry.get("query_id"), archive_tag)
             queries, results_text = ([], "")
             if sf:
                 queries, results_text = search_activity(load_zstd_jsonl(sf))
@@ -206,13 +210,23 @@ def main():
             else:
                 case["recall"] = "never"
                 case["searched_at_all"] = len(queries) > 0
-                # 3) 终态图归因（CR 事实池共享 → 可信；LME 只有最后一个 context → 仅供参考）
-                evs = graph_events["lme" if is_lme else "cr"]
+                # 3) 图归因：有轮次标签时用该 context 归档的图（精确）；
+                # 否则退回终态图（CR 事实池共享 → 可信；LME 仅最后一个 context）
+                evs = None
+                scope = "shared-pool"
+                if archive_tag:
+                    gp = os.path.join(ARCHIVE, f"{sub}-{archive_tag}-ctx0", "memory-graph.jsonl")
+                    if os.path.exists(gp):
+                        evs = load_graph_events(gp)
+                        scope = "archived-context-graph"
+                if evs is None:
+                    evs = graph_events["lme" if is_lme else "cr"]
+                    scope = "final-context-only" if is_lme else "shared-pool"
                 if evs:
                     strong, weak = graph_lookup(evs, checkable, query_content_words(entry["query"]))
                     case["graph"] = "has-answer-event" if strong else ("weak-answer-only" if weak else "no-answer")
                     case["graph_hits"] = (strong or weak)[:3]
-                    case["graph_scope"] = "final-context-only" if is_lme else "shared-pool"
+                    case["graph_scope"] = scope
             case["verdict"] = "failed" if failed else "ok"
             cases.append(case)
             continue

@@ -141,7 +141,13 @@ def archive_sessions(dsh_home, tag):
     archive_root = os.path.join(REPO_ROOT, "benchmark", "results", "sessions-archive", tag)
     sessions = os.path.join(dsh_home, "sessions")
     if os.path.exists(sessions):
-        shutil.move(sessions, archive_root)
+        # A leftover destination (crash between archive and report, or a tag
+        # collision from an older run) must not kill the run: merge aside.
+        dst = os.path.join(archive_root, "sessions")
+        if os.path.exists(dst):
+            shutil.move(dst, os.path.join(archive_root, f"sessions-stale-{int(time.time())}"))
+        os.makedirs(archive_root, exist_ok=True)
+        shutil.move(sessions, dst)
     else:
         os.makedirs(archive_root, exist_ok=True)
     graph = os.path.join(dsh_home, "memoplus4dsh", "memory-graph.jsonl")
@@ -223,6 +229,15 @@ def main():
             reconstructed, entry["query"], answer, dataset_config,
             metrics, [], entry.get("query_id"), entry.get("qa_pair_id"))
 
+    # Archive/audit tag: include the run tag so iteration rounds never collide
+    # in sessions-archive/ (mini-2 crashed moving sessions into mini-1's dir).
+    run_suffix = f"-{dataset_config['tag']}" if dataset_config.get("tag") else ""
+    def context_tag(ci):
+        return f"{dataset_config['sub_dataset']}{run_suffix}-ctx{ci}"
+
+    def audit_report_path(tag):
+        return os.path.join(REPO_ROOT, "benchmark", "results", "audit", tag + ".json")
+
     query_index = 0
     time_cost_list = []
     for context_index, (chunks, qa_pairs) in enumerate(zip(all_chunks, all_qa)):
@@ -238,6 +253,10 @@ def main():
                     if stride <= 1 or i % stride == offset]
         if selected and all(context_query_start + i in done_ids for i in selected):
             query_index = query_index_end
+            # A context whose questions all completed but whose audit never ran
+            # (crash between save and audit) still gets audited on resume.
+            if not os.path.exists(audit_report_path(context_tag(context_index))):
+                audit_context(dsh_home, context_tag(context_index))
             continue
 
         print(f"\n===== context {context_index}: {len(chunks)} chunks, "
@@ -275,7 +294,7 @@ def main():
                     break
         # Per-context audit (user requirement: 跑一次审计一次): archive the
         # session logs and verify no answer came from anything but memory.
-        audit_context(dsh_home, f"{dataset_config['sub_dataset']}-ctx{context_index}")
+        audit_context(dsh_home, context_tag(context_index))
         query_index = query_index_end
 
     print(f"\nResults: {out_path}")
