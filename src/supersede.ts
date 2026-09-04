@@ -158,10 +158,13 @@ export class LlmSupersedeResolver {
         })
       }
     }
-    // 只有"存在不同值"的组才需要裁决
+    // 只有"存在不同值"的组才需要裁决；≥3 个不同值的组几乎必是多值关系
+    //（单值关系在一段对话里换三次值很罕见；mini-4 的 author_of 误标教训），
+    // 按多值处理且不再花裁决调用。
     const contested = [...groups.values()].filter(g => {
       const newestObj = normObj(g.newest)
-      return g.predecessors.some(old => normObj(old) !== newestObj)
+      const distinct = new Set([...g.predecessors, g.newest].map(ev => normObj(ev) ?? ev.normalizedText))
+      return distinct.size === 2 && g.predecessors.some(old => normObj(old) !== newestObj)
     })
     if (contested.length === 0) return 0
 

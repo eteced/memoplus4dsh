@@ -154,3 +154,28 @@ describe('pipeline + retrieval integration', () => {
     expect(history.map(e => e.normalizedText).join('\n')).toContain('Hangzhou')
   })
 })
+
+describe('cardinality prior', () => {
+  it('groups with 3+ distinct values skip adjudication (treated as multi-valued)', async () => {
+    const store = new MemoryStore({ dir })
+    let calls = 0
+    const resolver = new LlmSupersedeResolver({
+      store,
+      callLlm: () => { calls++; return Promise.resolve('1: single') },
+    })
+    const mk = (objName: string, text: string, mentionTime: string) => {
+      const subj = store.createOrResolve('Alice', 'PERSON').entity
+      const obj = store.createOrResolve(objName, 'CONCEPT').entity
+      return store.addEvent({
+        subjectEntityIds: [subj.id], objectEntityIds: [obj.id], predicate: 'likes',
+        normalizedText: text, details: '', timeExpr: '', eventTime: null,
+        eventTimePrecision: 'unknown', mentionTime, sourceSession: 's0', sourceTurn: 0,
+      })
+    }
+    mk('tea', 'Alice likes tea.', '2026-08-01T00:00:00.000Z')
+    mk('coffee', 'Alice likes coffee.', '2026-08-10T00:00:00.000Z')
+    const third = mk('matcha', 'Alice likes matcha.', '2026-09-01T00:00:00.000Z')
+    expect(await resolver.detectAndMark([third], JOB)).toBe(0)
+    expect(calls).toBe(0)  // 三个不同值 → 直接按多值处理，不调 LLM
+  })
+})
