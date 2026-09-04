@@ -2,177 +2,467 @@
 
 **面向 deepseek-harness 的实体-时间融合统一记忆插件**
 
-> 版本：v0.1 · 日期：2026-09-03
+> 版本：v0.2 · 日期：2026-09-05
 > 代码与复现：本仓库（README.md · docs/ · benchmark/）
-> 本文档为总览报告；各里程碑的原始记录见附录 A 的文档地图。
 
 ## 摘要
 
-大模型 agent 的"记忆"普遍退化为按日期生成的 markdown 碎片文件——不可检索、不可演进、跨会话归零。我们为 deepseek-harness（dsh）实现了 **memoplus4dsh**：一个以官方插件形态挂载的记忆系统，把事实、偏好、日程、任务进度统一存入**一张实体-时间融合的记忆图**。在 MemoryAgentBench 官方评测（1031 题、官方代码与指标、全程工具白名单审计）上：**选择性遗忘·多跳 30.25**（全部公开基线 ≤7.0，4.3 倍于最佳基线）、**选择性遗忘·单跳 57.75**（记忆系统第一，仅次于把全文塞进上下文窗口的 GPT-4o）、**精确召回 LME(S\*) 56.67**（全场第一）。评测过程中还发现并根治了两个有普遍意义的问题：推理模型在结构化抽取任务上的"无限推理空输出"（F-1），以及推理模型在评测中自主用文件工具偷读答案的完整性风险。
+大模型 agent 的"记忆"普遍退化为按日期生成的 markdown 碎片文件——不可检索、不可演进、跨会话归零。我们为 deepseek-harness（dsh）实现了 **memoplus4dsh**：一个以官方插件形态挂载的记忆系统，把事实、偏好、日程、任务进度统一存入**一张实体-时间融合的记忆图**。本文完整描述其机制：记忆图的形式化模型（§3）、基于 LLM 的增量抽取与实体消解（§4）、混合检索与状态去重（§5）、插件工程形态（§6），以及在 MemoryAgentBench 上的可复现评测（§7）。核心结果：在官方评测（1031 题、官方代码与指标、全程工具白名单审计）上取得**选择性遗忘·多跳 30.25**（全部公开基线 ≤7.0，4.3 倍于最佳基线）、**选择性遗忘·单跳 57.75**（记忆系统第一，仅次于把全文塞进上下文窗口的 GPT-4o）、**精确召回 LME(S\*) 56.67**（全场第一）。
 
 ## 1. 背景与动机
 
-### 1.1 agent 记忆的现状
+### 1.1 agent 记忆要解决的三个失效模式
 
-当前 agent 项目的记忆方案大致三类：
+观察当前 agent 项目的记忆实践，失效集中在三类：
 
-- **按日碎片文件**（多数自研 agent）：每天一个 `memory/YYYY-MM-DD`。事实更新后新旧值并存打架，没有时间语义，没有结构，换个会话全部归零。
-- **检索式记忆库**（Mem0、Zep、Cognee 等）：把历史切块向量化，按相似度召回 top-k。MemoryAgentBench 论文（Hu & Wang et al., arXiv:2507.05257）系统评测发现：这类方法在"事实被更新"场景集体失效——选择性遗忘多跳（FC-MH）全员 ≤7%，连推理模型 o4-mini 也在 32k 上下文后从 80.0 崩到 14.0。
-- **长上下文硬塞**（GPT-4o 等）：把全部历史放进上下文窗口。受窗口物理上限约束，且成本随历史线性增长。
+- **碎片化**。多数自研 agent 每天生成一个 `memory/YYYY-MM-DD.md`。没有结构、没有时间语义、没有跨文件实体同一性；事实更新后新旧值在两个文件里并存打架；换会话全部归零。
+- **冲突性更新（选择性遗忘）**。检索式记忆库（切块向量化 + top-k 召回）在"事实被更新"场景集体失效：用户先说"我住北京"，两个月后说"我搬到上海了"，检索会把两条都召回来，模型随机挑一条。MemoryAgentBench 论文（arXiv:2507.05257）的系统评测显示，该任务（Conflicting Facts）上多跳场景全部基线 ≤7%，连推理模型 o4-mini 也在 32k 上下文后从 80.0 崩到 14.0。**这是整个记忆系统领域最硬的公开问题。**
+- **进度丢失**。agent 框架自己的任务状态（目标、待办、日程）通常是 per-session 事件日志——新会话对旧会话"那个任务做到哪了"一无所知。记忆系统普遍只管对话事实，不管 agent 自身的进度状态。
 
-dsh（deepseek-harness）作为一个"一切皆插件"的 agent 框架，其原生的 goal/todo/schedule/plan 进度状态全部是 **per-session 事件日志**——新会话对旧会话的任务进度一无所知。这正是一个统一记忆层应该补的位。
+### 1.2 设计目标
 
-### 1.2 动机
+让 agent 拥有**统一、完整、可演进**的长期记忆：
 
-我们的目标是让 agent 拥有**统一、完整、可演进的长期记忆**：日程、经验、用户习惯、任务进度都在同一张图里，跨会话继承，崩溃可恢复。技术底座来自前作 memoplus/ETMS（实体-时间融合记忆系统），其在 LoCoMo 基准上验证有效（mem0 标准协议 82.9%，temporal 类 81.4%）。本项目将其核心机制以 TypeScript 移植进 dsh 插件体系，并针对"任务进度不丢"做了架构级强化。
+1. 一张图装所有记忆——对话事实、用户偏好、日程、任务进度同构存储、统一检索；
+2. 时间是**一等结构维度**，不是字符串注释——事实的"发生时间"与"被提及时间"分开建模；
+3. 旧值**让位但不删除**——检索偏好最新状态，完整历史可审计、可回答"什么时候改的"；
+4. 工程上是宿主框架的**一等公民插件**：安装/卸载完全可逆、不改宿主一行代码、全平台可用、零新增密钥。
 
-### 1.3 设计准则（来自项目约定）
+技术底座来自前作 memoplus/ETMS（实体-时间融合记忆系统），其在 LoCoMo 基准上验证了核心机制（mem0 标准协议 82.9%，temporal 类 81.4%）。本项目将核心机制以 TypeScript 重新实现并移植进 dsh 插件体系，同时针对"任务进度不丢"做了架构级强化（§4.4、§5.4）。
 
-1. 独立 npm 包，安装/卸载完全可逆（不改 dsh 一行代码）。
-2. 全平台（Linux/macOS/Windows × x64/arm64）可用。
-3. 零新增密钥（复用用户已配置的模型路由与额度）。
-4. 公开仓库：无密钥、无机器路径泄漏。
-5. 所有评测可复现、可审计。
+## 2. 系统总览
 
-## 2. 方法
+### 2.1 插件挂载点：记忆在哪些位置生效
 
-### 2.1 记忆模型：实体-时间融合图
+dsh 的架构是 "everything-is-a-plugin"（Cordis 框架）。插件是一个 npm 包，导出 `name` / `inject` / `apply(ctx, config)`，所有注册走 `ctx.effect()`（卸载时框架自动逆序回滚）。memoplus4dsh 通过五个官方挂载点生效，**不需要对 dsh 打任何补丁**：
 
-图中有两类节点与一条事件边：
+```mermaid
+flowchart LR
+    subgraph DSH["dsh 宿主"]
+        U[用户消息] --> PRE[agent/pre-step<br/>waterfall]
+        PRE --> LLM[模型推理]
+        LLM --> TE[turn/end 事件]
+        GOAL[goal/change · todo/write<br/>schedule/change · plan/mode]
+    end
+    subgraph PLUGIN["memoplus4dsh 插件"]
+        INJ[① 检索注入<br/>top-k 记忆]
+        EXT[② 异步抽取<br/>LLM → 记忆图]
+        BRG[③ 进度桥<br/>状态事件 → 记忆图]
+        SP[④ systemPrompt 段<br/>记忆使用说明]
+        TOOL[⑤ 工具<br/>memory_search / _remember / _visualize]
+        GRAPH[(记忆图<br/>memory-graph.jsonl)]
+    end
+    PRE -.注入.-> INJ
+    TE --> EXT
+    GOAL --> BRG
+    EXT --> GRAPH
+    BRG --> GRAPH
+    GRAPH --> INJ
+    GRAPH --> TOOL
+    INJ -.plugin 来源 user/message.-> LLM
+    TOOL <-.模型主动调用.-> LLM
+```
 
-- **实体**：PERSON / OBJECT / CONCEPT（刻意不预定义更多类型——过度分类是前作踩过的过拟合坑）。实体带名称规范化与别名合并（"雪球"≈"我家那只猫"）。
-- **事件**：主体实体 + 谓词 + 客体 + **双时间锚** + 来源引用（session/turn）。
-- **双锚时间**是 ETMS 的原创点：`event_time`（事情发生时间）与 `mention_time`（被提及时间）分开存。"我 10 月聊到的 9 月的挫折"这类查询能同时命中两个锚。
+| 挂载点 | dsh 机制 | 作用 |
+|---|---|---|
+| ① `agent/pre-step` | waterfall 决策链 | 每轮第一步，按当前用户消息检索 top-k 记忆，以 `source: {kind:'plugin'}` 的 user/message 注入（满足 dsh "模型可见 ⟺ 日志落盘"硬约束） |
+| ② `session/event` → `turn/end` | 事件总线 | 一轮对话结束后异步抽取事实写入图（不阻塞对话） |
+| ③ `session/event` → `goal/change` 等 | 事件总线 | dsh 内部进度事件直接投影为记忆事件 |
+| ④ `ctx.systemPrompt.section()` | 系统提示组装 | 一段固定的记忆使用说明（不含易变内容，不破坏 prompt 缓存） |
+| ⑤ `ctx.tools.register()` | 工具注册表 | 模型主动回忆（`memory_search`）、显式记忆（`memory_remember`）、可视化（`memory_visualize`） |
 
-### 2.2 写入链路：增量异步抽取
+安装是把插件包写进 profile 的 `cordis.patch.yml`（官方 patch 机制，marker 块管理、幂等），卸载做完整逆操作——可逆性由框架语义保证。
 
-每轮对话结束（`turn/end`）触发异步抽取，不阻塞对话：
+### 2.2 数据流全貌
 
-1. **抽取输入构造**：只收真实用户消息 + assistant 回复（运行时快照、本插件注入均排除），大输入按 8k 字符分段（见 §4.2 F-1）。
-2. **LLM 抽取**：pipe 表格格式（实体|谓词|客体|时间|事实|细节），含代词/回指消解、列表逐行、"is" 用于静态属性、事实语言跟随对话等已验证规则。known_entities 提示按当前文本相关性过滤并硬截断（防 prompt 无界膨胀的实测教训）。
-3. **进度事件桥**：goal/change、todo/write、schedule/change、plan/mode 等 dsh 内部事件直接投影为记忆事件（鸭子类型读 payload、零上游依赖；todo 快照按内容去噪；schedule 删除/触发自动补全提醒文本）。
-4. **可靠性**：持久化抽取队列（pending + tombstone 日志，进程崩溃重启后自动补抽）、有界重试（5s/30s backoff）、跳过有记录、JSONL 追加写 + 周期快照 + 坏行容错。
+```mermaid
+flowchart TB
+    subgraph WRITE["写入链路"]
+        T[一轮对话<br/>user + assistant 文本] --> SEG[分段 ≤8k 字符]
+        SEG --> P[抽取 prompt<br/>pipe 表格 + 已知实体提示]
+        P --> M[LLM 抽取<br/>thinking=off]
+        M --> PARSE[容错解析<br/>说话人矫正]
+        PARSE --> ER[实体消解<br/>规范化名 + 别名 + 嵌入合并]
+        PARSE --> TR[时间解析<br/>逐字时间表达式 → ISO + 精度]
+        ER --> G[(记忆图<br/>JSONL 追加 + 内存索引 + 快照)]
+        TR --> G
+        EV[dsh 进度事件] --> G
+    end
+    subgraph READ["读取链路"]
+        Q[当前用户消息] --> QE[查询扩展<br/>LLM 关键词 + 磁盘缓存]
+        QE --> CAND[候选生成<br/>实体锚定 + dense top + 一跳扩展]
+        CAND --> SCORE[混合打分<br/>cos + IDF + 时间 + 实体 + 局部性]
+        SCORE --> DD[状态去重<br/>同实体同状态族只留最新]
+        DD --> MMR[MMR 多样性<br/>仅列表类问题]
+        MMR --> TOP[top-k 注入]
+    end
+    G --> CAND
+```
 
-### 2.3 读取链路：混合检索 + 状态去重注入
+写入链路是**增量、异步、可崩溃恢复**的；读取链路在对话关键路径上，延迟预算约束了它的每一步（§5）。
 
-用户消息到达时（`agent/pre-step` 第一步）：
+## 3. 记忆模型：实体-事件图与双时间锚
 
-1. **混合打分**：dense 余弦（本地 ONNX 多语言嵌入）+ IDF 加权词匹配（CJK bigram 分词）+ LLM 查询扩展（磁盘缓存）+ 时间双锚过滤/加权 + 实体一跳扩展 + 对话局部性加成。
-2. **状态族去重**（本文的核心创新之一）：状态演进类事件（进度、事实更新）在图中保留完整历史，但检索注入时同实体同状态族只呈现最新值——**旧值让位但不删除**。这是"选择性遗忘"的架构化解法：不是靠模型判断哪条过期，而是检索层天然偏好最新状态，历史仍可审计、可被查（"什么时候改的"）。
-3. **MMR 多样性去重**：列表类问题避免近重复条目挤占席位。
-4. **注入**：top-k 记忆以 plugin 来源的 user/message 注入（满足 dsh "模型可见 ⟺ 日志落盘"硬约束），体积受字符上限约束。
-5. **主动工具**：`memory_search`（模型主动回忆）与 `memory_remember`（用户说"记住…"时显式写入）。
+### 3.1 形式化定义
 
-### 2.4 工程形态
+记忆图 $G = (E, V)$：
 
-- **官方 Cordis 插件**：`install.sh`/`uninstall.sh` 封装官方 profile patch 机制（marker 块管理、幂等、卸载逆操作完整），零 patch。
-- **跨平台**：纯 TypeScript；嵌入用 onnxruntime-node（全平台预编译二进制）+ distiluse-base-multilingual-cased-v2（选型理由：同档位唯一保留 mBERT WordPiece 词表的多语言模型——更强的 multilingual MiniLM 是 SentencePiece 词表，与我们的极简分词器不兼容；其 ONNX 导出只含编码器本体，ST 的 768→512 投影头由我们本地解析 safetensors 还原）。嵌入失败降级纯关键词检索，功能降级而非不可用。
-- **数据自主**：全部记忆在 `<dsh-home>/memoplus4dsh/`，可读可删可带走。
+**实体** $e \in E$（图的节点）：
+$$e = (\text{id},\ \text{name},\ \tau,\ A,\ \mathbf{v})$$
+- $\tau \in \{\text{PERSON}, \text{OBJECT}, \text{CONCEPT}\}$——**刻意封闭在三类**。我们曾实验更细的本体（地点/组织/活动/…），结论是过度分类让抽取模型把精力花在"纠结类型"而非"抽全事实"上，且下游检索并不消费类型信息（类型只用于两个地方：说话人强制 PERSON、嵌入合并限定同类型）。
+- $A$ 是别名集（"雪球"与"我家那只猫"指向同一节点）。
+- $\mathbf{v} \in \mathbb{R}^{512}$ 是实体名的嵌入向量，仅用于近似重名合并（§4.3）。
 
-## 3. 实现
+**事件** $v \in V$（图的事实边，是检索与注入的基本单位）：
+$$v = (S,\ O,\ p,\ f,\ d,\ x,\ t_e,\ \rho,\ t_m,\ s)$$
 
-### 3.1 模块结构
-
-| 模块 | 职责 |
+| 字段 | 含义 |
 |---|---|
-| `src/index.ts` | 插件入口（name/inject/apply），Config 接口与组装 |
-| `src/store.ts` | 记忆图存储：JSONL 追加 + 内存索引 + 快照压缩 + 坏行容错 |
-| `src/extraction.ts` | 抽取管线（prompt/解析/分段）+ 串行队列 + 持久化 pending 日志 |
-| `src/embedding.ts` | ONNX 嵌入（模型预设/投影头/分词器/降级） |
-| `src/retrieval.ts` | 混合打分 + 双锚过滤 + 实体扩展 + MMR + 状态去重 + 查询扩展 |
-| `src/temporal.ts` | 中英文时间表达式解析与查询侧时间算子 |
-| `src/inject.ts` | pre-step 注入（waterfall 合规） |
-| `src/tools.ts` | memory_search / memory_remember 工具 |
-| `src/bridges.ts` | 进度事件桥（goal/todo/schedule/plan → 图） |
+| $S, O \subseteq E$ | 主体/客体实体集（客体可空） |
+| $p$ | 谓词（短动词/关系，自由文本） |
+| $f$ | 规范化事实：**一句自包含的话**（脱离上下文可读，指代已消解） |
+| $d$ | 细节（放不进主句的上下文碎片） |
+| $x$ | 时间表达式，**从原文逐字复制**（"last Saturday"、"上周三"） |
+| $t_e$ | **event_time**：事情发生时间（ISO 8601，可空） |
+| $\rho$ | $t_e$ 的精度：year / month / week / day / hour / minute / second / unknown |
+| $t_m$ | **mention_time**：该事实在对话中被提及的时间（= 所在轮次结束时刻，恒非空） |
+| $s$ | 来源引用（session id + turn 号），可回溯到原始对话 |
 
-### 3.2 关键工程修复史（开发过程中实测抓到的）
+一个真实事件长这样（JSONL 日志里的一行）：
 
-这些修复都有单测覆盖（当前 121 个单测全绿）：
+```json
+{"v":1,"op":"event.add","data":{
+  "subjectEntityIds":["…user…"], "objectEntityIds":["…shanghai…"],
+  "predicate":"moved_to",
+  "normalizedText":"The user moved to Shanghai.",
+  "timeExpr":"last month", "eventTime":"2026-08-05T00:00:00.000Z",
+  "eventTimePrecision":"month", "mentionTime":"2026-09-05T10:23:41.000Z",
+  "sourceSession":"c7f3…", "sourceTurn":12}}
+```
 
-- **F-1（评测中发现，最重要）**：推理模型在密集抽取输入上**无限推理**——8k 和 32k token 预算都被 reasoning 吃光、可见输出为零，记忆静默丢失。内容触发（3.5k 字符的密集事实列表即可 100% 复现），分段与加预算都不能根治。修复：抽取/查询扩展调用显式禁 thinking（dsh 线路上 `thinking: 'disabled'`，主对话不受影响）+ 输入分段作防御层。
-- **goal/change 嵌套载荷**：dsh 实际把 goal 快照嵌套在 `data.goal` 下，bridge 初版按扁平读导致事件全丢。教训：鸭子类型约定必须用真实 session 日志验证。
-- **检索硬过滤误伤**：裸 "this"/"past"（"how do I fix this error?"）曾被误判为 180 天时间过滤，静默滤掉全部旧记忆。
-- **locality 死代码**：对话局部性加成因 key 拆分 bug 从未生效，补回归测试后修复。
-- **中文"上周X"差 7 天**、`$` 模式污染 prompt、队列重试无 backoff、turn 文本无上限等（详见 docs/m6-third-party-review.md）。
-- **上游 F1（dsh 侧，已定位待上报）**：Zen 类 Go 网关端点把流式 tool_calls 续传 chunk 的省略字段序列化成显式 null，dsh 的 `!== undefined` 累积逻辑被覆盖成空 id/name。字节级三方对照证据在 docs/known-issues.md。官方 API 无此问题。
+### 3.2 双时间锚：时间不是向量
 
-## 4. 效果评测
+**时间在本系统中不是嵌入向量，而是结构化的一等字段。** 向量把时间压成相似度，回答不了"范围"与"先后"这两个时间查询的本质；我们显式存两个时间点：
 
-### 4.1 MemoryAgentBench（主评测）
+- $t_e$（event time）：事情**发生**的时间；
+- $t_m$（mention time）：事情**被提及**的时间。
 
-**设置**：官方仓库（commit `fe1735d`）+ 官方数据集（HF `ai-hyz/MemoryAgentBench`）+ 官方指标代码，零修改复用。被测组合为 **dsh sdk profile + 插件默认配置**，骨架模型 deepseek-v4-flash（DeepSeek 官方 API）。适配层（`benchmark/`）：批量 ingest（8k 字符/批）、每问题新会话、结果 JSON 结构与官方一致。共 1031 题。
+两者分离的价值在一个例子里最清楚：用户 10 月聊到"我 9 月参加的那个面试真挫败"。事件 $t_e$=9 月、$t_m$=10 月。查询"9 月发生了什么"命中 $t_e$；查询"10 月我们聊过什么"命中 $t_m$；查询"最近的挫折"两个锚都参与排序。单一时间戳（多数系统的 created_at）只能回答其中一个问题。
 
-**成绩（第二轮有效成绩，全部审计 PASS）**：
+与 Zep/Graphiti 的 bi-temporal 模型（valid_at/invalid_at + created_at）的对比见 §8——简言之，他们建模的是"事实的有效期"，我们建模的是"发生 vs 提及"，且我们**不做边的失效标记**：历史永远完整保留（§5.4）。
 
-| 维度 | 本组合 | 逐长度 | 最佳公开基线 |
+## 4. 写入链路：增量抽取、实体消解与进度桥
+
+### 4.1 抽取输入构造：什么能进、什么不能进
+
+每轮对话结束（`turn/end` 且 reason=completed）触发一次异步抽取。输入构造（`buildTurnText`）从会话日志重建本轮文本，**只收四类消息**：
+
+- `User:` 真实用户输入；
+- `Goal:` goal 模式的轮次提示（承载目标与轮次号，是长程任务进度的核心上下文）；
+- `Schedule:` schedule 插件派发的提醒；
+- `Assistant:` 模型回复。
+
+**明确排除**：运行时上下文快照、工作区指令、以及本插件自己的记忆注入——后者若回灌进抽取会造成"记忆自我复制"（记忆被当成新事实再记一遍）。
+
+超长输入两级防护：20k 字符总量截断（保留头尾，掐中段）；再按 **8k 字符分段**独立抽取后合并——分段尺寸来自实测：推理模型在 ≥17k 字符的密集抽取输入上会无限推理、可见输出为空（详见附录 C 的 F-1），8k 是验证安全的尺寸。
+
+### 4.2 LLM 抽取：pipe 表格协议
+
+抽取是一次 LLM 调用，输出协议为 pipe 分隔的八列表格：
+
+```
+ENTITY_TYPE|CANONICAL_NAME|ALIASES|PREDICATE|OBJECT|TIME_EXPR|NORMALIZED_FACT|DETAILS
+PERSON|Alice|_|is_from|hometown|_|Alice is from her hometown.|_
+PERSON|Bob|Bobby|painted|landscape|last year|Bob painted a landscape last year.|_
+```
+
+选择 LLM 抽取（而非正则/NER/embedding 聚类）是因为记忆里最难的从来不是实体识别，而是**指代消解与自包含化**。prompt 中沉淀的关键规则（前作 LoCoMo 实验逐条验证过）：
+
+- **代词/回指消解**："we did it"、"that cup" 必须展开为具体的人与物——每条事实脱离会话可读；
+- **说话人即实体**：说话人陈述/提问/评价某话题时，主体是说话人，谓词表达言语行为（said/asked/praised）；
+- **列表逐行**："likes A, B, C" 拆三行；
+- **静态属性用 `is`**："是哪里人"、"婚姻状态"这类恒真属性与动态事件区分；
+- **TIME_EXPR 逐字复制，禁止模型算日期**——这是关键设计：LLM 的日期算术不可靠，而"last Saturday"相对哪个基准点是确定的。模型只负责把原文时间表达**原样抄下**，绝对时间的换算由确定性代码完成（§4.5）；
+- **已知实体提示**：prompt 携带与当前文本相关的已有实体名（按名称在文本中出现与否过滤，硬上限 4000 字符），引导模型复用规范名而非另造新名——这是实体消解的第一道防线；
+- 事实语言跟随对话语言。
+
+解析层是**容错**的：跳过空行/表头/畸形行，容忍模型把 `|` 写成 `<field>`，`<7` 列补齐空字段，事实短于 12 字符丢弃；说话人名字强制矫正为 PERSON 类型。抽取调用显式关闭 thinking（结构化任务上推理纯属浪费，且会触发附录 C 的 F-1 空输出），8192 token 输出预算，120s 超时。
+
+### 4.3 实体消解：同一个"雪球"
+
+同一概念在多次对话中以不同名字出现，必须合并为一个节点，否则图碎成孤岛。消解按序进行（`createOrResolve`）：
+
+1. **规范化名精确匹配**：$\text{norm}(n) = \text{lowercase}(\text{collapse-space}(\text{trim}(n)))$，对规范名与全部别名建哈希索引 $A\text{Index}: \text{norm}(n) \mapsto e$；
+2. **嵌入近似合并**（有 embedder 时）：在同类型实体内找余弦相似度最高者，
+$$\text{merge}(n, e^*) \iff \cos(\mathbf{v}_n, \mathbf{v}_{e^*}) \ge 0.9,\quad e^* = \arg\max_{e:\, \tau_e = \tau_n} \cos(\mathbf{v}_n, \mathbf{v}_e)$$
+阈值 0.9 是保守取向：**宁可分裂（同一概念两个节点，一跳扩展仍能拉上关系），不可错并（两个人被并成一个，事实就张冠李戴了）**。0.9 对"雪球/My cat 雪球"这类高重合名可靠合并，对"张伟/张薇"这类危险近名不误并。
+3. 合并即别名累积：新名字与本次附带的别名并入 $A$，索引同步——下次任一名字出现都命中同一节点。
+
+### 4.4 进度桥：agent 的任务状态进同一张图
+
+dsh 的 goal/todo/schedule/plan 状态是 per-session 事件日志，跨会话即丢失。进度桥（`bridges.ts`）监听这四类内部事件，**结构化读取载荷（鸭子类型，零上游依赖）**，投影为普通记忆事件：
+
+| dsh 事件 | 记忆事件示例 | 谓词（状态族） |
+|---|---|---|
+| `goal/change` | 「目标『完成评测』状态更新为 running」 | `goal_create` / `goal_update` / `goal_complete` / `goal_block` / … |
+| `todo/write` | 「待办列表更新：3/5 项已完成。进行中：写报告…」（全量快照按内容签名去重） | `todo_snapshot` |
+| `schedule/change` | 「创建了定时提醒『周五交周报』（每周）」；删除/触发时自动补全提醒文本 | `schedule_create` / `schedule_delete` / `schedule_dispatch` |
+| `plan/mode` | 「进入了计划模式」 | `plan_mode` |
+
+这类事件 $t_e = t_m$（事件发生即被记录），谓词带状态族前缀（`goal_` 等），是 §5.4 状态去重的标记。至此，**对话事实与 agent 自身的任务进度在同一张图、走同一条检索链路**——"上次那个任务做到哪了"与"我住哪"对系统而言是同构问题。据我们所知，现有公开记忆系统（Mem0/Zep/A-MEM/HippoRAG 等）均不覆盖 agent 自身进度状态，这是本工作的独有覆盖。
+
+### 4.5 时间解析：确定性换算 + 精度
+
+`resolveTimeExpr(x, t_m)` 把逐字时间表达式换算为绝对时间，输出 $(t_e, \rho)$。覆盖中英文通用时间构造：ISO 日期、"last/next/this + week/month/year/星期X"、"N days/weeks/months ago"、"the week before 9 June 2023"、季节、"昨天/上周三/三个月前/去年"等。**只收录语言级通用构造，不收录任何数据集词汇**——防止评测过拟合。
+
+精度 $\rho$ 与表达式的粒度一致："last year" 是 year 精度，"上周三" 是 day 精度。精度在查询侧用于范围匹配（§5.3），避免把"去年"误当成某个具体日期。
+
+### 4.6 持久化与崩溃恢复
+
+存储是**追加式 JSONL 日志 + 内存索引**（`store.ts`）：
+
+- 每条记录是一个操作信封（`entity.upsert` / `entity.delete` / `event.add` / `event.delete`），单行一次原子 `write(2)` 追加；
+- 内存维护实体表、事件表、别名索引、实体→事件倒排；
+- 每 1000 次操作做一次快照压缩（tmp + rename 全量重写），坏行（崩溃造成的半行）逐行跳过并计数；
+- 选 JSONL 而非 SQLite：跨平台零编译、可读、可 diff、与 dsh 自身 session 日志风格一致；个人 agent 的记忆规模（数千~数万事件）下暴力检索是毫秒级，不需要索引结构。
+
+抽取队列是**串行、有界重试、可崩溃恢复**的：一次一个 LLM 调用（避免突发限流），失败按 5s/30s backoff 重试 2 次后跳过并记录；持久化 pending 日志（enqueue 记一行、settle 记 tombstone），进程崩溃重启后未 settle 的任务自动补抽——崩溃最坏代价是一次重复抽取（多几行重复事件），永不丢轮次。
+
+## 5. 读取链路：混合检索、时间算子与状态去重
+
+检索发生在对话关键路径（`agent/pre-step` 第一步，以及 `memory_search` 工具调用），输入是当前用户消息，输出 top-k（默认 8）条事件。分四步。
+
+### 5.1 候选生成
+
+三个来源的并集：
+
+1. **实体锚定**：查询文本中逐字出现的已知实体名/别名 → 这些实体的全部事件（$|\cdot|$ 通常很小）；
+2. **稠密 top 切片**：全图事件按 $\cos(\mathbf{v}_q, \mathbf{v}_v)$ 取前 $2k$（嵌入不可用时退化为 IDF 词重叠切片——**功能降级而非不可用**）；
+3. **一跳图扩展**：取 dense 切片前 15 条事件涉及的全部实体，把这些实体的邻接事件（每实体至多 200 条）并入候选池。
+
+一跳扩展是多跳问题的关键：查询只提到实体 A，但答案需要"A 相关的 B 的事"——共享实体把 B 的事件拉进候选池，再由打分决定生死。
+
+### 5.2 混合打分
+
+事件得分是六个信号的加权和（移植自前作并验证的权重）：
+
+$$\text{score}(v) = \underbrace{\cos(\mathbf{v}_q, \mathbf{v}_v)}_{\text{dense}} +\ 2\cdot\underbrace{\frac{\sum_{w \in q^\*} \text{idf}(w)\cdot [w \in W_v]}{\sum_{w \in q^+} \text{idf}(w)}}_{\text{IDF 归一化词重叠}} +\ \underbrace{\min\!\big(0.25\!\!\sum_{w \in q^+\setminus q^*}\!\!\text{idf}(w)\,[w \in W_v],\ 2\big)}_{\text{扩展词奖励}} +\ \underbrace{0.5\!\!\sum_{d \in D}\!\text{idf}(d)\,[d \in W_v]}_{\text{关键描述词}} +\ \underbrace{0.5\cdot[V(v) \cap E_q \ne \emptyset]}_{\text{实体奖励}} +\ \underbrace{b_T(v, \text{op})}_{\text{时间奖励}}$$
+
+其中：
+
+- $\text{idf}(w) = \ln\frac{N+1}{\text{df}(w)+1} + 1$，$N$ 为候选池事件数——IDF 在**候选池内**动态计算，图越大越近似全局 IDF；
+- $q^*$ 是查询词干集（轻量词干化：ies→y、ing/ed/es/s/e 去尾），$q^+ = q^* \cup$ LLM 扩展词；
+- **关键词侧的分词**：ASCII 单词 + **CJK bigram**（中文等无空格语言以二元字组参与匹配，整段+单字也入集，保证分级重叠）；
+- $D$ 是关键描述词：剥离疑问脚手架（what/how/kind of）与通用轻动词（make/take/like/…）后的实义词干——"what kind of **pottery** does she like"里 pottery 得额外奖励；
+- **LLM 查询扩展**（≤12 个关键词/短语，含纠错与同义词）结果按规范化查询文本做**磁盘缓存**——同一问题只扩一次，pre-step 关键路径上 30s 超时、失败退化为无扩展；
+- 事件的匹配文本 = 实体名 + 谓词 + 规范化事实 + 细节。
+
+排序后的**对话局部性加成**：取 top-5 锚点事件，与锚点同轮次/相邻轮（±1/±2 turn，前后不对称）或共享客体实体的事件获得有界加成（分项封顶、随锚点自身得分缩放）——模拟"聊到某件事时，它前后文的事也相关"。最终按 (score 分桶, 查询覆盖率, 命中 IDF 质量) 三级 tie-break 排序。
+
+**列表类问题**（"what kinds of…"、"all the…"等通用复数/聚合句式判定）追加 **MMR 多样性重排**：
+$$\arg\max_{v \in R}\ \big[\text{score}(v) - \lambda \max_{s \in S} \cos(\mathbf{v}_v, \mathbf{v}_s)\big],\quad \lambda = 3.0$$
+防止近重复条目挤占 top-k 席位。
+
+### 5.3 时间算子：硬过滤 + 软加权
+
+查询先被解析为时间算子（`resolveTemporalQuery`）：
+
+| 算子 | 触发示例 | 行为 |
+|---|---|---|
+| `DENSE` | 无时间意图 | 不过滤；只加微小提及新近度奖励 $0.3/(1+d_m/30)$ |
+| `LAST_K` | "最近一次"、"the last time" | 不硬过滤；按事件时间（缺失时用提及时间）衰减奖励 $0.25/(1+d/14)$ |
+| `WITHIN_WINDOW` | "最近"（180 天）、"in the past 3 weeks"、"昨天" | **硬过滤**：窗口外事件出局 |
+| `IN_YEAR` / `IN_MONTH` / `IN_SEASON` | "last year"、"in June 2025"、"during the summer"、"去年" | 硬过滤：日历区间外出局 |
+
+硬过滤的**双锚匹配**规则：
+$$\text{match}(v, \text{range}) \iff t_e \in \text{range}\ \lor\ t_m \in \text{range}$$
+两个锚都可使命中，但 $t_e$ 命中的排序权重高于 $t_m$（"9 月发生的事"应排在"9 月随口提到的事"之前）。软加权同理双锚分开衰减（如 WITHIN_WINDOW：$\max\big(\frac{0.2}{1+d_e/14},\ \frac{0.1}{1+d_m/14}\big)$）。语义候选池在过滤后为空时回退为全图时间扫描——时间意图明确的问题，时间优先级高于语义相似度。
+
+### 5.4 状态去重：旧值让位，但不删除
+
+这是本系统对"选择性遗忘"问题的**架构级解法**，也是与 Mem0/Zep 路线（LLM 判决 UPDATE/DELETE、边失效标记）的根本分歧。处理分两层，按事件性质区分：
+
+**进度状态（桥事件）——硬去重。** goal/todo/schedule/plan 这类状态演进事件的特点是**同实体同状态族的最新值在语义上取代旧值**。处理：
+
+- **图内**：完整保留全部历史——不删、不标 invalid。历史可审计、可回答"之前是什么/什么时候改的"；
+- **检索层**：按 (主体实体, 状态族) 分组，每组只放行 $t_m$ 最新的一条进入注入；族由谓词前缀识别（`goal_`/`todo_`/`schedule_`/`plan_`）。
+
+**对话事实更新——软偏好 + 时间明示。** "搬家了""换工作了"这类更新不做硬去重：新旧事件都保留、都可被注入，但 (a) DENSE 模式的提及新近度项（§5.3，上限 0.3，近平局时稳定地让新值排前）；(b) 注入行首的 `[时间]` 标签让模型自己分辨新旧（"last month" vs "two years ago"）；(c) "最近/上次"类查询走 `LAST_K`/窗口算子直接锁定新值。§7 的 FC 成绩证明这一组合在长上下文下成立。
+
+这不是"遗忘"，是**呈现偏好**：旧值让出演位但仍在图里、仍可被时间查询命中。对比之下，让 LLM 在写入时判决"这条 UPDATE 掉哪条/DELETE 哪条"（Mem0 路线）或判定矛盾并给旧边打失效区间（Zep 路线）有两个固有弱点：判决本身会错（错判的影响随写入固化）；且"是否矛盾"常常需要检索时才知道——写入时做不可逆判决，等于把检索期信息硬塞进写入期。
+
+### 5.5 注入与工具
+
+top-k 事件渲染为紧凑列表（`- [时间] 事实 (细节)`），以 plugin 来源的 user/message 注入到已认领消息之后，总量受字符上限约束（默认 2000）。注入走 `agent/pre-step` 的 waterfall 决策链，因此**它和普通用户消息一样落盘进会话日志**——dsh 的"模型可见 ⟺ 日志可见"约束天然满足，记忆对调试与审计完全透明。
+
+三个模型侧工具：`memory_search`（主动回忆，支持可选时间表达式参数）、`memory_remember`（用户说"记住…"时显式直写，绕过抽取管线）、`memory_visualize`（把当前记忆图渲染为自包含的交互式 HTML：力导向图 + 时间标记 + 事件列表，零外部依赖）。
+
+## 6. 工程实现
+
+### 6.1 嵌入栈：一个反直觉的选型
+
+稠密通道用**本地 ONNX 嵌入**（onnxruntime-node，全平台预编译二进制），默认模型 **distiluse-base-multilingual-cased-v2**（512 维，50+ 语言含中文，int8 约 135MB，首次使用自动下载）。选型过程值得记录，因为它说明"最强"不等于"最合适"：
+
+- 同档位**更强**的 multilingual MiniLM（paraphrase-multilingual-MiniLM-L12-v2）使用 SentencePiece 分词；我们的极简栈只有一个 ~70 行的 WordPiece 分词器（直接消费 BERT 风格的 `vocab.txt`），引入 SentencePiece 意味着原生绑定或大规模 JS 依赖——违背跨平台与轻量准则；
+- distiluse 是同档位唯一保留 **mBERT WordPiece 词表**的多语言模型，分词器可直接服务；
+- 但它的 ONNX 导出**只含编码器本体**（768 维 hidden），Sentence-Transformers 的 `2_Dense` 投影头（768→512 + Tanh，1.5MB safetensors）不在图里——我们本地解析 safetensors 并在 mean-pooling 后手动应用该线性层。跳过它会得到语义混乱的向量（实测召回显著劣化）；
+- 量化按平台选文件（arm64 → `model_qint8_arm64.onnx`，x64 → `model_quint8_avx2.onnx`，失败回退未量化导出）；
+- **任何环节失败**（无 onnxruntime、下载失败、推理异常）都降级为纯关键词检索。
+
+纯英文小模型 all-MiniLM-L6-v2（384 维，23MB）保留为可选档。换模型后旧向量维度不匹配会被识别为过期并惰性重算。
+
+事件向量在检索时**惰性计算并回写日志**（`setEventEmbedding`），配合内存向量缓存——写路径零嵌入成本，首次查询摊还。
+
+### 6.2 跨平台与零新增依赖
+
+纯 TypeScript，无任何原生编译依赖（onnxruntime-node 是唯一二进制，且有完整降级路径）；数据全部在 `<dsh-home>/memoplus4dsh/`，JSONL 可读可删可带走；LLM 调用复用会话自己的 provider/model 路由（`ctx.llm.stream`）——**用户已配什么模型，抽取就用什么，不需要任何新密钥**；也可用 `extractionProvider`/`extractionModel` 指定更便宜的小模型专跑抽取。
+
+### 6.3 可靠性
+
+除 §4.6 的队列与日志外，还包括：抽取/扩展调用 120s/30s 超时（端点挂死不会卡死串行队列）；`memory_visualize` 大图上 1200 节点展示上限；全部辅助 I/O best-effort（任何持久化失败不得弄断对话）。当前 **124 个 vitest 单测全绿**（store/temporal/retrieval/extraction/inject/tools/bridges/visualize/embedding）。
+
+## 7. 效果评测
+
+### 7.1 MemoryAgentBench 设置
+
+主评测用 **MemoryAgentBench**（arXiv:2507.05257，HUST-AI-HYZ），官方仓库（commit `fe1735d`）+ 官方数据集（HF `ai-hyz/MemoryAgentBench`）+ 官方指标代码，零修改复用。被测组合是**最终应用形态**：dsh sdk profile + memoplus4dsh 默认配置，骨架模型 deepseek-v4-flash（DeepSeek 官方 API）。适配层（`benchmark/`）做批量 ingest（8k 字符/批）、每问题新会话、结果 JSON 与官方结构一致。共 1031 题，覆盖两个维度：
+
+- **Conflicting Facts（选择性遗忘）**：对话中事实被后续更新，分单跳（FC-SH，200 题）与多跳（FC-MH，200 题）两档，上下文长度 6k–262k；
+- **LongMemEval（精确召回，LME(S\*)）**：631 题，官方 LLM judge 判分，含 user/assistant/temporal/knowledge-update/preference/multi-session 六个分项。
+
+### 7.2 成绩（第二轮有效成绩，全部审计 PASS）
+
+| 维度 | 本组合 | 逐长度（6k/32k/128k/262k） | 最佳公开基线 |
 |---|---|---|---|
-| 选择性遗忘·单跳（FC-SH） | **57.75** | 63.0 / 52.0 / 59.0 / 57.0 | GPT-4o 60.0（全文塞窗口）；记忆类最高 HippoRAG-v2 54.0 |
-| 选择性遗忘·多跳（FC-MH） | **30.25** | 28.0 / 38.0 / 35.0 / 20.0 | **全员 ≤7.0**；o4-mini 仅 6k 验证过 80.0、32k 崩至 14.0 |
-| 精确召回（LME(S*)，官方 LLM judge） | **56.67** | 分项：user 82.2 / assistant 60.0 / temporal 52.0 / knowledge-update 62.2 / preference 53.3 / multi-session 42.7 | GPT-4.1-mini 55.7；记忆类最高 50.7；Mem0 36.0 |
+| FC-SH（单跳遗忘） | **57.75** | 63.0 / 52.0 / 59.0 / 57.0 | GPT-4o 60.0（全文塞窗口）；记忆类最高 HippoRAG-v2 54.0 |
+| FC-MH（多跳遗忘） | **30.25** | 28.0 / 38.0 / 35.0 / 20.0 | **全部基线 ≤7.0**；o4-mini 仅 6k 验证过 80.0、32k 崩至 14.0 |
+| LME(S\*)（精确召回） | **56.67** | user 82.2 / assistant 60.0 / temporal 52.0 / knowledge-update 62.2 / preference 53.3 / multi-session 42.7 | GPT-4.1-mini 55.7；记忆类最高 50.7；Mem0 36.0 |
 
 解读：
 
-- **FC-MH 是最重要的证据**。这是论文中所有方法（含长上下文与推理模型）集体失效的任务。我们 4.3 倍于最佳基线，且是唯一在 262k 长上下文多跳遗忘上不失效的记忆系统——多跳 + 状态更新恰好命中实体图一跳扩展 + 状态去重的架构设计。
-- **FC-SH 记忆系统第一**，仅次于非记忆方案（GPT-4o 全文塞窗口）。
-- **LME(S*) 全场第一**（56.67 > 55.7）。
-- 与 Table 2 基线对比时需注意骨架差异：基线的 RAG/记忆类 agent 用 GPT-4o-mini，我们用推理模型 v4-flash；judge 模型官方为 gpt-4o，我们用 v4-flash（yes/no 判定对 judge 不敏感，已注明）。
+- **FC-MH 是最重要的证据**。这是论文中所有方法（长上下文、RAG、记忆系统、推理模型）集体失效的任务。我们 4.3 倍于最佳基线，且是唯一在 262k 上下文多跳遗忘上不失效的记忆系统——多跳 + 状态更新恰好命中两个架构设计：一跳实体扩展（§5.1）把"被更新事实"的相关实体事件拉进候选，状态去重（§5.4）保证注入的是最新值而非新旧混战。
+- **FC-SH 记忆系统第一**，仅次于非记忆方案（GPT-4o 全文塞窗口，物理上受窗口上限约束）。
+- **LME(S\*) 全场第一**（56.67 > 55.7）。
+- 与论文 Table 2 基线对比需注意骨架差异：基线的 RAG/记忆类 agent 骨架为 GPT-4o-mini，本组合为推理模型 v4-flash；judge 官方为 gpt-4o，本评测用 v4-flash（yes/no 判定对 judge 选择不敏感，已在评测文档注明）。架构与骨架正交，消融见 §9。
 
-### 4.2 完整性审计（评测保真的故事）
+### 7.3 评测完整性：一轮被自己作废的成绩
 
-第一轮成绩（SH 81.25 / MH 76.0）经我们自己审计发现**答案泄漏**而作废：v4-flash 在难题上自主进入"侦探模式"，用 bash/grep/read 在文件系统翻找——81% 的 mh_262k 会话读到了数据集的 answers 列。第二轮加固：工具白名单守卫（`tools/pre-execute` 只放行 memory_search/memory_remember，其余拒绝并记录）+ profile 层禁用 fs/web 工具 + 每个 context 跑完立即归档日志并审计（发现异常当场中止）。第二轮全程 1340+ 会话、0 次非记忆工具成功执行。**教训值得同行注意：推理模型的评测必须在工具层做白名单隔离，否则"记忆分数"测的是它的文件侦查能力。**
+第一轮成绩（FC-SH 81.25 / FC-MH 76.0）**经我们自己审计发现答案泄漏而作废**：v4-flash 在难题上自主进入"侦探模式"，调用 bash/grep/read 在文件系统翻找——81% 的 mh_262k 会话读到了数据集的 answers 列。第二轮加固：
 
-两轮对照（泄漏把分数抬了多少）：FC-SH +23.5pt、FC-MH +45.8pt、LME -2.0pt（侦探循环反而浪费问题，干净成绩更高）。
+- **工具白名单守卫**（`tools/pre-execute` 钩子只放行 memory_search/memory_remember，其余拒绝并记录）+ profile 层禁用 fs/web 工具；
+- **逐 context 归档审计**：每个 context 跑完立即归档会话日志并审计，发现异常当场中止而非跑完再查。
 
-### 4.3 真人场景测试（dsh 实例 + 真实端点）
+第二轮全程 1340+ 会话，**0 次非记忆工具成功执行**，全部审计 PASS。两轮对照量化了泄漏的影响：FC-SH +23.5pt、FC-MH +45.8pt、LME −2.0pt（侦探循环反而浪费问题预算，干净成绩更高）。**这个教训有普遍意义：推理模型的记忆评测必须在工具层做白名单隔离，否则"记忆分数"测的是模型的文件侦查能力。** 审计器与守卫插件在 `benchmark/`（`guard-plugin/`、`audit_sessions.py`），可复用。
 
-- M4：告知事实/跨会话召回/时间语义/主动记忆/负面对照（不编造）全过（当时 Zen 端点，F1 下工具路径受阻、注入+抽取兜底生效）。
-- M8（加固后进度场景）：goal 跨 session 进度召回（新会话里 `get_goal` 返回空、答案来自长期记忆）、todo 快照演进、对话状态演进（"刚启动"→"80% 完成"取最新）、SIGKILL 崩溃后 3 条积压自动补抽——全部 PASS。
+### 7.4 真人场景测试
 
-### 4.4 成本与延迟
+- 跨会话事实召回、时间语义（"上周五说的"）、偏好学习、主动记忆、负面对照（不编造）全过；
+- 进度场景（M8）：goal 跨 session 进度召回（新会话 `get_goal` 返回空、答案来自长期记忆）、todo 快照演进取最新、对话状态演进（"刚启动"→"80% 完成"取最新）、SIGKILL 崩溃后 3 条积压自动补抽——全部 PASS。
 
-ingest 的 LLM 抽取比 embed 方案贵一个量级（每 ~8k 字符一次抽取调用）；查询均耗 11.8s（LME）至 48-216s（FC-MH，难题上模型多轮深挖记忆图——白名单内的 memory_search 每 config 数千次调用）。全量 1031 题：ingest 合计 ~2.7h，查询合计 ~10.7h（两路并行墙钟 ~9h）。延迟与成本换的是结构化记忆带来的 SH/MH 优势；对成本敏感的部署可 `extraction: 'off'` 或关查询扩展。
+### 7.5 成本与延迟
 
-## 5. 局限与展望
+ingest 的 LLM 抽取比 embed 方案贵约一个量级（每 ~8k 字符一次抽取调用）；查询均耗 11.8s（LME）至 48–216s（FC-MH，难题上模型多轮深挖记忆图，白名单内 memory_search 每 config 数千次调用）。全量 1031 题：ingest 合计 ~2.7h，查询合计 ~10.7h（两路并行墙钟 ~9h）。延迟与成本换的是结构化记忆带来的 SH/MH 优势；对成本敏感的部署可 `extraction: 'off'` 或关查询扩展（§6.2）。
+
+## 8. 与现有方法的逐步对比
+
+记忆系统的差异不在"存没存"，而在四个关键步骤上的不同选择。以下逐一对比（机制事实均核实自各官方论文/仓库；MemoryAgentBench 基线数字引自论文 arXiv v2 的 Table 2）。
+
+### 8.1 写入时：谁来判决"新事实与旧记忆的关系"
+
+| 系统 | 写入期冲突处理 |
+|---|---|
+| **Mem0**（arXiv:2504.19413） | 每个候选事实先向量检索 top-10 相似旧记忆，再由 LLM function call 判决 **ADD / UPDATE / DELETE / NOOP** 四选一——冲突判决完全交给 LLM，DELETE 即移除 |
+| **Zep/Graphiti**（arXiv:2501.13956） | 新边入库时 LLM 与同一实体对间的已有边比对，发现矛盾则把旧边的 $t_{invalid}$ 设为新边的 $t_{valid}$（edge invalidation，不物理删除） |
+| **A-MEM**（arXiv:2502.12110） | "memory evolution"：LLM 据新笔记**回溯改写**邻近旧笔记的上下文描述/关键词/标签，原笔记被替换 |
+| **HippoRAG 1/2**（arXiv:2405.14831 / 2502.14802） | **无机制**——论文明确持续学习就是"向 KG 加边"，无冲突检测与失效 |
+| **MemGPT/Letta**（arXiv:2310.08560） | LLM 自主 function call（`core_memory_replace` 等）编辑记忆，无外部控制器 |
+| **本系统** | **写入期零判决**。全部事件追加进图；新旧关系由检索层确定性处理（状态族硬去重 + 新近度软偏好 + 时间标签明示，§5.4） |
+
+我们的立场：**写入期做的任何不可逆判决，都是在信息最少的时刻做最重要的决定。** LLM 判决会错，错了就固化；写入时"是否矛盾"常常缺乏检索期才有的上下文。把判决推迟到检索期、且用确定性规则而非又一次 LLM 调用，是 FC-MH 30.25 vs 全员 ≤7.0 的直接来源之一——基线们不是存不下新事实，是写入期或检索期把新旧搅在了一起。
+
+### 8.2 时间建模：时间是不是一等公民
+
+| 系统 | 时间模型 |
+|---|---|
+| **Mem0** | 仅创建时间戳 |
+| **Zep/Graphiti** | **bi-temporal**：$t_{valid}/t_{invalid}$（事实在现实世界成立区间）+ $t'_{created}/t'_{expired}$（系统事务轴，用于审计） |
+| **A-MEM / HippoRAG / MemGPT** | 单时间戳或时间字符串 |
+| **本系统** | **双锚**：$t_e$（事件发生时间，带精度 year~second）+ $t_m$（被提及时间）；查询侧六种时间算子做双锚硬过滤 + 分开衰减的软加权（§5.3） |
+
+与最接近的 Zep 对比：语义不同——他们建模"事实有效期"，我们建模"发生 vs 提及"。Zep 的 $t_{invalid}$ 由 LLM 在写入期判定矛盾后设置；我们不设失效点。另外两处工程差异：我们的绝对时间由**确定性解析器**从逐字时间表达式换算（禁止 LLM 算日期），且携带**精度**——"去年"是 year 精度，参与日历区间匹配，而不是被硬编码成某个具体日期。
+
+### 8.3 记忆结构：检索与注入的基本单位是什么
+
+| 系统 | 结构 | 基本单位 |
+|---|---|---|
+| **Mem0** | 事实文本 + 向量（Mem0g：Neo4j 三元组图） | 一句事实 / 一条三元组 |
+| **Zep/Graphiti** | 三层子图：episode（原文）→ 实体语义边 → community 摘要 | 边（fact + 有效期） |
+| **A-MEM** | Zettelkasten 笔记（原文 + LLM 关键词/标签/上下文 + 链接） | 一条笔记 |
+| **HippoRAG** | OpenIE 三元组 schemaless KG，PPR 检索 | 节点/段落 |
+| **MemGPT** | OS 式分层：main context（working memory + FIFO 队列 + 递归摘要）/ archival / recall | 文本块 |
+| **本系统** | 实体-事件图：三类型实体节点 + 自包含事件边（双时间锚 + 来源引用） | **事件**：一句指代已消解、脱离上下文可读的事实 |
+
+结构选择的要点在**基本单位的自包含性**：切块（chunk）依赖原文上下文，三元组丢失语境与细节，我们的事件在写入时完成指代消解与自包含化（§4.2），同时保留 `details` 字段与来源引用——既可独立注入，又可回溯原文。实体只做三类型封闭集合、别名累积与保守合并（§4.3），不建社区、不做摘要——社区摘要（GraphRAG 路线，arXiv:2404.16130）为静态语料的全局 sensemaking 设计，新数据加入需重做摘要，不适配增量对话记忆（Graphiti 改用 label propagation 正是为此）。
+
+### 8.4 覆盖范围：记什么
+
+所有上述系统记忆的都是**对话/文档中的事实**。本系统额外把 **agent 自身的任务状态**（goal/todo/schedule/plan 进度事件）投影进同一张图（§4.4）——对 agent 产品而言，"上次任务做到哪了"的丢失与"用户住哪"的丢失同样致命，而前者恰是所有公开记忆系统的盲区。
+
+### 8.5 一句话总结定位
+
+> Mem0 把冲突判决交给写入期的 LLM；Zep 把它变成 LLM 判定的边失效；A-MEM 让新记忆改写旧记忆；HippoRAG 不处理冲突；MemGPT 让模型自己当内存管理员。**我们把写入期简化为纯追加，把一切"新旧之争"推迟到检索期用确定性规则解决，并把时间与 agent 自身进度提升为图的一等维度。**
+
+## 9. 局限与展望
 
 **当前局限**：
 
-- **multi-session 42.7 是最弱分项**：跨会话的时序/因果链整合仍是检索式记忆的结构性短板（与论文对 RAG 类方法的结论一致）。后续方向：会话级摘要节点（periodic summary events）进图。
-- **MH 错题主导模式**是模型回退参数化常识而非知识池——骨架行为，可在系统提示侧缓解。
+- **multi-session 42.7 是最弱分项**：跨会话的时序/因果链整合仍是检索式记忆的结构性短板（与论文对 RAG 类方法的结论一致）。后续方向：会话级摘要节点（周期性把一段会话压缩为摘要事件进图）。
+- **FC-MH 错题的主导模式**是模型回退参数化常识而非查记忆——骨架行为，可在系统提示侧缓解。
 - **侦探模式尾部延迟**：难题上单题 15min+ 的记忆深挖是能力来源也是体验问题，产品上需要工具预算/进度提示策略。
-- **ingest 成本**：LLM 抽取天然贵于向量化；可考虑小模型抽取档（`extractionModel` 配置已支持）。
-- **评测覆盖**：TTL（测试时学习）与 LRU（长程理解）两个维度未跑；judge 骨架差异未完全消融（v4-flash judge vs 官方 gpt-4o）；长 memeval_s（500 样本）未跑。
+- **ingest 成本**：LLM 抽取天然贵于向量化；可用 `extractionModel` 配置小模型抽取档。
+- **评测覆盖**：MemoryAgentBench 的 TTL（测试时学习）与 LRU（长程理解）两个维度未跑；judge 骨架差异未完全消融；长 memeval_s（500 样本）未跑。
 
 **展望**：
 
-- 上游上报 F1（dsh 流式 tool_calls 的 `!= null` 修复），证据已备好。
-- 会话摘要节点、supersede 显式语义（图内标记"被取代"边）进一步增强时间演进表达。
-- MemoryArena（ICML 2026，同一团队的 agentic memory 新评测）值得跟进。
-- 评测侧：用多家骨架模型消融（我们的架构与骨架正交），把 benchmark 适配层变成可复用的 dsh-agent 评测工具。
+- 会话摘要节点、supersede 显式语义（图内"被取代"边）进一步增强时间演进表达；
+- 用多家骨架模型做消融（本架构与骨架正交），把 benchmark 适配层沉淀为可复用的 dsh-agent 评测工具；
+- 跟进 MemoryArena（ICML 2026，MemoryAgentBench 同一团队的 agentic memory 新评测）。
 
-## 附录 A：文档地图
-
-| 文档 | 内容 |
-|---|---|
-| `docs/intro.md` | 一页介绍（创新点/实现/成绩） |
-| `docs/design.md` | 架构设计与关键决策 |
-| `docs/install-guide.md` | 安装/验证/卸载指南 |
-| `docs/known-issues.md` | 已知问题（F1 上游 bug 证据链等） |
-| `docs/m1~m5` | 骨架/存储/检索/真人场景/发布的里程碑记录 |
-| `docs/m6-third-party-review.md` | 第三方视角审查（3 major + 修复） |
-| `docs/m8-progress-memory-eval.md` | 任务进度丢失风险系统评估与方案 |
-| `docs/m9-benchmark-plan.md` / `docs/m9-benchmark.md` | 评测方案 / 评测报告（含两轮对照与审计） |
-| `benchmark/` | 评测适配层 + 守卫插件 + 审计器（可复现） |
-
-## 附录 B：复现
+## 附录 A：复现
 
 ```sh
 # 安装插件到 dsh（完全可逆）
 scripts/install.sh && scripts/uninstall.sh   # 验证
 
 # 单测
-npm test                                      # 121 个用例
+npm test                                      # 124 个用例
 
 # MemoryAgentBench 复现（见 benchmark/README.md）
 cd benchmark && DEEPSEEK_API_KEY=... ./run-cr-all.sh   # 或 run-lme.sh
 # 每个 context 自动归档日志并审计；judge: venv/bin/python judge_lme.py ...
 ```
+
+## 附录 B：文档地图
+
+| 文档 | 内容 |
+|---|---|
+| `docs/intro.md` | 一页介绍（创新点/实现/成绩） |
+| `docs/design.md` | 架构设计与关键决策 |
+| `docs/install-guide.md` | 安装/验证/卸载指南 |
+| `docs/known-issues.md` | 已知问题（上游 bug 证据链等） |
+| `docs/m1~m5` | 骨架/存储/检索/真人场景/发布的里程碑记录 |
+| `docs/m6-third-party-review.md` | 第三方视角审查与修复 |
+| `docs/m8-progress-memory-eval.md` | 任务进度丢失风险系统评估与方案 |
+| `docs/m9-benchmark-plan.md` / `docs/m9-benchmark.md` | 评测方案 / 评测报告（含两轮对照与审计） |
+| `docs/m10-visualization.md` | 记忆图可视化 |
+| `benchmark/` | 评测适配层 + 守卫插件 + 审计器（可复现） |
+
+## 附录 C：开发过程中的关键工程发现
+
+以下为开发中实测抓到并已修复的问题，均有单测覆盖。它们不影响当前系统行为，但对复用本架构的人有参考价值。
+
+- **F-1（最重要）：推理模型在密集抽取输入上无限推理**。deepseek-v4-flash 在 ≥~17k 字符的密集事实列表上会把任意输出预算（实测 8k 与 32k）全部耗在 reasoning 上、可见输出为零，记忆静默丢失；3.5k 字符的特定密集输入即可 100% 复现。内容触发，加预算不能根治。修复：抽取/查询扩展调用显式 `thinking: 'disabled'`（per-call，不影响主对话）+ 8k 输入分段作防御层。**教训：用推理模型做结构化抽取时，thinking 必须显式关闭。**
+- **goal/change 嵌套载荷**：dsh 实际把 goal 快照嵌套在 `data.goal` 下，bridge 初版按扁平结构读导致事件全丢。**教训：鸭子类型约定必须用真实 session 日志验证，不能照文档猜。**
+- **检索硬过滤误伤**：裸 "this"/"past"（"how do I fix this error?"）曾被误判为 180 天时间过滤，静默滤掉全部旧记忆。修复：无时间单位的裸词不触发窗口算子。
+- **locality 死代码**：对话局部性加成因 key 拆分 bug 从未生效，补回归测试后修复。**教训：打分类特征必须有"分数确实变化"的回归测试，否则坏得无声无息。**
+- **上游 F1（dsh 侧，已定位待上报）**：Zen 类 Go 网关端点把流式 tool_calls 续传 chunk 的省略字段序列化成显式 null，dsh 的 `!== undefined` 累积逻辑被覆盖成空 id/name。字节级三方对照证据在 `docs/known-issues.md`。DeepSeek 官方 API 无此问题。
