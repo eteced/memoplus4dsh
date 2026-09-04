@@ -303,9 +303,22 @@ export type TemporalOp =
   | { mode: 'DENSE' }
   | { mode: 'LAST_K'; k: number }
   | { mode: 'WITHIN_WINDOW'; windowMs: number }
+  /** Absolute calendar range [startMs, endMs) — "last week", "上个月" etc. */
+  | { mode: 'RANGE'; startMs: number; endMs: number }
   | { mode: 'IN_YEAR'; year: number }
   | { mode: 'IN_MONTH'; year: number; month: number }
   | { mode: 'IN_SEASON'; year: number; season: [number, number] }
+
+/** UTC Monday 00:00 of the week containing `date`. */
+function weekStartUTC(date: Date): Date {
+  const weekday = (date.getUTCDay() + 6) % 7  // Monday-first
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() - weekday))
+}
+
+/** UTC 00:00 on the 1st of the month containing `date`. */
+function monthStartUTC(date: Date): Date {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), 1))
+}
 
 const ORDINAL_RE = /\b(last|previous|recent(?:ly)?|past|this)\s*(\d+)?\s*(time|times|day|days|week|weeks|month|months|year|years)?\b/i
 
@@ -320,6 +333,22 @@ export function resolveTemporalQuery(query: string, anchor: Date): TemporalOp {
   // Minimal Chinese query-side constructs (universal time words).
   if (q.includes('去年')) return { mode: 'IN_YEAR', year: anchor.getUTCFullYear() - 1 }
   if (q.includes('今年')) return { mode: 'IN_YEAR', year: anchor.getUTCFullYear() }
+  // Calendar ranges for week/month words (m11: 时间查询是主优势轴，周/月按日历界硬过滤，
+  // 而不是粗粒度的滚动窗口——"我上周做了什么"在周五问时，上周一距 7 天滚动窗有 11 天)。
+  if (q.includes('上周') || q.includes('上星期')) {
+    const start = weekStartUTC(anchor)
+    return { mode: 'RANGE', startMs: start.getTime() - 7 * DAY_MS, endMs: start.getTime() }
+  }
+  if (q.includes('这周') || q.includes('本周') || q.includes('这星期') || q.includes('本星期')) {
+    return { mode: 'RANGE', startMs: weekStartUTC(anchor).getTime(), endMs: anchor.getTime() + 1 }
+  }
+  if (q.includes('上个月') || q.includes('上月')) {
+    const start = monthStartUTC(anchor)
+    return { mode: 'RANGE', startMs: shiftMonth(start, -1).getTime(), endMs: start.getTime() }
+  }
+  if (q.includes('这个月') || q.includes('本月')) {
+    return { mode: 'RANGE', startMs: monthStartUTC(anchor).getTime(), endMs: anchor.getTime() + 1 }
+  }
   // "最新/最近一次/上次" must be checked before 最近 (最近一次 contains 最近);
   // they ask for the newest state, not a window (m8 P1-B).
   if (q.includes('最新') || q.includes('最近一次') || q.includes('上次')) return { mode: 'LAST_K', k: 1 }
@@ -336,6 +365,23 @@ export function resolveTemporalQuery(query: string, anchor: Date): TemporalOp {
   }
   m = /\b(?:in|during)\s+(\d{4})\b/.exec(q)
   if (m) return { mode: 'IN_YEAR', year: Number(m[1]) }
+
+  // Calendar week/month ranges (before ORDINAL_RE, which would otherwise map
+  // "last week" to a coarse rolling 7-day window).
+  if (/\blast week\b/.test(q)) {
+    const start = weekStartUTC(anchor)
+    return { mode: 'RANGE', startMs: start.getTime() - 7 * DAY_MS, endMs: start.getTime() }
+  }
+  if (/\bthis week\b/.test(q)) {
+    return { mode: 'RANGE', startMs: weekStartUTC(anchor).getTime(), endMs: anchor.getTime() + 1 }
+  }
+  if (/\blast month\b/.test(q)) {
+    const start = monthStartUTC(anchor)
+    return { mode: 'RANGE', startMs: shiftMonth(start, -1).getTime(), endMs: start.getTime() }
+  }
+  if (/\bthis month\b/.test(q)) {
+    return { mode: 'RANGE', startMs: monthStartUTC(anchor).getTime(), endMs: anchor.getTime() + 1 }
+  }
 
   m = ORDINAL_RE.exec(q)
   // A bare "this"/"past" with no unit carries no temporal intent ("how do I
@@ -404,6 +450,8 @@ export function temporalMatch(event: MemoryEvent, op: TemporalOp, anchor: Date):
       const start = anchor.getTime() - op.windowMs
       return inRange(t => t.getTime() >= start && t.getTime() <= anchor.getTime())
     }
+    case 'RANGE':
+      return inRange(t => t.getTime() >= op.startMs && t.getTime() < op.endMs)
     case 'IN_YEAR':
       return inRange(t => t.getUTCFullYear() === op.year)
     case 'IN_MONTH':
@@ -448,7 +496,7 @@ export function temporalBonus(event: MemoryEvent, op: TemporalOp, anchor: Date):
     return d === undefined ? 0 : 0.25 / (1 + d / 14)
   }
   if (op.mode === 'IN_YEAR') return 0
-  if (op.mode === 'IN_MONTH' || op.mode === 'IN_SEASON') {
+  if (op.mode === 'RANGE' || op.mode === 'IN_MONTH' || op.mode === 'IN_SEASON') {
     const ev = dEvent === undefined ? 0 : 0.15 / (1 + dEvent / 30)
     const mn = dMention === undefined ? 0 : 0.08 / (1 + dMention / 30)
     return Math.max(ev, mn)

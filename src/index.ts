@@ -12,6 +12,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { MemoryStore } from './store.js'
 import { ExtractionPipeline, ExtractionQueue, PendingJobLog } from './extraction.js'
 import type { ExtractionJob } from './extraction.js'
+import { LlmEntityMerger } from './entity-merge.js'
 import { registerBridges } from './bridges.js'
 import { OnnxEmbedder, NULL_EMBEDDER, EMBEDDING_MODELS } from './embedding.js'
 import type { TextEmbedder } from './embedding.js'
@@ -64,6 +65,12 @@ export interface Config {
   hfBaseUrl?: string
   /** LLM query expansion during retrieval; default true. */
   queryExpansion?: boolean
+  /**
+   * LLM-adjudicated entity merge at extraction time (embedding candidates +
+   * one adjudication call per turn). Default true; disable to save the extra
+   * call on write-heavy deployments.
+   */
+  entityMergeLlm?: boolean
   /** Character cap for the injected memory block. */
   injectMaxChars?: number
 }
@@ -249,6 +256,15 @@ export function apply(ctx: Context, config: Config) {
       const pipeline = new ExtractionPipeline({
         store,
         callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, config.extractionMaxTokens ?? 8192),
+        entityMerger: config.entityMergeLlm === false
+          ? undefined
+          : new LlmEntityMerger({
+            store,
+            embedder,
+            // Adjudication output is a few "N: M" lines; a small budget and the
+            // shared call timeout keep a turn's write path bounded.
+            callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, 4096),
+          }),
       })
       // Durable pending log: interrupted jobs are requeued on restart (m8 P2).
       const pendingLog = new PendingJobLog(join(dataDir, 'extraction-pending.jsonl'))

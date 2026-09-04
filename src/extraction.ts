@@ -11,6 +11,7 @@
 import type { Entity, EntityType, MemoryStore, NewEvent, TimePrecision } from './store.js'
 import { ENTITY_TYPES } from './store.js'
 import { extractTimeExpr, resolveTimeExpr } from './temporal.js'
+import type { LlmEntityMerger, MergeMention } from './entity-merge.js'
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 
 /**
@@ -304,6 +305,8 @@ export interface ExtractionPipelineOptions {
   store: MemoryStore
   /** One LLM call: prompt in, raw text out. Throws on failure. */
   callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
+  /** Optional LLM entity-merge adjudication for exact-miss mentions (m11). */
+  entityMerger?: LlmEntityMerger
 }
 
 /**
@@ -313,10 +316,12 @@ export interface ExtractionPipelineOptions {
 export class ExtractionPipeline {
   private readonly store: MemoryStore
   private readonly callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
+  private readonly entityMerger?: LlmEntityMerger
 
   constructor(options: ExtractionPipelineOptions) {
     this.store = options.store
     this.callLlm = options.callLlm
+    this.entityMerger = options.entityMerger
   }
 
   /** Extract one turn into the store. Throws when the LLM yields no usable text. */
@@ -340,10 +345,42 @@ export class ExtractionPipeline {
       rows.push(...parsed.events.filter(row => row.fact.length >= MIN_FACT_LENGTH))
     }
 
+    // LLM entity-merge adjudication for mentions that missed exact matching
+    // (m11): subjects AND objects. Rewrites rows in place before graph writes.
+    if (this.entityMerger !== undefined && rows.length > 0) {
+      const mentions = new Map<string, MergeMention>()
+      for (const row of rows) {
+        const key = row.canonical.toLowerCase()
+        if (!mentions.has(key) && this.store.findEntityByName(row.canonical) === undefined) {
+          mentions.set(key, { name: row.canonical, type: row.entityType, aliases: row.aliases, sampleFact: row.fact })
+        }
+        if (row.object.length > 0) {
+          const okey = row.object.toLowerCase()
+          if (!mentions.has(okey) && this.store.findEntityByName(row.object) === undefined) {
+            mentions.set(okey, { name: row.object, type: 'CONCEPT', aliases: [], sampleFact: row.fact })
+          }
+        }
+      }
+      const merges = await this.entityMerger.findMerges([...mentions.values()], job)
+      for (const row of rows) {
+        const subjectTarget = merges.get(row.canonical)
+        if (subjectTarget !== undefined) {
+          row.aliases = [...new Set([...row.aliases, row.canonical])]
+          row.canonical = subjectTarget
+        }
+        const objectTarget = merges.get(row.object)
+        if (objectTarget !== undefined) row.object = objectTarget
+      }
+    }
+
     let entitiesCreated = 0
     let entitiesReused = 0
     let eventsAdded = 0
     for (const row of rows) {
+      // Idempotent re-extraction: a crash-recovered turn must not double-write
+      // identical rows (same session+turn+predicate+fact text+time expr).
+      const rowTimeExpr = row.timeExpr || (extractTimeExpr(row.fact) ?? '')
+      if (this.store.hasEventFrom(job.sessionId, job.turn, row.predicate, row.fact, rowTimeExpr)) continue
       const subject = this.store.createOrResolve(row.canonical, row.entityType, row.aliases)
       if (subject.created) entitiesCreated++
       else entitiesReused++

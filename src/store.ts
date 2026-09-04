@@ -132,6 +132,8 @@ export class MemoryStore {
   private aliasIndex = new Map<string, string>()
   /** entity id -> event ids referencing it. */
   private eventsByEntity = new Map<string, Set<string>>()
+  /** "session|turn" -> event ids written for that turn (extraction dedup). */
+  private eventsBySource = new Map<string, Set<string>>()
   private opsSinceSnapshot = 0
   /** Number of journal lines skipped as corrupted during load. */
   corruptLineCount = 0
@@ -277,6 +279,24 @@ export class MemoryStore {
     event.embedding = embedding
     this.append({ v: 1, op: 'event.add', data: { ...event } })
     return true
+  }
+
+  /**
+   * True when an identical row (same predicate + normalized fact text) was
+   * already written for this session/turn — the crash-recovery re-extraction
+   * path uses it to stay idempotent. Bridge events (turn -1) and repeated
+   * mentions from DIFFERENT turns are unaffected.
+   */
+  hasEventFrom(sessionId: string, turn: number, predicate: string, normalizedText: string, timeExpr = ''): boolean {
+    const ids = this.eventsBySource.get(`${sessionId}|${turn}`)
+    if (ids === undefined) return false
+    const target = `${predicate}|${normalizeName(normalizedText)}|${timeExpr.trim().toLowerCase()}`
+    for (const id of ids) {
+      const event = this.events.get(id)
+      if (event !== undefined
+        && `${event.predicate}|${normalizeName(event.normalizedText)}|${event.timeExpr.trim().toLowerCase()}` === target) return true
+    }
+    return false
   }
 
   // ---------- deletes ----------
@@ -429,12 +449,20 @@ export class MemoryStore {
       }
       set.add(event.id)
     }
+    const sourceKey = `${event.sourceSession}|${event.sourceTurn}`
+    let bySource = this.eventsBySource.get(sourceKey)
+    if (!bySource) {
+      bySource = new Set()
+      this.eventsBySource.set(sourceKey, bySource)
+    }
+    bySource.add(event.id)
   }
 
   private deindexEvent(event: MemoryEvent): void {
     for (const id of [...event.subjectEntityIds, ...event.objectEntityIds]) {
       this.eventsByEntity.get(id)?.delete(event.id)
     }
+    this.eventsBySource.get(`${event.sourceSession}|${event.sourceTurn}`)?.delete(event.id)
   }
 
   /** Append one record as a single atomic line; compact when over threshold. */

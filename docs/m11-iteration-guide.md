@@ -24,7 +24,7 @@ mini/smoke 的题集固定（stride/offset 确定），同档内迭代间分数�
 
 - **改动**：
   1. ~~`src/store.ts` `createOrResolve`：精确匹配改为**类型无关**~~ ✅ 已实施（`findEntityByName` 不再按类型过滤；`resolveByEmbedding` 同步去类型过滤；先建者的类型保留）。单测 `store.test.ts` 已改为断言跨类型合并。
-  2. ~~`src/index.ts` 给 `MemoryStore` 接 embedder~~ ⏸ **未做**：store 的 `Embedder` 是同步接口而 `OnnxEmbedder` 是异步，接线需要 pipeline 级异步预消解。但分析显示全部 2820 组重名都是**同名类型翻转**（精确匹配即可覆盖），嵌入合并只覆盖罕见的模糊变体——本轮不做，留作后续增强。
+  2. ~~`src/index.ts` 给 `MemoryStore` 接 embedder~~ → **改为更强的方案并已实施**（✅ `src/entity-merge.ts`）：LLM 裁决合并——嵌入粗召回候选（cos≥0.6 top-5，含无嵌入时的包含关系兜底）+ 一次 LLM 调用判定"是否同一实体"，明确 yes 才合并；主体与客体提及都参与。另配**事件同轮去重**（`store.hasEventFrom`：同 session/turn/predicate/事实/timeExpr 只写一次，崩溃重抽幂等）。
   3. ~~`src/extraction.ts` `formatKnownEntities`：提示带类型~~ ✅ 已实施（输出 `Alice (PERSON)`，按裸名过滤、带类型输出；prompt 明示复用类型）。
 - **根因**：RC1（2820 组重名、45.8% 节点是重复）。
 - **预期**：实体锚定与一跳扩展恢复设计强度；MH 的"搜过仍 miss"（164 题）显著下降。

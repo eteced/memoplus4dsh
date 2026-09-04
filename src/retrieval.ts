@@ -306,7 +306,8 @@ export class Retriever {
     let candidates = this.expandViaSharedObjects([...candidateMap.values()], denseTop)
 
     // Temporal range operators hard-filter; LAST_K only re-ranks.
-    if (op.mode === 'IN_YEAR' || op.mode === 'IN_MONTH' || op.mode === 'IN_SEASON' || op.mode === 'WITHIN_WINDOW') {
+    if (op.mode === 'IN_YEAR' || op.mode === 'IN_MONTH' || op.mode === 'IN_SEASON'
+      || op.mode === 'WITHIN_WINDOW' || op.mode === 'RANGE') {
       const filtered = candidates.filter(ev => temporalMatch(ev, op, anchor) !== null)
       // Fall back to a whole-graph temporal scan when the semantic pool has
       // nothing in the period (ported fallback: period events win).

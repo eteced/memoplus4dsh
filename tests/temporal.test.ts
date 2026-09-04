@@ -182,3 +182,24 @@ describe('temporalBonus mention weight', () => {
     expect(staleBonus).toBeGreaterThan(0)
   })
 })
+
+describe('resolveTemporalQuery — English calendar ranges (m11 RANGE)', () => {
+  const B = new Date('2026-09-01T12:00:00.000Z') // Tuesday
+  it('last week = previous calendar week, not a rolling 7-day window', () => {
+    const op = resolveTemporalQuery('what did I do last week?', B)
+    expect(op.mode).toBe('RANGE')
+    if (op.mode !== 'RANGE') return
+    expect(new Date(op.startMs).toISOString()).toBe('2026-08-24T00:00:00.000Z')
+    expect(new Date(op.endMs).toISOString()).toBe('2026-08-31T00:00:00.000Z')
+  })
+  it('last 3 weeks still goes to the rolling window (ORDINAL_RE)', () => {
+    const op = resolveTemporalQuery('what happened in the last 3 weeks?', B)
+    expect(op.mode).toBe('WITHIN_WINDOW')
+  })
+  it('last month = previous calendar month', () => {
+    const op = resolveTemporalQuery('what did we discuss last month?', B)
+    expect(op.mode).toBe('RANGE')
+    if (op.mode !== 'RANGE') return
+    expect(new Date(op.startMs).toISOString()).toBe('2026-08-01T00:00:00.000Z')
+  })
+})

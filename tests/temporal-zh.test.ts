@@ -75,3 +75,45 @@ describe('resolveTemporalQuery — Chinese constructs', () => {
     expect(resolveTemporalQuery('我最近去过哪里？', BASE).mode).toBe('WITHIN_WINDOW')
   })
 })
+
+describe('resolveTemporalQuery — 中文日历区间（m11 RANGE）', () => {
+  it('上周 = 上一个日历周（周一到周日），不是滚动 7 天', () => {
+    const op = resolveTemporalQuery('我上周做了什么？', BASE)  // BASE 是周二
+    expect(op.mode).toBe('RANGE')
+    if (op.mode !== 'RANGE') return
+    // 上一周：2026-08-24（周一）00:00 ~ 2026-08-31（周一）00:00
+    expect(new Date(op.startMs).toISOString()).toBe('2026-08-24T00:00:00.000Z')
+    expect(new Date(op.endMs).toISOString()).toBe('2026-08-31T00:00:00.000Z')
+  })
+
+  it('上个月 = 上一个日历月', () => {
+    const op = resolveTemporalQuery('我上个月去了哪里？', BASE)
+    expect(op.mode).toBe('RANGE')
+    if (op.mode !== 'RANGE') return
+    expect(new Date(op.startMs).toISOString()).toBe('2026-08-01T00:00:00.000Z')
+    expect(new Date(op.endMs).toISOString()).toBe('2026-09-01T00:00:00.000Z')
+  })
+
+  it('本周/本月 = 日历起点至今', () => {
+    const week = resolveTemporalQuery('本周有什么安排？', BASE)
+    expect(week.mode).toBe('RANGE')
+    if (week.mode === 'RANGE') expect(new Date(week.startMs).toISOString()).toBe('2026-08-31T00:00:00.000Z')
+    const month = resolveTemporalQuery('本月进度如何？', BASE)
+    expect(month.mode).toBe('RANGE')
+    if (month.mode === 'RANGE') expect(new Date(month.startMs).toISOString()).toBe('2026-09-01T00:00:00.000Z')
+  })
+
+  it('RANGE 参与双锚硬过滤：区间内任一时间锚命中即保留', async () => {
+    const { temporalMatch } = await import('../src/temporal.js')
+    const op = resolveTemporalQuery('我上周做了什么？', BASE)
+    const mk = (eventTime: string | null, mentionTime: string) => ({
+      eventTime, mentionTime,
+    }) as never
+    // 事件时间在上周内
+    expect(temporalMatch(mk('2026-08-26T15:00:00.000Z', '2026-09-01T12:00:00.000Z'), op, BASE)).toBe('event')
+    // 事件更早但当周被提及（mention 锚命中）
+    expect(temporalMatch(mk('2026-03-15T00:00:00.000Z', '2026-08-25T10:00:00.000Z'), op, BASE)).toBe('mention')
+    // 两个锚都在区间外
+    expect(temporalMatch(mk('2026-09-01T12:00:00.000Z', '2026-09-01T12:00:00.000Z'), op, BASE)).toBeNull()
+  })
+})

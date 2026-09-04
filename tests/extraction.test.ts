@@ -339,8 +339,9 @@ describe('ExtractionPipeline', () => {
     // More than one LLM call was made; every prompt is within the segment size.
     expect(prompts.length).toBeGreaterThan(1)
     for (const p of prompts) expect(p.length).toBeLessThan(8000 + 4000 + 500)
-    // Rows from all segments merged (dedup is the store's entity resolution).
-    expect(result.eventsAdded).toBe(prompts.length * 2)
+    // Rows from all segments merged; identical rows within one turn are
+    // deduped (m11), so the two unique rows land exactly once each.
+    expect(result.eventsAdded).toBe(2)
   })
 
   it('keeps segment boundaries on message lines, hard-slicing only oversized lines', async () => {
