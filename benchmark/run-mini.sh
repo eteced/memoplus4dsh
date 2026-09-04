@@ -20,6 +20,9 @@ export DEEPSEEK_BASE_URL="${DEEPSEEK_BASE_URL:-https://api.deepseek.com/v1}"
 STRIDE="${MINI_STRIDE:-10}"
 OFFSET="${MINI_OFFSET:-0}"
 LENGTHS="${MINI_LENGTHS:-6k 32k}"
+# 迭代轮次标签（如 MINI_TAG=m11v2）：隔离每轮结果文件，便于逐轮对比。
+TAG_ARGS=()
+if [[ -n "${MINI_TAG:-}" ]]; then TAG_ARGS=(--run_tag "$MINI_TAG"); fi
 
 for len in $LENGTHS; do
   for kind in sh mh; do
@@ -27,7 +30,7 @@ for len in $LENGTHS; do
     echo "================ $cfg ================"
     ./venv/bin/python run_benchmark.py \
       --dataset_config "MemoryAgentBench/configs/data_conf/$cfg" \
-      --query_stride "$STRIDE" --query_offset "$OFFSET" \
+      --query_stride "$STRIDE" --query_offset "$OFFSET" "${TAG_ARGS[@]}" \
       || { echo "FAILED (aborting): $cfg"; exit 1; }
   done
 done
@@ -36,7 +39,7 @@ echo "================ LME mini (1 context) ================"
 ./venv/bin/python run_benchmark.py \
   --dataset_config configs/Longmemeval_s_star_mini.yaml \
   --dsh_home "$(pwd)/dsh-home-lme" \
-  --query_stride 6 --query_offset "$OFFSET" \
+  --query_stride 6 --query_offset "$OFFSET" "${TAG_ARGS[@]}" \
   || { echo "FAILED (aborting): LME"; exit 1; }
 
 echo "MINI RUN ALL DONE (lengths: $LENGTHS, stride=$STRIDE offset=$OFFSET)"

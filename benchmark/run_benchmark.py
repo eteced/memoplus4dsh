@@ -58,6 +58,9 @@ def parse_args():
                              "(ingest stays full; deterministic, fixed question set)")
     parser.add_argument("--query_offset", type=int, default=0,
                         help="mini-split: which residue class to ask (0..stride-1)")
+    parser.add_argument("--run_tag", default=None,
+                        help="explicit tag for the output filename (e.g. iteration round 'm11v2'); "
+                             "keeps iteration results separate and resumable per round")
     parser.add_argument("--dsh_home", default=None,
                         help="benchmark dsh home (default benchmark/dsh-home); "
                              "use a second home for parallel runs")
@@ -188,7 +191,10 @@ def main():
     dsh_home = args.dsh_home or os.path.join(REPO_ROOT, "benchmark", "dsh-home")
 
     stride, offset = args.query_stride, args.query_offset
-    if stride > 1:
+    if args.run_tag:
+        dataset_config["tag"] = args.run_tag
+        out_path = output_path_for(dataset_config)
+    elif stride > 1:
         # Mini-split runs write to their own result files (never clobber full
         # runs) via the tag component of the official output name.
         dataset_config["tag"] = f"mini-s{stride}-o{offset}"

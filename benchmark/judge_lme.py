@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import re
 from tqdm import tqdm
 import backoff
 import openai
@@ -147,13 +148,18 @@ if __name__ == '__main__':
     def _norm_q(text):
         return ' '.join(str(text).split()).strip().lower()
 
-    def _hyp_question(hyp):
-        # our query template wraps the raw question: "... Now Answer the Question: <q>"
-        q = hyp.get('query', '')
+    def _strip_wrapper(text):
+        # both our query template and the reference 'question' field carry
+        # the "Current Date: … Now Answer the Question: <q>" wrapper
+        q = str(text)
         marker = 'Now Answer the Question:'
         if marker in q:
             q = q.split(marker, 1)[1]
+        q = re.sub(r'\s*Answer:\s*$', '', q)
         return _norm_q(q)
+
+    def _hyp_question(hyp):
+        return _strip_wrapper(hyp.get('query', ''))
 
     # Full runs align positionally; subset (mini) runs match by question text.
     if len(hypotheses) == len(references):
@@ -161,7 +167,7 @@ if __name__ == '__main__':
     else:
         ref_by_q = {}
         for r in references:
-            ref_by_q.setdefault(_norm_q(r['question']), r)
+            ref_by_q.setdefault(_strip_wrapper(r['question']), r)
         pairs = []
         for h in hypotheses:
             ref = ref_by_q.get(_hyp_question(h))
