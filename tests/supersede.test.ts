@@ -24,11 +24,12 @@ const JOB: ExtractionJob = {
   sessionId: 's1', turn: 0, turnText: 'User: x', mentionTime: NOW.toISOString(),
 }
 
-function addFact(store: MemoryStore, subjectName: string, predicate: string, text: string, mentionTime: string): MemoryEvent {
+function addFact(store: MemoryStore, subjectName: string, predicate: string, text: string, mentionTime: string, objectName?: string): MemoryEvent {
   const subject = store.createOrResolve(subjectName, 'PERSON').entity
+  const object = objectName === undefined ? null : store.createOrResolve(objectName, 'CONCEPT').entity
   const input: NewEvent = {
     subjectEntityIds: [subject.id],
-    objectEntityIds: [],
+    objectEntityIds: object === null ? [] : [object.id],
     predicate,
     normalizedText: text,
     details: '',
@@ -46,10 +47,10 @@ describe('LlmSupersedeResolver', () => {
   it('marks the old value only when the LLM says yes', async () => {
     const store = new MemoryStore({ dir })
     const old = addFact(store, 'Harvard', 'chairperson_is',
-      'The chairperson of Harvard University is Lawrence S. Bacow.', '2026-08-01T00:00:00.000Z')
+      'The chairperson of Harvard University is Lawrence S. Bacow.', '2026-08-01T00:00:00.000Z', 'Lawrence S. Bacow')
     const newer = addFact(store, 'Harvard', 'chairperson_is',
-      'The chairperson of Harvard University is Peter Diamandis.', '2026-09-01T00:00:00.000Z')
-    const resolver = new LlmSupersedeResolver({ store, callLlm: () => Promise.resolve('1: yes') })
+      'The chairperson of Harvard University is Peter Diamandis.', '2026-09-01T00:00:00.000Z', 'Peter Diamandis')
+    const resolver = new LlmSupersedeResolver({ store, callLlm: () => Promise.resolve('1: single') })
     const marked = await resolver.detectAndMark([newer], JOB)
     expect(marked).toBe(1)
     expect(store.getEvent(old.id)!.supersededBy).toBe(newer.id)
@@ -59,10 +60,10 @@ describe('LlmSupersedeResolver', () => {
   it('marks nothing on no / garbage / failure', async () => {
     const store = new MemoryStore({ dir })
     const old = addFact(store, 'Alice', 'likes',
-      'Alice likes tea.', '2026-08-01T00:00:00.000Z')
+      'Alice likes tea.', '2026-08-01T00:00:00.000Z', 'tea')
     const newer = addFact(store, 'Alice', 'likes',
-      'Alice likes coffee.', '2026-09-01T00:00:00.000Z')
-    for (const response of ['1: no', 'garbage', '']) {
+      'Alice likes coffee.', '2026-09-01T00:00:00.000Z', 'coffee')
+    for (const response of ['1: multi', 'garbage', '']) {
       const resolver = new LlmSupersedeResolver({ store, callLlm: () => Promise.resolve(response) })
       expect(await resolver.detectAndMark([newer], JOB)).toBe(0)
       expect(store.getEvent(old.id)!.supersededBy).toBeUndefined()
@@ -85,7 +86,7 @@ describe('LlmSupersedeResolver', () => {
     let calls = 0
     const resolver = new LlmSupersedeResolver({ store, callLlm: () => {
       calls++
-      return Promise.resolve('1: yes')
+      return Promise.resolve('1: single')
     } })
     // 新值 pesäpallo 到来：裁决并标记旧值
     expect(await resolver.detectAndMark([newPesa], JOB)).toBe(1)
@@ -110,7 +111,7 @@ describe('pipeline + retrieval integration', () => {
     const pipeline = new ExtractionPipeline({
       store,
       callLlm: async () => 'PERSON|User|_|lives_in|Shanghai|_|User lives in Shanghai.|_|fact',
-      supersedeResolver: new LlmSupersedeResolver({ store, callLlm: () => Promise.resolve('1: yes') }),
+      supersedeResolver: new LlmSupersedeResolver({ store, callLlm: () => Promise.resolve('1: single') }),
     })
     await pipeline.extractTurn(JOB)
     const retriever = new Retriever({ store, now: () => NOW })

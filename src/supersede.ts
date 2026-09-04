@@ -19,11 +19,16 @@
 import type { MemoryEvent, MemoryStore } from './store.js'
 import type { ExtractionJob } from './extraction.js'
 
-export const SUPERSEDE_ADJUDICATION_PROMPT = `You maintain a memory graph. Below are pairs of OLD and NEW statements about the same subject and relation. For each pair, decide whether NEW *updates* the OLD value (the relation holds a single current value that changed — e.g. residence, job, position, capital), versus merely adding alongside it (multi-valued relations — likes, hobbies, list items — or unrelated facts).
+export const SUPERSEDE_ADJUDICATION_PROMPT = `You maintain a memory graph. Each line below shows a relation (predicate) between a subject and the values observed for it at different times.
+
+Decide whether each relation is SINGLE-VALUED or MULTI-VALUED:
+- SINGLE-VALUED: holds one current value at a time; a newer value replaces the older (residence, job, position, capital, chairperson, "the type of X").
+- MULTI-VALUED: can hold several current values at once; a new value adds alongside (likes, hobbies, languages spoken, children, list items).
+- When unsure, answer multi (no update is marked).
 
 {lines}
 
-Answer one line per pair, exactly: <N>: yes or <N>: no`
+Answer one line per relation, exactly: <N>: single or <N>: multi`
 
 /** Retrieval score multiplier for superseded events (present-tense modes). */
 export const SUPERSEDED_DISCOUNT = 0.3
@@ -53,16 +58,19 @@ export class LlmSupersedeResolver {
    * Conservative: any failure or ambiguity marks nothing.
    */
   /**
-   * Find same-(subject, predicate) predecessors of the given new events and
-   * LLM-adjudicate whether each new event supersedes them. Marks confirmed
-   * pairs via `supersededBy`. Returns the number of links marked.
-   * Conservative: any failure or ambiguity marks nothing.
+   * Group new events with same-(subject, predicate) predecessors and ask the
+   * LLM once per group whether the relation is SINGLE-VALUED (a newer value
+   * replaces the older) — a semantic judgment the model can actually make.
+   * Mention order supplies the currency: for single-valued relations, older
+   * events with a different value are marked `supersededBy` the newest-value
+   * event. Returns the number of links marked.
    *
    * Re-mention guard (m11 mini-3 lesson): an event whose object value already
    * exists in an older same-(subject, predicate) event is a RE-MENTION of old
    * information, not an update — adjudicating it would let a later-repeated
    * stale value wrongly supersede the true newer value (mention order is not
-   * information order when old facts get re-stated). Such events are skipped.
+   * information order when old facts get re-stated). Such events are skipped,
+   * and any existing supersede mark propagates to the repeat.
    */
   async detectAndMark(newEvents: MemoryEvent[], job: ExtractionJob): Promise<number> {
     const normObj = (ev: MemoryEvent): string | undefined => {
@@ -70,9 +78,8 @@ export class LlmSupersedeResolver {
       if (id === undefined) return undefined
       return this.store.getEntity(id)?.canonicalName.trim().toLowerCase()
     }
-    // pair: [oldEvent, newEvent]
-    const pairs: [MemoryEvent, MemoryEvent][] = []
-    const seenPairs = new Set<string>()
+    // (subject, predicate) -> { events (newest-value event + predecessors), newEvent }
+    const groups = new Map<string, { subjectName: string; predicate: string; predecessors: MemoryEvent[]; newest: MemoryEvent }>()
     for (const event of newEvents) {
       if (event.speechAct === true) continue
       const subject = event.subjectEntityIds[0]
@@ -83,30 +90,44 @@ export class LlmSupersedeResolver {
         && old.predicate === event.predicate
         && old.speechAct !== true
         && old.mentionTime < event.mentionTime)
-      // Re-mention guard: the new event's value was already stated before.
       if (newObj !== undefined) {
         const sameValue = predecessors.filter(old => normObj(old) === newObj)
         if (sameValue.length > 0) {
-          // If the value's earlier statement was superseded, propagate the mark
-          // to this repeat — otherwise the re-mentioned STALE value would rank
-          // above the current one on mention recency (mini-3 q0).
+          // 重提守卫 + 标记传播（见 docstring）
           const head = sameValue.find(old => old.supersededBy !== undefined)?.supersededBy
           if (head !== undefined) this.store.markSuperseded(event.id, head)
           continue
         }
       }
-      for (const old of predecessors) {
-        const key = `${old.id}|${event.id}`
-        if (seenPairs.has(key)) continue
-        seenPairs.add(key)
-        pairs.push([old, event])
+      if (predecessors.length === 0) continue
+      const subjectName = this.store.getEntity(subject)?.canonicalName ?? subject
+      const key = `${subject}|${event.predicate}`
+      const group = groups.get(key)
+      // 同组可能一轮来多个新事件；以提及时间最新者为准
+      if (group === undefined || event.mentionTime > group.newest.mentionTime) {
+        groups.set(key, {
+          subjectName,
+          predicate: event.predicate,
+          predecessors: group === undefined
+            ? predecessors
+            : [...group.predecessors.filter(p => p.id !== event.id), ...(group.newest.id !== event.id ? [group.newest] : [])],
+          newest: event,
+        })
       }
     }
-    if (pairs.length === 0) return 0
+    // 只有"存在不同值"的组才需要裁决
+    const contested = [...groups.values()].filter(g => {
+      const newestObj = normObj(g.newest)
+      return g.predecessors.some(old => normObj(old) !== newestObj)
+    })
+    if (contested.length === 0) return 0
 
-    const lines = pairs.map(([oldEv, newEv], i) =>
-      `${i + 1}. OLD: "${oldEv.normalizedText}" || NEW: "${newEv.normalizedText}"`,
-    ).join('\n')
+    const lines = contested.map((g, i) => {
+      const values = [...new Set(
+        [...g.predecessors, g.newest].map(ev => normObj(ev) ?? ev.normalizedText),
+      )].map(v => `"${v}"`).join(', ')
+      return `${i + 1}. Subject "${g.subjectName}", relation "${g.predicate}" — values over time: ${values}; latest statement: "${g.newest.normalizedText}"`
+    }).join('\n')
     let raw: string
     try {
       raw = await this.callLlm(SUPERSEDE_ADJUDICATION_PROMPT.replace('{lines}', () => lines), job)
@@ -115,15 +136,20 @@ export class LlmSupersedeResolver {
     }
     let marked = 0
     for (const line of raw.split('\n')) {
-      const m = /^\s*(\d+)\s*[:：]\s*(yes|no)/i.exec(line.trim())
-      if (!m || m[2]!.toLowerCase() !== 'yes') continue
-      const pair = pairs[Number(m[1]) - 1]
-      if (pair !== undefined && this.store.markSuperseded(pair[0].id, pair[1].id)) {
-        marked++
-        this.onLog?.({
-          kind: 'supersede', old: pair[0].normalizedText.slice(0, 80),
-          new: pair[1].normalizedText.slice(0, 80), session: job.sessionId, turn: job.turn,
-        })
+      const m = /^\s*(\d+)\s*[:：]\s*(single|multi)/i.exec(line.trim())
+      if (!m || m[2]!.toLowerCase() !== 'single') continue
+      const group = contested[Number(m[1]) - 1]
+      if (group === undefined) continue
+      const newestObj = normObj(group.newest)
+      for (const old of group.predecessors) {
+        if (normObj(old) === newestObj) continue
+        if (this.store.markSuperseded(old.id, group.newest.id)) {
+          marked++
+          this.onLog?.({
+            kind: 'supersede', old: old.normalizedText.slice(0, 80),
+            new: group.newest.normalizedText.slice(0, 80), session: job.sessionId, turn: job.turn,
+          })
+        }
       }
     }
     return marked
