@@ -46,12 +46,21 @@ mini/smoke 的题集固定（stride/offset 确定），同档内迭代间分数�
 - **replay 验证**：sh_6k q9 distill 后查询金事件 rank **#1**（修复前包装查询跌出 top-12）。
 - **成本**：每去重后查询一次 LLM 调用（1024 tokens 上限、30s 超时、磁盘缓存），pre-step 关键路径上失败即透传。
 
-### P1-B 冲突版本的新值偏好（supersede 泛化）
+### P1-B 冲突版本的新值偏好（supersede 泛化）【已实施】
 
-- **改动**（`src/retrieval.ts` `dedupStateEvents` 泛化）：同 (主体实体, 谓词) 的事件组，注入时新值排前、旧值降权（不剔除——列表类事实同谓词多客体是合理并存，只对"组内 mentionTime 离散且时间表达式不同"的组降权）；或更安全：仅在检测到**同组内时间表达式可解析且互不相同**时应用。
-- **根因**：RC4（新旧共存时新值排序偏好上限 0.3 太弱）。
-- **风险**：误伤列表类事实；先只对 CR mini 验证，观察 LME preference/multi-session 分项是否回退。
-- **验证**：mini run FC 上升且 LME 不回退。
+- **改动**（✅ 最终形态，LLM 判定）：
+  1. `src/supersede.ts` `LlmSupersedeResolver`：新事件与**同（主体实体, 谓词）**的旧事件撞车时，一轮一次批量 LLM 调用裁决"新陈述是否更新了旧值"（单值关系变更 vs 多值并列，由模型语义判断，非规则）；确认后给**旧事件**打 `supersededBy` 链接——图里什么都不删，完全可逆可审计。
+  2. `src/retrieval.ts`：被取代事件在 DENSE/LAST_K（现在时）模式 ×0.3；显式历史查询（RANGE/IN_*）全分可见——"我搬家前住哪"不受影响。
+  3. `src/inject.ts`：注入块近重复行抑制（Jaccard ≥0.85 同文事件只占一席——评测图里 "Lisa Leslie plays the position of center." 出现过两次）。
+- **触发证据**：v3 smoke 里注入已精准对题但**旧值排在新值前**（Harvard 主席 Bacow 在 Diamandis 前、goaltender 旧值 ice hockey 在 pesäpallo 前）——RC4 实锤为最后的主瓶颈。
+- **与 Mem0/Zep 的分歧保持**：判决范围窄（仅同主语同谓词对）、结果可逆（标记而非删除/失效区间）、历史完整保留。
+- **验证**：smoke 同题组 + mini-3 的 FC 分数；探针 Q3（搬家冲突）必须 PASS。
+
+### 已完成的配套（v3，mini-2 回归的修复）
+
+- **mini-2 回归根因**（live 缓存实锤）：合并式"查询分析器" prompt 让模型对任务型载荷（"Now Answer the Question: …"）**直接答题**（distilled="Portugal"）且不产出关键词 → 注入检索词退化成答案词/模板词，SH 注入召回从 100% 掉回 60%。
+- **v3 设计**：蒸馏拆回两条独立链路——关键词扩展恢复 v1 已验证 prompt；蒸馏改为**标点启发式主路**（确定性，不会被人为任务文本带偏）+ **LLM 逐字引用兜底**（"引用原问题，不要回答"，仅覆盖无问句标点的长消息）。另加：>4000 字符用户消息视为文档粘贴跳过注入（ingest 期不再浪费分析调用）；查询侧 LLM 结果写 `extraction-debug.jsonl` 并随归档保存（v2 回归因查询侧不可见而难定位，已补）。
+- **基建**：smoke 每轮全新 tag（断点续跑会跳过旧题，起不到验证作用）；探针每轮清空自身状态（续跑会话 `finalResponse` 取空）。
 
 ### P2-A 抽取对新值的丢失复核
 
