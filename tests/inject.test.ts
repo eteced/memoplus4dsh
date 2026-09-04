@@ -7,6 +7,7 @@ import type { UserMessage } from '@deepseek-ai/dsh-session'
 import {
   createPreStepHandler,
   currentQueryText,
+  distillQuery,
   formatMemoryMessage,
   isMemoryInjection,
   PLUGIN_NAME,
@@ -76,6 +77,38 @@ describe('currentQueryText', () => {
     const messages = [userMessage('first'), userMessage('memories…', true), userMessage('second')]
     expect(currentQueryText(messages)).toBe('second')
     expect(currentQueryText([userMessage('memories…', true)])).toBeUndefined()
+  })
+})
+
+describe('distillQuery (m11 RC3)', () => {
+  it('passes short messages through untouched', () => {
+    expect(distillQuery('what does Alice like?')).toBe('what does Alice like?')
+  })
+
+  it('extracts the final question from long scaffolding, stripping the label', () => {
+    const wrapped = [
+      'Pretend you are a knowledge management system. Each fact in the knowledge pool is provided',
+      'with a serial number at the beginning, and the newer fact has larger serial number.',
+      'You need to solve the conflicts of facts in the knowledge pool by finding the newest fact.',
+      'For example: Question: what is the name of the current president of Russia? Answer: Donald Trump',
+      ' Now Answer the Question: Based on the provided Knowledge Pool, What is the name of the current head of the Tucson government? ',
+      'Answer:',
+    ].join('\n')
+    expect(wrapped.length).toBeGreaterThan(300)
+    expect(distillQuery(wrapped))
+      .toBe('Based on the provided Knowledge Pool, What is the name of the current head of the Tucson government?')
+  })
+
+  it('keeps the question line when there is no label prefix', () => {
+    const long = `${'背景说明。'.repeat(80)}\n上次说的那家牙医诊所叫什么？`
+    expect(long.length).toBeGreaterThan(300)
+    expect(distillQuery(long)).toBe('上次说的那家牙医诊所叫什么？')
+  })
+
+  it('returns the full text when a long message has no question line', () => {
+    const long = '帮我整理一下资料。'.repeat(40)
+    expect(long.length).toBeGreaterThan(300)
+    expect(distillQuery(long)).toBe(long)
   })
 })
 

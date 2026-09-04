@@ -37,7 +37,7 @@ Example:
 PERSON|Alice|_|is_from|hometown|_|Alice is from her hometown.|_
 PERSON|Bob|Bobby|painted|landscape|last year|Bob painted a landscape last year.|_
 
-Known names so far (reuse these; add nicknames as aliases):
+Known names so far, with their established types in parentheses (reuse both name and type; add nicknames as aliases):
 {known_entities}
 
 Rules:
@@ -50,6 +50,7 @@ Rules:
 - For "as a X" roles/status, also output a separate is|X row.
 - For static attributes (identity, relationship status, home country), use PREDICATE=is and the value in OBJECT.
 - Extract EVERY fact explicitly stated. Do not skip details.
+- Do NOT extract instructions, rules, or meta statements about the task or conversation itself (e.g. "answer only from the knowledge pool", "each fact has a serial number") — only facts about people, things, and events.
 - ONLY output facts from this turn.
 - Write NORMALIZED_FACT and DETAILS in the same language as the conversation turn.
 
@@ -166,23 +167,31 @@ export const KNOWN_ENTITIES_MAX_CHARS = 4000
 
 /**
  * Format the known-names hint, relevance-filtered to names actually
- * mentioned in the current text (plus hard length cap).
+ * mentioned in the current text (plus hard length cap). Names carry their
+ * type — "Alice (PERSON)" — so the model reuses the established typing
+ * instead of re-deciding (and flipping) it every turn (m11 RC1: type
+ * flip-flop was the sole driver of entity fragmentation).
  */
 export function formatKnownEntities(
-  entities: readonly Pick<Entity, 'canonicalName' | 'aliases'>[],
+  entities: readonly Pick<Entity, 'canonicalName' | 'aliases' | 'type'>[],
   contextText?: string,
 ): string {
   if (entities.length === 0) return '(none yet)'
-  let names = new Set<string>()
+  // bare name -> display form ("name (TYPE)"); filter on the bare name,
+  // output the typed form.
+  const display = new Map<string, string>()
   for (const entity of entities) {
-    names.add(entity.canonicalName)
-    for (const alias of entity.aliases) names.add(alias)
+    display.set(entity.canonicalName, `${entity.canonicalName} (${entity.type})`)
+    for (const alias of entity.aliases) display.set(alias, `${alias} (${entity.type})`)
   }
+  let names = [...display.keys()]
   if (contextText !== undefined) {
     const textLower = contextText.toLowerCase()
-    names = new Set([...names].filter(n => n.length > 0 && textLower.includes(n.toLowerCase())))
+    names = names.filter(n => n.length > 0 && textLower.includes(n.toLowerCase()))
   }
-  let result = names.size === 0 ? '(none relevant)' : [...names].sort().join(', ')
+  let result = names.length === 0
+    ? '(none relevant)'
+    : names.map(n => display.get(n)!).sort().join(', ')
   if (result.length > KNOWN_ENTITIES_MAX_CHARS) {
     result = result.slice(0, KNOWN_ENTITIES_MAX_CHARS)
     const lastComma = result.lastIndexOf(',')

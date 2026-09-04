@@ -182,6 +182,7 @@ PERSON|Bob|Bobby|painted|landscape|last year|Bob painted a landscape last year.|
 - **说话人即实体**：说话人陈述/提问/评价某话题时，主体是说话人，谓词表达言语行为（said/asked/praised）；
 - **列表逐行**："likes A, B, C" 拆三行；
 - **静态属性用 `is`**："是哪里人"、"婚姻状态"这类恒真属性与动态事件区分；
+- **不抽指令与元叙述**（M11 新增）："answer only from the knowledge pool"这类任务指令/规则句不是事实，入图后会在检索时与每个问题逐字重合、霸占 top-k（评测归因 RC2）；
 - **TIME_EXPR 逐字复制，禁止模型算日期**——这是关键设计：LLM 的日期算术不可靠，而"last Saturday"相对哪个基准点是确定的。模型只负责把原文时间表达**原样抄下**，绝对时间的换算由确定性代码完成（§4.5）；
 - **已知实体提示**：prompt 携带与当前文本相关的已有实体名（按名称在文本中出现与否过滤，硬上限 4000 字符），引导模型复用规范名而非另造新名——这是实体消解的第一道防线；
 - 事实语言跟随对话语言。
@@ -192,10 +193,10 @@ PERSON|Bob|Bobby|painted|landscape|last year|Bob painted a landscape last year.|
 
 同一概念在多次对话中以不同名字出现，必须合并为一个节点，否则图碎成孤岛。消解按序进行（`createOrResolve`）：
 
-1. **规范化名精确匹配**：$\text{norm}(n) = \text{lowercase}(\text{collapse-space}(\text{trim}(n)))$，对规范名与全部别名建哈希索引 $A\text{Index}: \text{norm}(n) \mapsto e$；
-2. **嵌入近似合并**（有 embedder 时）：在同类型实体内找余弦相似度最高者，
-$$\text{merge}(n, e^*) \iff \cos(\mathbf{v}_n, \mathbf{v}_{e^*}) \ge 0.9,\quad e^* = \arg\max_{e:\, \tau_e = \tau_n} \cos(\mathbf{v}_n, \mathbf{v}_e)$$
-阈值 0.9 是保守取向：**宁可分裂（同一概念两个节点，一跳扩展仍能拉上关系），不可错并（两个人被并成一个，事实就张冠李戴了）**。0.9 对"雪球/My cat 雪球"这类高重合名可靠合并，对"张伟/张薇"这类危险近名不误并。
+1. **规范化名精确匹配（类型无关）**：$\text{norm}(n) = \text{lowercase}(\text{collapse-space}(\text{trim}(n)))$，对规范名与全部别名建哈希索引 $A\text{Index}: \text{norm}(n) \mapsto e$。**匹配不按类型过滤**——抽取模型对同一名字的类别判定会逐轮翻转（PERSON↔CONCEPT），类型过滤曾在真实图上把 45.8% 的节点变成重复节点（MemoryAgentBench run-2 归因，2820 组重名）；先建者的类型保留。同名异物（homonym）的风险在个人 agent 场景可接受，且抽取 prompt 的已知实体提示携带既有类型（`Alice (PERSON)`），从源头减少翻转；
+2. **嵌入近似合并**（配置了同步 embedder 时）：找余弦相似度最高者（同样类型无关），
+$$\text{merge}(n, e^*) \iff \cos(\mathbf{v}_n, \mathbf{v}_{e^*}) \ge 0.9,\quad e^* = \arg\max_{e} \cos(\mathbf{v}_n, \mathbf{v}_e)$$
+阈值 0.9 是保守取向：**宁可分裂（同一概念两个节点，一跳扩展仍能拉上关系），不可错并（两个人被并成一个，事实就张冠李戴了）**。
 3. 合并即别名累积：新名字与本次附带的别名并入 $A$，索引同步——下次任一名字出现都命中同一节点。
 
 ### 4.4 进度桥：agent 的任务状态进同一张图
@@ -244,9 +245,11 @@ dsh 的 goal/todo/schedule/plan 状态是 per-session 事件日志，跨会话�
 
 ### 5.2 混合打分
 
-事件得分是六个信号的加权和（移植自前作并验证的权重）：
+事件得分是六个内容信号的加权和，再乘一个噪声折扣（移植自前作并验证的权重；言语行为折扣为 M11 新增）：
 
-$$\text{score}(v) = \underbrace{\cos(\mathbf{v}_q, \mathbf{v}_v)}_{\text{dense}} +\ 2\cdot\underbrace{\frac{\sum_{w \in q^\*} \text{idf}(w)\cdot [w \in W_v]}{\sum_{w \in q^+} \text{idf}(w)}}_{\text{IDF 归一化词重叠}} +\ \underbrace{\min\!\big(0.25\!\!\sum_{w \in q^+\setminus q^*}\!\!\text{idf}(w)\,[w \in W_v],\ 2\big)}_{\text{扩展词奖励}} +\ \underbrace{0.5\!\!\sum_{d \in D}\!\text{idf}(d)\,[d \in W_v]}_{\text{关键描述词}} +\ \underbrace{0.5\cdot[V(v) \cap E_q \ne \emptyset]}_{\text{实体奖励}} +\ \underbrace{b_T(v, \text{op})}_{\text{时间奖励}}$$
+$$\text{score}(v) = \delta_{\text{speech}}(p_v)\cdot\Big[\underbrace{\cos(\mathbf{v}_q, \mathbf{v}_v)}_{\text{dense}} +\ 2\cdot\underbrace{\frac{\sum_{w \in q^\*} \text{idf}(w)\cdot [w \in W_v]}{\sum_{w \in q^+} \text{idf}(w)}}_{\text{IDF 归一化词重叠}} +\ \underbrace{\min\!\big(0.25\!\!\sum_{w \in q^+\setminus q^*}\!\!\text{idf}(w)\,[w \in W_v],\ 2\big)}_{\text{扩展词奖励}} +\ \underbrace{0.5\!\!\sum_{d \in D}\!\text{idf}(d)\,[d \in W_v]}_{\text{关键描述词}} +\ \underbrace{0.5\cdot[V(v) \cap E_q \ne \emptyset]}_{\text{实体奖励}} +\ \underbrace{b_T(v, \text{op})}_{\text{时间奖励}}\Big]$$
+
+其中 $\delta_{\text{speech}}(p) = 0.3$ 当谓词 $p$ 是言语行为（asked/answered/said/told/…，首词前缀匹配语言级通用词根表），否则为 1——"User asked …"类事件与后来的问题逐字重合，不打折会霸占 top-k（评测归因 RC2：Q&A 噪声曾把金事件挤出 top-12）；折扣只降权不删除，显式搜索仍可命中。
 
 其中：
 
@@ -295,6 +298,8 @@ $$\text{match}(v, \text{range}) \iff t_e \in \text{range}\ \lor\ t_m \in \text{r
 
 top-k 事件渲染为紧凑列表（`- [时间] 事实 (细节)`），以 plugin 来源的 user/message 注入到已认领消息之后，总量受字符上限约束（默认 2000）。注入走 `agent/pre-step` 的 waterfall 决策链，因此**它和普通用户消息一样落盘进会话日志**——dsh 的"模型可见 ⟺ 日志可见"约束天然满足，记忆对调试与审计完全透明。
 
+注入前的检索查询经过 `distillQuery` 提取（M11 RC3）：长消息（>300 字符）里真正的问句常被指令/脚手架文本包围，直接拿全文检索会让模板噪声事件霸榜——评测中同一检索器用模型自造的短查询召回 68~74%，用包装全文只有 0~9%。规则是纯语言级的：取最后一个含 `?`/`？` 的行并剥离 `Label: ` 前缀；短消息原样透传。
+
 三个模型侧工具：`memory_search`（主动回忆，支持可选时间表达式参数）、`memory_remember`（用户说"记住…"时显式直写，绕过抽取管线）、`memory_visualize`（把当前记忆图渲染为自包含的交互式 HTML：力导向图 + 时间标记 + 事件列表，零外部依赖）。
 
 ## 6. 工程实现
@@ -319,7 +324,7 @@ top-k 事件渲染为紧凑列表（`- [时间] 事实 (细节)`），以 plugin
 
 ### 6.3 可靠性
 
-除 §4.6 的队列与日志外，还包括：抽取/扩展调用 120s/30s 超时（端点挂死不会卡死串行队列）；`memory_visualize` 大图上 1200 节点展示上限；全部辅助 I/O best-effort（任何持久化失败不得弄断对话）。当前 **124 个 vitest 单测全绿**（store/temporal/retrieval/extraction/inject/tools/bridges/visualize/embedding）。
+除 §4.6 的队列与日志外，还包括：抽取/扩展调用 120s/30s 超时（端点挂死不会卡死串行队列）；`memory_visualize` 大图上 1200 节点展示上限；全部辅助 I/O best-effort（任何持久化失败不得弄断对话）。当前 **130 个 vitest 单测全绿**（store/temporal/retrieval/extraction/inject/tools/bridges/visualize/embedding）。
 
 ## 7. 效果评测
 
@@ -435,7 +440,7 @@ ingest 的 LLM 抽取比 embed 方案贵约一个量级（每 ~8k 字符一次�
 scripts/install.sh && scripts/uninstall.sh   # 验证
 
 # 单测
-npm test                                      # 124 个用例
+npm test                                      # 130 个用例
 
 # MemoryAgentBench 复现（见 benchmark/README.md）
 cd benchmark && DEEPSEEK_API_KEY=... ./run-cr-all.sh   # 或 run-lme.sh
@@ -455,6 +460,7 @@ cd benchmark && DEEPSEEK_API_KEY=... ./run-cr-all.sh   # 或 run-lme.sh
 | `docs/m8-progress-memory-eval.md` | 任务进度丢失风险系统评估与方案 |
 | `docs/m9-benchmark-plan.md` / `docs/m9-benchmark.md` | 评测方案 / 评测报告（含两轮对照与审计） |
 | `docs/m10-visualization.md` | 记忆图可视化 |
+| `docs/m11-case-analysis.md` / `docs/m11-iteration-guide.md` | 召回失败归因（RC1–RC5）/ mini 评测与修复路线 |
 | `benchmark/` | 评测适配层 + 守卫插件 + 审计器（可复现） |
 
 ## 附录 C：开发过程中的关键工程发现

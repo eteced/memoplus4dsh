@@ -21,6 +21,33 @@ import { statePredicateFamily } from './bridges.js'
 import type { TemporalOp } from './temporal.js'
 import { resolveTemporalQuery, temporalBonus, temporalMatch } from './temporal.js'
 
+/**
+ * Speech-act predicate roots (language-level, universal verbs of saying).
+ * Events like "User asked …" / "Assistant answered …" carry conversational
+ * noise, not facts, and rank artificially high because question-asking turns
+ * share exact vocabulary with later questions (m11 RC2: Q&A and template
+ * noise crowded gold facts out of the top-k). Matched on the first word of
+ * the predicate by prefix (ask/answered/asking all hit "ask").
+ */
+const SPEECH_ACT_ROOTS = [
+  'ask', 'answer', 'say', 'said', 'tell', 'told', 'reply', 'repli', 'respond',
+  'instruct', 'request', 'mention', 'note', 'state', 'question', 'comment', 'praise',
+]
+
+/** Speech-act events are scored at this fraction of their raw score. */
+export const SPEECH_ACT_DISCOUNT = 0.3
+
+/** True for speech-act predicates ("asked", "answered_from", "told", …). */
+export function isSpeechActPredicate(predicate: string): boolean {
+  const first = (predicate.toLowerCase().match(/[a-z]+/) ?? [''])[0]
+  return SPEECH_ACT_ROOTS.some(root => first.startsWith(root))
+}
+
+/** Score multiplier: speech-act events keep 30% of their score. */
+function speechActDiscount(predicate: string): number {
+  return isSpeechActPredicate(predicate) ? SPEECH_ACT_DISCOUNT : 1
+}
+
 /** Universal English function words excluded from keyword matching. */
 const STOPWORDS = new Set([
   'the', 'a', 'an', 'is', 'are', 'was', 'were', 'did', 'does', 'do', 'what', 'when', 'where',
@@ -359,14 +386,15 @@ export class Retriever {
     if (events.length === 0) return []
     if (queryVec !== null) await this.ensureEmbeddings(events)
     const scored = events.map((event): { event: MemoryEvent; score: number } => {
+      const discount = speechActDiscount(event.predicate)
       if (queryVec !== null) {
         const vec = this.eventVector(event)
-        if (vec !== undefined) return { event, score: cosineSimilarity([...queryVec], [...vec]) }
+        if (vec !== undefined) return { event, score: cosineSimilarity([...queryVec], [...vec]) * discount }
       }
       const ewords = new Set(wordsOf(this.eventText(event)).map(stem))
       let overlap = 0
       for (const w of expanded) if (ewords.has(w)) overlap++
-      return { event, score: overlap }
+      return { event, score: overlap * discount }
     })
     scored.sort((a, b) => b.score - a.score)
     const top = scored.slice(0, n).filter(s => s.score > 0)
@@ -441,7 +469,8 @@ export class Retriever {
       const entityBonus = entityIds.size > 0
         && [...event.subjectEntityIds, ...event.objectEntityIds].some(id => entityIds.has(id)) ? 0.5 : 0
       const tBonus = temporalBonus(event, op, anchor)
-      const score = dense + overlapScore * 2 + expansionBonus + descriptorBonus + entityBonus + tBonus
+      const raw = dense + overlapScore * 2 + expansionBonus + descriptorBonus + entityBonus + tBonus
+      const score = raw * speechActDiscount(event.predicate)
       return { score, event, coverage, idfMass }
     })
 

@@ -46,6 +46,31 @@ export function currentQueryText(messages: readonly UserMessage[]): string | und
   return undefined
 }
 
+/**
+ * Distill the retrieval query from a raw user message (m11 RC3). Long
+ * messages often embed the actual question inside scaffolding/instructions
+ * ("Pretend you are… Now Answer the Question: …?"); retrieving on the raw
+ * text drowns the question's content words in boilerplate and matches
+ * instruction-noise memories instead of facts. When the message is long and
+ * contains a question line, retrieve on that line (stripping a leading
+ * "Label: " scaffold); short messages pass through untouched.
+ */
+export function distillQuery(text: string): string {
+  if (text.length <= 300) return text
+  const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0)
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!
+    if (!line.includes('?') && !line.includes('？')) continue
+    const colon = line.lastIndexOf(': ')
+    if (colon >= 0) {
+      const tail = line.slice(colon + 2)
+      if (tail.includes('?') || tail.includes('？')) return tail
+    }
+    return line
+  }
+  return text
+}
+
 /** One-line rendering of one event for the injected memory list. */
 export function formatMemoryLine(event: MemoryEvent, store: MemoryStore): string {
   const time = event.timeExpr.length > 0
@@ -96,8 +121,9 @@ export function createPreStepHandler(deps: InjectionDeps) {
   ): Promise<PreStepDecisionLike> => {
     const decision = await next()
     if (decision.kind !== 'enter' || payload.step !== 1) return decision
-    const query = currentQueryText(payload.messages)
-    if (query === undefined) return decision
+    const rawQuery = currentQueryText(payload.messages)
+    if (rawQuery === undefined) return decision
+    const query = distillQuery(rawQuery)
     let events: MemoryEvent[]
     try {
       events = await deps.retrieve(query)

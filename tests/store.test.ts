@@ -66,11 +66,13 @@ describe('createOrResolve', () => {
     expect(viaAliasAgain.entity.aliases.filter(a => a === 'Al')).toHaveLength(1)
   })
 
-  it('does not resolve across types', () => {
+  it('resolves across types (m11 RC1: extraction type flip-flop must not fragment the graph)', () => {
     const store = new MemoryStore({ dir })
-    store.createOrResolve('Mercury', 'OBJECT')
+    const first = store.createOrResolve('Mercury', 'OBJECT')
     const other = store.createOrResolve('Mercury', 'CONCEPT')
-    expect(other.created).toBe(true)
+    expect(other.created).toBe(false)
+    expect(other.entity.id).toBe(first.entity.id)
+    expect(other.entity.type).toBe('OBJECT') // 先建者的类型保留
   })
 
   it('never adds the canonical name as its own alias', () => {

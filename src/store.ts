@@ -179,8 +179,14 @@ export class MemoryStore {
   /**
    * Resolve a mention to an existing entity or create one. Resolution order:
    * exact normalized name/alias match, then (when an embedder is configured)
-   * cosine near-duplicate merge within the same type. Resolving into an
-   * existing entity merges the new name and aliases into its alias set.
+   * cosine near-duplicate merge. Both are TYPE-AGNOSTIC (m11 RC1): the
+   * extraction model flips types turn-to-turn for the same name
+   * (PERSON↔CONCEPT), and type-filtered matching shattered one real-world
+   * graph into 2820 duplicate-name groups (45.8% of all nodes). The first
+   * created type wins; homonym risk is accepted (a personal agent's graph
+   * rarely holds two different things with the identical name).
+   * Resolving into an existing entity merges the new name and aliases into
+   * its alias set.
    */
   createOrResolve(
     canonicalName: string,
@@ -188,7 +194,7 @@ export class MemoryStore {
     aliases: string[] = [],
   ): { entity: Entity; created: boolean } {
     const name = canonicalName.trim().replace(/\s+/g, ' ')
-    const existing = this.findEntityByName(name, type) ?? this.resolveByEmbedding(name, type)
+    const existing = this.findEntityByName(name) ?? this.resolveByEmbedding(name)
     if (existing) {
       let changed = this.addAliasInternal(existing, name)
       for (const alias of aliases) changed = this.addAliasInternal(existing, alias) || changed
@@ -215,8 +221,8 @@ export class MemoryStore {
     return { entity, created: true }
   }
 
-  /** Embedding near-duplicate match within the same type, or undefined. */
-  private resolveByEmbedding(name: string, type: EntityType): Entity | undefined {
+  /** Embedding near-duplicate match (type-agnostic, m11 RC1), or undefined. */
+  private resolveByEmbedding(name: string): Entity | undefined {
     if (!this.embedder) return undefined
     const key = normalizeName(name)
     if (key.length === 0) return undefined
@@ -224,7 +230,6 @@ export class MemoryStore {
     let best: Entity | undefined
     let bestScore = -1
     for (const candidate of this.entities.values()) {
-      if (candidate.type !== type) continue
       const vector = candidate.embedding ?? this.embedder.embed(normalizeName(candidate.canonicalName))
       const score = cosineSimilarity(query, vector)
       if (score > bestScore) {

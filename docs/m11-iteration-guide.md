@@ -2,6 +2,8 @@
 
 > 日期：2026-09-05 · 配套：`docs/m11-case-analysis.md`（根因证据）
 > 目的：用 ~5% 的 token 成本做快速迭代验证，每次改动有明确的预期收益假设。
+> **状态更新（2026-09-05 晚）**：P0-A / P0-B / P1-A 已实施（130 单测全绿 + replay 实证），
+> 第一轮 mini run 验证进行中。各条目的"改动"小节标注了实施细节。
 
 ## 1. Mini 评测集（敏捷迭代用）
 
@@ -30,31 +32,31 @@ venv/bin/python analyze_recall_failures.py   # 注意：脚本目前指向全量
 
 每条给出：改动位置 / 对应根因 / 预期收益 / mini 验证信号。
 
-### P0-A 实体消解：类型无关 + 接线嵌入合并
+### P0-A 实体消解：类型无关 + 接线嵌入合并 【已实施·部分】
 
 - **改动**：
-  1. `src/store.ts` `createOrResolve`：精确匹配改为**类型无关**（同名不同型合并进先建节点，类型保留先建者的；或抽取侧 known_entities 提示带类型，双管齐下）；
-  2. `src/index.ts`：把 `OnnxEmbedder` 实例传入 `MemoryStore({ embedder })`，接通 `resolveByEmbedding`（同步 embedder 接口需适配——store 的 `Embedder` 是同步接口而 OnnxEmbedder 是异步，需包一层缓存/预计算，或改为抽取管线在写入前异步消解）；
-  3. `src/extraction.ts` `formatKnownEntities`：提示里名字带类型（`Alice (PERSON)`），引导模型复用既有类型判定。
+  1. ~~`src/store.ts` `createOrResolve`：精确匹配改为**类型无关**~~ ✅ 已实施（`findEntityByName` 不再按类型过滤；`resolveByEmbedding` 同步去类型过滤；先建者的类型保留）。单测 `store.test.ts` 已改为断言跨类型合并。
+  2. ~~`src/index.ts` 给 `MemoryStore` 接 embedder~~ ⏸ **未做**：store 的 `Embedder` 是同步接口而 `OnnxEmbedder` 是异步，接线需要 pipeline 级异步预消解。但分析显示全部 2820 组重名都是**同名类型翻转**（精确匹配即可覆盖），嵌入合并只覆盖罕见的模糊变体——本轮不做，留作后续增强。
+  3. ~~`src/extraction.ts` `formatKnownEntities`：提示带类型~~ ✅ 已实施（输出 `Alice (PERSON)`，按裸名过滤、带类型输出；prompt 明示复用类型）。
 - **根因**：RC1（2820 组重名、45.8% 节点是重复）。
 - **预期**：实体锚定与一跳扩展恢复设计强度；MH 的"搜过仍 miss"（164 题）显著下降。
-- **验证**：mini run 后 mh_6k/mh_32k 的 never-recalled 中"搜过仍 miss"数量下降；图上重名组数从千级降到 ~0（`memory_visualize` 或一行 jq 可查）。
+- **验证**：mini run 后 mh_6k/mh_32k 的 never-recalled 中"搜过仍 miss"数量下降；图上重名组数从千级降到 ~0（`memory_visualize` 或一行 jq 可查）。**注意：类型无关合并只防新碎裂，已碎的旧图不会自愈——mini run 的图是新建的，直接反映修复效果。**
 
-### P0-B 言语行为/指令噪声降权
+### P0-B 言语行为/指令噪声降权 【已实施】
 
-- **改动**（`src/retrieval.ts`）：
-  1. 谓词属于言语行为类（`asked`/`answered`/`said`/`told`/`instructed`…，语言级通用词表）的事件打分乘折扣系数（如 ×0.3），不删除、仍可被显式搜索命中；
-  2. 或写入侧：`src/extraction.ts` 对纯指令句（imperative 无事实内容）打 `instruction` 标记，检索默认过滤。
-  3. 两选一即可，先做 1（改动小、可量化）。
+- **改动**（均已实施）：
+  1. ✅ `src/retrieval.ts`：谓词命中言语行为词根（ask/answer/say/tell/reply/respond/instruct/request/mention/note/state/question/comment/praise，首词前缀匹配）的事件打分 ×0.3（`SPEECH_ACT_DISCOUNT`），topSlice 候选切片与最终打分都应用；不删除、仍可被显式搜索命中。
+  2. ✅ `src/extraction.ts` 抽取 prompt 新增规则：不抽指令/规则/任务元叙述（"answer only from the knowledge pool" 这类），只抽人/物/事件的事实。
 - **根因**：RC2（replay 实证：模板噪声把金事件挤出 top-12；模板示例"Russia→Trump"变成假事实）。
+- **replay 验证**（sh_6k q9，包装查询）：`asked`/`answered` 事件被压出 top-10 ✅；但指令类事件（谓词 `requires`/`based_on`/`has_rule`）仍霸榜、金事件仍未进 top-10——**P0-B 单独不够，P1-A（查询提取）是主导修复**（distill 后金事件 rank #1）。prompt 规则 2 的效果要等 mini run 的新图验证。
 - **预期**：注入召回率（CR 0~9%）显著上升；SH 的"未搜"类失败（~70 题）部分自愈。
-- **验证**：`replay_retrieval.mjs` 用 q9 的包装查询复测——金事件应回到 top-8；mini run 的注入召回率上升。
 
-### P1-A 注入查询构造：剥离脚手架
+### P1-A 注入查询构造：剥离脚手架 【已实施】
 
-- **改动**（`src/inject.ts` / `src/retrieval.ts`）：注入检索前对查询做"问题主体提取"——去掉指令性前缀/模板段（通用规则：取最后一个问句、剥离 "Pretend you are..." 类祈使句），或直接用查询扩展的 LLM 输出作为主查询信号。保守起步：提取最后一个 `?` 所在的句子 + 保留全文作为次级信号。
+- **改动**（✅ `src/inject.ts` `distillQuery`）：注入检索前对查询做"问题主体提取"——消息 >300 字符且含问句行时，取最后一个含 `?`/`？` 的行，并剥离 `Label: ` 前缀；短消息与无问句的长消息原样透传。`memory_search` 工具的查询是模型自造的，不经过此处理。
 - **根因**：RC3（同一检索器，模型自造的短查询 SH 召回 68~74%，注入的全文查询 0~9%）。
-- **验证**：mini run 注入召回率；replay 对比净查询/包装查询的 rank 差。
+- **replay 验证**：sh_6k q9 distill 后查询金事件 rank **#1**（修复前包装查询跌出 top-12）。
+- **注意**：蒸馏只影响注入通道的检索词，注入给模型的仍是正常记忆列表；模型看到的用户消息原文不变。
 
 ### P1-B 冲突版本的新值偏好（supersede 泛化）
 
@@ -77,7 +79,8 @@ venv/bin/python analyze_recall_failures.py   # 注意：脚本目前指向全量
 
 1. **归档记忆图**：`run_benchmark.py` 的 `archive_sessions` 目前只归档会话日志，不归档 `memoplus4dsh/memory-graph.jsonl`——导致历史 context 的图无法回溯（本次 CR 图归因只能靠"各 config 共享事实池"的运气）。改进：归档时复制（不是移动）图文件到 archive 目录。
 2. **会话命名偏移文档化**：driver 的 `bench-q{N}` 是 1-based，结果 JSON 的 `query_id` 是 0-based——N = query_id + 1。已写进 `analyze_recall_failures.py` 注释。
-3. **mini 结果归因**：`analyze_recall_failures.py` 的结果文件 glob 需要支持 mini tag（小改）。
+3. **mini 结果归因**：`analyze_recall_failures.py` 传文件名过滤子串即可分析 mini 结果（如 `analyze_recall_failures.py mini-s10`）；图归因用终态图，仅供方向参考。
+4. **LME mini 的 judge 适配（待做）**：`judge_lme.py` 按 references 全量顺序 positional 对齐 hypotheses，mini 只有 10 题会错位。需要加按问题文本匹配的子集判定模式（mini 结果 entry 带 `query`，references 带 `question`，提取 `Now Answer the Question:` 后缀做匹配）。第一轮 mini 的 LME 部分先用 runner 自带的 f1/substring 指标看方向。
 
 ## 4. 每轮迭代的标准流程
 

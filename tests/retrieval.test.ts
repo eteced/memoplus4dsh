@@ -8,6 +8,7 @@ import {
   createQueryExpander,
   extractKeyDescriptors,
   isListQuestion,
+  isSpeechActPredicate,
   Retriever,
   stem,
 } from '../src/retrieval.js'
@@ -80,6 +81,28 @@ describe('stem / descriptors / list detection', () => {
     expect(isListQuestion('What things does Bob like?')).toBe(true)
     expect(isListQuestion('List all the places Alice visited')).toBe(true)
     expect(isListQuestion('When did Bob paint the landscape?')).toBe(false)
+  })
+})
+
+describe('speech-act discount (m11 RC2)', () => {
+  it('isSpeechActPredicate matches by first-word prefix', () => {
+    expect(isSpeechActPredicate('asked')).toBe(true)
+    expect(isSpeechActPredicate('answered_from')).toBe(true)
+    expect(isSpeechActPredicate('told')).toBe(true)
+    expect(isSpeechActPredicate('wrote_in')).toBe(false)
+    expect(isSpeechActPredicate('goal_update')).toBe(false)
+  })
+
+  it('ranks a content fact above a word-perfect speech-act echo', async () => {
+    const store = new MemoryStore({ dir })
+    // Q&A 噪声：与查询几乎逐字重合的言语行为事件
+    makeEvent(store, 'User', 'User asked what language Valmiki wrote his notable works in.', { predicate: 'asked' })
+    // 事实事件：词汇重合更少但承载答案
+    makeEvent(store, 'Valmiki', 'Valmiki wrote his notable works in English.', { predicate: 'wrote_in' })
+    const retriever = new Retriever({ store, now: () => NOW })
+    const results = await retriever.retrieve('What language did Valmiki write his notable works in?', { topK: 2 })
+    expect(results[0]!.predicate).toBe('wrote_in')
+    expect(results[0]!.normalizedText).toContain('English')
   })
 })
 

@@ -125,25 +125,25 @@ describe('speaker coercion', () => {
 
 describe('formatKnownEntities', () => {
   const entities = [
-    { canonicalName: 'Alice', aliases: ['Al'] },
-    { canonicalName: 'Bob', aliases: [] },
-    { canonicalName: 'community garden', aliases: [] },
+    { canonicalName: 'Alice', aliases: ['Al'], type: 'PERSON' as const },
+    { canonicalName: 'Bob', aliases: [], type: 'PERSON' as const },
+    { canonicalName: 'community garden', aliases: [], type: 'CONCEPT' as const },
   ]
 
   it('returns "(none yet)" for an empty graph', () => {
     expect(formatKnownEntities([])).toBe('(none yet)')
   })
 
-  it('keeps only names mentioned in the current text', () => {
+  it('keeps only names mentioned in the current text, with types (m11 RC1)', () => {
     const result = formatKnownEntities(entities, 'User: Alice and I went out with Bob.')
-    expect(result).toContain('Alice')
-    expect(result).toContain('Bob')
+    expect(result).toContain('Alice (PERSON)')
+    expect(result).toContain('Bob (PERSON)')
     expect(result).not.toContain('community garden')
   })
 
-  it('matches aliases too', () => {
+  it('matches aliases too, typed with the entity type', () => {
     const result = formatKnownEntities(entities, 'User: Al called me yesterday.')
-    expect(result).toBe('Al')
+    expect(result).toBe('Al (PERSON)')
   })
 
   it('returns "(none relevant)" when nothing matches', () => {
@@ -154,6 +154,7 @@ describe('formatKnownEntities', () => {
     const many = Array.from({ length: 2000 }, (_, i) => ({
       canonicalName: `entity-${String(i).padStart(5, '0')}`,
       aliases: [] as string[],
+      type: 'CONCEPT' as const,
     }))
     const text = many.map(e => e.canonicalName).join(' ')
     const result = formatKnownEntities(many, text)
