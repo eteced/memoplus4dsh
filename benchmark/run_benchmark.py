@@ -153,6 +153,11 @@ def archive_sessions(dsh_home, tag):
     graph = os.path.join(dsh_home, "memoplus4dsh", "memory-graph.jsonl")
     if os.path.exists(graph):
         shutil.copy(graph, os.path.join(archive_root, "memory-graph.jsonl"))
+    # 查询侧 LLM 调用（蒸馏/扩展）的 debug 日志一并归档（m11 v2 的教训：
+    # 查询侧行为不可见导致回归难以定位）。
+    debug_log = os.path.join(dsh_home, "memoplus4dsh", "extraction-debug.jsonl")
+    if os.path.exists(debug_log):
+        shutil.copy(debug_log, os.path.join(archive_root, "extraction-debug.jsonl"))
     denials = os.path.join(dsh_home, "bench-guard-denials.jsonl")
     if os.path.exists(denials):
         den_dir = os.path.join(REPO_ROOT, "benchmark", "results", "guard-denials")

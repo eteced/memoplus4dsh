@@ -12,6 +12,7 @@ import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-session'
 import type { MemoryEvent, MemoryStore } from './store.js'
+import { wordsOf } from './retrieval.js'
 
 export const PLUGIN_NAME = 'memoplus4dsh'
 
@@ -47,13 +48,18 @@ export function currentQueryText(messages: readonly UserMessage[]): string | und
 }
 
 /**
- * Heuristic query distillation — FALLBACK ONLY (m11 RC3). The primary path
- * is the LLM query analyzer (semantic, language-independent); this runs when
- * the analyzer is unavailable/disabled. Long messages often embed the actual
- * question inside scaffolding/instructions; retrieving on the raw text
- * drowns the question's content words in boilerplate. When the message is
- * long and contains a question line, retrieve on that line (stripping a
- * leading "Label: " / "标签：" scaffold); everything else passes through.
+ * Heuristic query distillation — PRIMARY path (m11 v3). Long messages often
+ * embed the actual question inside scaffolding/instructions; retrieving on
+ * the raw text drowns the question's content words in boilerplate. When the
+ * message is long and contains a question line, retrieve on that line
+ * (stripping a leading "Label: " / "标签：" scaffold); everything else
+ * passes through and may go to the LLM distiller (see createPreStepHandler).
+ *
+ * Why heuristic-first: with task-shaped payloads ("...Now answer the
+ * question: ..."), an LLM asked to "summarize the question" tends to ANSWER
+ * it instead (m11 v2 live evidence). Punctuation-level extraction cannot be
+ * talked out of its job. The LLM distiller covers what the heuristic cannot
+ * see (long messages without question marks).
  */
 export function distillQuery(text: string): string {
   if (text.length <= 300) return text
@@ -84,11 +90,23 @@ export function formatMemoryLine(event: MemoryEvent, store: MemoryStore): string
 export function formatMemoryMessage(events: readonly MemoryEvent[], store: MemoryStore, maxChars: number): UserMessage | undefined {
   if (events.length === 0) return undefined
   const lines: string[] = []
+  const seenTokens: Set<string>[] = []
   let used = 0
   for (const event of events) {
+    // Near-duplicate suppression (m11): overlapping/repeated extraction of
+    // the same fact wastes injection slots. Token-set Jaccard on the shared
+    // tokenizer (ASCII words + CJK bigrams); only true dupes (≥0.85) drop.
+    const tokens = new Set(wordsOf(event.normalizedText.toLowerCase()))
+    if (seenTokens.some(prev => {
+      let inter = 0
+      for (const t of tokens) if (prev.has(t)) inter++
+      const union = prev.size + tokens.size - inter
+      return union > 0 && inter / union >= 0.85
+    })) continue
     const line = formatMemoryLine(event, store)
     if (used + line.length > maxChars) break
     lines.push(line)
+    seenTokens.push(tokens)
     used += line.length
   }
   if (lines.length === 0) return undefined
@@ -106,10 +124,18 @@ export interface InjectionDeps {
   /** Character cap for the injected block. */
   maxChars?: number
   /**
-   * LLM query distillation (primary path; semantic, language-independent).
-   * When absent or failing, the heuristic {@link distillQuery} fallback runs.
+   * LLM verbatim-quote distillation, used ONLY when the heuristic cannot
+   * distill a long message (no question line). See distillQuery's doc for
+   * why the heuristic is primary.
    */
   distill?: (query: string) => Promise<string | undefined>
+  /**
+   * Skip retrieval+injection entirely when the user message exceeds this
+   * many characters (default 4000). Very long user messages are document
+   * dumps/pastes, not queries — retrieving on them wastes the analysis call
+   * and the dense query is meaningless anyway.
+   */
+  maxQueryChars?: number
 }
 
 /**
@@ -120,6 +146,7 @@ export interface InjectionDeps {
  */
 export function createPreStepHandler(deps: InjectionDeps) {
   const maxChars = deps.maxChars ?? 2000
+  const maxQueryChars = deps.maxQueryChars ?? 4000
   return async (
     payload: PreStepPayload,
     next: () => Promise<PreStepDecisionLike>,
@@ -128,16 +155,17 @@ export function createPreStepHandler(deps: InjectionDeps) {
     if (decision.kind !== 'enter' || payload.step !== 1) return decision
     const rawQuery = currentQueryText(payload.messages)
     if (rawQuery === undefined) return decision
-    let query: string
-    if (deps.distill !== undefined) {
+    if (rawQuery.length > maxQueryChars) return decision
+    // Heuristic first (cannot be talked out of its job); the LLM distiller
+    // only covers long messages with no question line.
+    let query = distillQuery(rawQuery)
+    if (query === rawQuery && rawQuery.length > 300 && deps.distill !== undefined) {
       try {
         const distilled = await deps.distill(rawQuery)
-        query = distilled !== undefined && distilled.trim().length > 0 ? distilled.trim() : distillQuery(rawQuery)
+        if (distilled !== undefined && distilled.trim().length > 0) query = distilled.trim()
       } catch {
-        query = distillQuery(rawQuery)
+        // keep the raw query
       }
-    } else {
-      query = distillQuery(rawQuery)
     }
     let events: MemoryEvent[]
     try {

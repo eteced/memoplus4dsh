@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { MemoryStore } from '../src/store.js'
 import type { NewEvent } from '../src/store.js'
 import {
-  createQueryAnalyzer,
+  createQueryDistiller,
+  createQueryExpander,
   extractKeyDescriptors,
   isListQuestion,
   Retriever,
@@ -276,51 +277,67 @@ describe('Retriever ranking', () => {
     expect(store.getEvent(id)!.embedding).toHaveLength(32)
   })
 
-  it('analyzes the query through the LLM and caches results on disk', async () => {
+  it('expands the query through the LLM and caches results on disk', async () => {
     const store = new MemoryStore({ dir })
     makeEvent(store, 'Alice', 'Alice adopted a kitten from the shelter.')
     const cachePath = join(dir, 'qe-cache.json')
     let llmCalls = 0
-    const analyze = createQueryAnalyzer({
+    const expandQuery = createQueryExpander({
       cachePath,
       callLlm: () => {
         llmCalls++
-        return Promise.resolve('Did Alice get a pet?\ncat\nfeline\npet adoption')
+        return Promise.resolve('cat\nfeline\npet adoption')
       },
     })
-    const expandQuery = async (q: string) => (await analyze(q)).keywords
     const retriever = new Retriever({ store, expandQuery, now: () => NOW })
     const first = await retriever.retrieve('Did Alice get a pet?', { topK: 3 })
     expect(first[0]!.normalizedText).toContain('kitten')
     expect(llmCalls).toBe(1)
-    // Distilled line is returned verbatim by the analyzer.
-    const analysis = await analyze('Did Alice get a pet?')
-    expect(analysis.distilled).toBe('Did Alice get a pet?')
-    expect(analysis.keywords).toContain('cat')
     // Second identical query hits the disk cache — no further LLM call.
-    const analyzer2 = createQueryAnalyzer({ cachePath, callLlm: () => {
+    const expander2 = createQueryExpander({ cachePath, callLlm: () => {
       llmCalls++
       return Promise.resolve('')
     } })
-    const retriever2 = new Retriever({
-      store, expandQuery: async q => (await analyzer2(q)).keywords, now: () => NOW,
-    })
+    const retriever2 = new Retriever({ store, expandQuery: expander2, now: () => NOW })
     await retriever2.retrieve('Did Alice get a pet?', { topK: 3 })
     expect(llmCalls).toBe(1)
   })
 
-  it('survives LLM analysis failure (passthrough, still retrieves)', async () => {
+  it('distiller quotes verbatim, caches, and degrades to undefined on failure', async () => {
+    const cachePath = join(dir, 'qd-cache.json')
+    let calls = 0
+    const distill = createQueryDistiller({
+      cachePath,
+      callLlm: () => {
+        calls++
+        return Promise.resolve('What is the capital of France?')
+      },
+    })
+    const longQuery = `Instructions: blah. ${'filler '.repeat(80)}\nNow answer: What is the capital of France?`
+    expect(await distill(longQuery)).toBe('What is the capital of France?')
+    expect(await distill(longQuery)).toBe('What is the capital of France?')
+    expect(calls).toBe(1)  // 第二次走缓存
+    // 失败/退化输出 → undefined，不缓存
+    const failing = createQueryDistiller({
+      cachePath: join(dir, 'qd-fail.json'),
+      callLlm: () => Promise.reject(new Error('down')),
+    })
+    expect(await failing('anything')).toBeUndefined()
+    const empty = createQueryDistiller({
+      cachePath: join(dir, 'qd-empty.json'),
+      callLlm: () => Promise.resolve(''),
+    })
+    expect(await empty('anything')).toBeUndefined()
+  })
+
+  it('survives LLM expansion failure (no expansion, still retrieves)', async () => {
     const store = new MemoryStore({ dir })
     makeEvent(store, 'Alice', 'Alice likes tea.')
-    const analyze = createQueryAnalyzer({
+    const expandQuery = createQueryExpander({
       cachePath: join(dir, 'qe-fail.json'),
       callLlm: () => Promise.reject(new Error('provider down')),
     })
-    const failed = await analyze('What does Alice like?')
-    expect(failed).toEqual({ distilled: 'What does Alice like?', keywords: [] })
-    const retriever = new Retriever({
-      store, expandQuery: async q => (await analyze(q)).keywords, now: () => NOW,
-    })
+    const retriever = new Retriever({ store, expandQuery, now: () => NOW })
     const results = await retriever.retrieve('What does Alice like?', { topK: 3 })
     expect(results.map(e => e.normalizedText)).toContain('Alice likes tea.')
   })

@@ -13,10 +13,11 @@ import { MemoryStore } from './store.js'
 import { ExtractionPipeline, ExtractionQueue, PendingJobLog } from './extraction.js'
 import type { ExtractionJob } from './extraction.js'
 import { LlmEntityMerger } from './entity-merge.js'
+import { LlmSupersedeResolver } from './supersede.js'
 import { registerBridges } from './bridges.js'
 import { OnnxEmbedder, NULL_EMBEDDER, EMBEDDING_MODELS } from './embedding.js'
 import type { TextEmbedder } from './embedding.js'
-import { Retriever, createQueryAnalyzer } from './retrieval.js'
+import { Retriever, createQueryDistiller, createQueryExpander } from './retrieval.js'
 import { createPreStepHandler } from './inject.js'
 import { registerMemoryTools } from './tools.js'
 
@@ -71,8 +72,19 @@ export interface Config {
    * call on write-heavy deployments.
    */
   entityMergeLlm?: boolean
+  /**
+   * LLM-adjudicated supersede detection: same-(subject, predicate) fact
+   * updates mark the old event `supersededBy` (history kept; retrieval
+   * discounts it in present-tense modes). Default true.
+   */
+  supersedeLlm?: boolean
   /** Character cap for the injected memory block. */
   injectMaxChars?: number
+  /**
+   * Skip retrieval+injection when the user message is longer than this
+   * (default 4000): very long messages are document dumps, not queries.
+   */
+  injectMaxQueryChars?: number
 }
 
 export const inject = ['systemPrompt', 'llm', 'tools']
@@ -219,16 +231,24 @@ export function apply(ctx: Context, config: Config) {
         model: EMBEDDING_MODELS[config.embeddingModel ?? 'multilingual'],
       })
 
-    // One cached LLM call per distinct user message yields both the
-    // expansion keywords (retrieval) and the distilled core question
-    // (injection) — semantic, language-independent by construction.
-    const analyzeQuery = config.queryExpansion === false
+    // Query-side LLM helpers (m11 v3): keyword expansion (proven prompt) for
+    // retrieval; verbatim-quote distillation for injection — used only when
+    // the punctuation heuristic cannot distill. Separate cached calls because
+    // a merged prompt made the model ANSWER task-shaped payloads instead of
+    // distilling them (mini-2 live evidence).
+    const expandQuery = config.queryExpansion === false
       ? undefined
-      : createQueryAnalyzer({
+      : createQueryExpander({
           cachePath: join(dataDir, 'query-expansion-cache.json'),
-          // Analysis output is ≤13 short lines: 1024 tokens cover a reasoning
+          // Expansion output is ≤12 short lines: 1024 tokens cover a reasoning
           // model's thinking for that; 30s keeps the pre-step critical path
-          // responsive when the endpoint degrades (failure → passthrough).
+          // responsive when the endpoint degrades (failure → no expansion).
+          callLlm: prompt => callPluginLlm(ctx, config, lastRoute, prompt, 1024, 30_000),
+        })
+    const distillQueryLlm = config.queryExpansion === false
+      ? undefined
+      : createQueryDistiller({
+          cachePath: join(dataDir, 'query-distill-cache.json'),
           callLlm: prompt => callPluginLlm(ctx, config, lastRoute, prompt, 1024, 30_000),
         })
 
@@ -236,23 +256,21 @@ export function apply(ctx: Context, config: Config) {
       store,
       embedder,
       stateDedup: config.stateDedup !== false,
-      expandQuery: analyzeQuery === undefined
-        ? undefined
-        : async query => (await analyzeQuery(query)).keywords,
+      expandQuery,
     })
 
     let queue: ExtractionQueue | undefined
-    if (config.extraction === 'turn_end') {
-      // Extraction runs detached from any visible logger in shipped profiles;
-      // keep a minimal durable trace in the data dir for field debugging.
-      const debugLog = (entry: Record<string, unknown>): void => {
-        try {
-          appendFileSync(join(dataDir, 'extraction-debug.jsonl'),
-            JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n', 'utf8')
-        } catch {
-          // Debug logging must never break extraction.
-        }
+    // Minimal durable trace in the data dir for field debugging (extraction
+    // and query-side LLM calls); must never break the plugin.
+    const debugLog = (entry: Record<string, unknown>): void => {
+      try {
+        appendFileSync(join(dataDir, 'extraction-debug.jsonl'),
+          JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n', 'utf8')
+      } catch {
+        // Debug logging must never break anything.
       }
+    }
+    if (config.extraction === 'turn_end') {
       const pipeline = new ExtractionPipeline({
         store,
         callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, config.extractionMaxTokens ?? 8192),
@@ -263,6 +281,12 @@ export function apply(ctx: Context, config: Config) {
             embedder,
             // Adjudication output is a few "N: M" lines; a small budget and the
             // shared call timeout keep a turn's write path bounded.
+            callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, 4096),
+          }),
+        supersedeResolver: config.supersedeLlm === false
+          ? undefined
+          : new LlmSupersedeResolver({
+            store,
             callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, 4096),
           }),
       })
@@ -317,10 +341,15 @@ export function apply(ctx: Context, config: Config) {
       const handler = createPreStepHandler({
         store,
         maxChars: config.injectMaxChars,
+        maxQueryChars: config.injectMaxQueryChars,
         retrieve: query => retriever.retrieve(query, { topK: config.injectTopK ?? 8 }),
-        distill: analyzeQuery === undefined
+        distill: distillQueryLlm === undefined
           ? undefined
-          : async query => (await analyzeQuery(query)).distilled,
+          : async query => {
+            const distilled = await distillQueryLlm(query)
+            debugLog({ kind: 'query-distill', queryChars: query.length, distilled: distilled?.slice(0, 200) })
+            return distilled
+          },
       })
       ctx.on('agent/pre-step', (payload, next) => {
         const header = payload.agent.session.requestHeader()

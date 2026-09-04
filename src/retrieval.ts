@@ -18,6 +18,7 @@ import { cosineSimilarity } from './store.js'
 import type { TextEmbedder } from './embedding.js'
 import { NULL_EMBEDDER } from './embedding.js'
 import { statePredicateFamily } from './bridges.js'
+import { SUPERSEDED_DISCOUNT } from './supersede.js'
 import type { TemporalOp } from './temporal.js'
 import { resolveTemporalQuery, temporalBonus, temporalMatch } from './temporal.js'
 
@@ -65,7 +66,7 @@ export function stem(word: string): string {
  * in keyword matching; single CJK runs never overlap by accident as whole
  * words, bigrams give graded overlap). Language-level tokenization only.
  */
-function wordsOf(text: string): string[] {
+export function wordsOf(text: string): string[] {
   const lower = text.toLowerCase()
   const words: string[] = lower.match(/[a-z]+/g) ?? []
   for (const run of lower.match(/[一-鿿]+/g) ?? []) {
@@ -112,91 +113,121 @@ export function isListQuestion(query: string): boolean {
     .some(token => q.includes(token))
 }
 
+/** LLM-backed query expansion, ported from `_expand_query` (proven in m9/mini-1). */
+export const QUERY_EXPANSION_PROMPT = `You are helping a memory retrieval system. Given a question, output up to 12 concise keywords or short phrases that would appear in memory snippets containing the answer.
+- Correct any typos in the question.
+- Include synonyms, related concepts, and likely domains or activities implied by the question.
+- Output one per line, no numbering, no explanations.
+
+Question: {query}
+Keywords:`
+
 /**
- * LLM-backed query analysis (m11: subsumes the old query expansion). One
- * cached call yields both the distilled core question — instructions and
- * scaffolding stripped by the model itself, language-independent — and the
- * expansion keywords.
+ * LLM query distillation (m11 v3): the fallback when the punctuation-level
+ * heuristic cannot distill a long message. The prompt demands a VERBATIM
+ * QUOTE and explicitly forbids answering — v2's "summarize the core
+ * question" phrasing made the model answer task-shaped payloads instead of
+ * distilling them (observed live: distilled="Portugal" for a wrapped
+ * knowledge-pool question).
  */
-export const QUERY_ANALYSIS_PROMPT = `You are helping a memory retrieval system. Given the user's message:
-- Line 1: the core question or request in the message, with all instructions, formatting, and meta text removed, written in the message's original language. If the message is already a short direct question or request, repeat it verbatim on line 1.
-- Lines 2 onwards: up to 12 concise keywords or short phrases that would appear in memory snippets containing the answer. Correct any typos; include synonyms, related concepts, and likely domains or activities implied by the question. One per line, no numbering, no explanations.
+export const QUERY_DISTILL_PROMPT = `Quote the user's actual question or request from the message below, VERBATIM, in the message's original language. Remove any surrounding instructions, examples, or formatting. Do NOT answer the question. If the message is already just a question or request, repeat it unchanged. Output only the quoted text, nothing else.
 
 Message: {query}`
 
-export interface QueryAnalysis {
-  /** Core question/request with scaffolding removed (line 1). */
-  distilled: string
-  /** Expansion keywords (remaining lines, tokenized). */
-  keywords: string[]
-}
-
-export interface QueryAnalyzerOptions {
-  /** One LLM call: prompt in, raw text out. */
-  callLlm: (prompt: string) => Promise<string>
-  /** Disk cache path; analysis results are keyed by normalized query text. */
-  cachePath: string
-}
-
-interface QueryAnalysisCacheEntry {
-  distilled?: string
-  keywords: string[]
-}
-
-/**
- * Build a query analyzer with a persistent per-query cache. Only non-empty
- * results are cached (an empty result is usually a transient failure and
- * must not poison the cache). LLM/IO failures degrade to
- * { distilled: query, keywords: [] } — callers layer their own heuristic
- * fallback on top if they want one.
- */
-export function createQueryAnalyzer(options: QueryAnalyzerOptions): (query: string) => Promise<QueryAnalysis> {
-  const loadCache = (): Record<string, QueryAnalysisCacheEntry> => {
-    if (!existsSync(options.cachePath)) return {}
+/** Small disk-cache helper shared by the expander and the distiller. */
+function makeDiskCache<T>(cachePath: string): {
+  get: (key: string) => T | undefined
+  put: (key: string, value: T) => void
+} {
+  const load = (): Record<string, T> => {
+    if (!existsSync(cachePath)) return {}
     try {
-      const parsed = JSON.parse(readFileSync(options.cachePath, 'utf8')) as unknown
+      const parsed = JSON.parse(readFileSync(cachePath, 'utf8')) as unknown
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
-      return parsed as Record<string, QueryAnalysisCacheEntry>
+      return parsed as Record<string, T>
     } catch {
       return {}
     }
   }
-  const saveCache = (cache: Record<string, QueryAnalysisCacheEntry>): void => {
-    const tmp = `${options.cachePath}.tmp`
-    writeFileSync(tmp, JSON.stringify(cache), 'utf8')
-    renameSync(tmp, options.cachePath)
+  return {
+    get: key => load()[key],
+    put: (key, value) => {
+      const cache = load()
+      cache[key] = value
+      const tmp = `${cachePath}.tmp`
+      try {
+        writeFileSync(tmp, JSON.stringify(cache), 'utf8')
+        renameSync(tmp, cachePath)
+      } catch {
+        // A cache write failure only loses reproducibility, not the result.
+      }
+    },
   }
+}
+
+const cacheKeyOf = (query: string): string => query.toLowerCase().split(/\s+/).join(' ')
+
+export interface QueryExpanderOptions {
+  /** One LLM call: prompt in, raw text out. */
+  callLlm: (prompt: string) => Promise<string>
+  /** Disk cache path; expansion results are keyed by normalized query text. */
+  cachePath: string
+}
+
+/**
+ * Build a query expander with a persistent per-query cache. Only non-empty
+ * expansions are cached (an empty result is usually a transient failure and
+ * must not poison the cache). LLM/IO failures degrade to no expansion.
+ */
+export function createQueryExpander(options: QueryExpanderOptions): (query: string) => Promise<string[]> {
+  const cache = makeDiskCache<string[]>(options.cachePath)
   return async query => {
-    const key = query.toLowerCase().split(/\s+/).join(' ')
-    const cache = loadCache()
-    const hit = cache[key]
-    if (hit !== undefined) {
-      // v1 cache entries were plain keyword arrays (pre-distillation).
-      if (Array.isArray(hit)) return { distilled: query, keywords: hit as unknown as string[] }
-      return { distilled: hit.distilled ?? query, keywords: hit.keywords ?? [] }
-    }
+    const key = cacheKeyOf(query)
+    const hit = cache.get(key)
+    if (hit !== undefined) return hit
+    const words = new Set<string>()
     try {
       // Replacement-function form: user text may contain $-patterns.
-      const content = await options.callLlm(QUERY_ANALYSIS_PROMPT.replace('{query}', () => query))
-      const lines = content.split('\n').map(l => l.trim()).filter(l => l.length > 0)
-      if (lines.length === 0) return { distilled: query, keywords: [] }
-      const distilled = lines[0]!
-      const words = new Set<string>()
-      for (const line of lines.slice(1)) {
-        const cleaned = line.replace(/^[-•]\s*/, '').trim()
+      const content = await options.callLlm(QUERY_EXPANSION_PROMPT.replace('{query}', () => query))
+      for (const line of content.split('\n')) {
+        const cleaned = line.trim().replace(/^[-•]\s*/, '').trim()
         if (cleaned.length > 0) for (const w of wordsOf(cleaned)) words.add(w)
       }
-      const keywords = [...words].sort()
-      cache[key] = { distilled, keywords }
-      try {
-        saveCache(cache)
-      } catch {
-        // A cache write failure only loses reproducibility, not the analysis.
-      }
-      return { distilled, keywords }
     } catch {
-      return { distilled: query, keywords: [] }
+      return []
     }
+    const result = [...words].sort()
+    if (result.length > 0) cache.put(key, result)
+    return result
+  }
+}
+
+export interface QueryDistillerOptions {
+  callLlm: (prompt: string) => Promise<string>
+  cachePath: string
+}
+
+/**
+ * Build a query distiller with a persistent cache. Returns undefined on any
+ * failure or an empty/degenerate quote (callers fall back to the heuristic
+ * or the raw text). Only plausible quotes (non-empty, not longer than the
+ * input) are cached.
+ */
+export function createQueryDistiller(options: QueryDistillerOptions): (query: string) => Promise<string | undefined> {
+  const cache = makeDiskCache<string>(options.cachePath)
+  return async query => {
+    const key = cacheKeyOf(query)
+    const hit = cache.get(key)
+    if (hit !== undefined) return hit
+    let distilled: string
+    try {
+      distilled = (await options.callLlm(QUERY_DISTILL_PROMPT.replace('{query}', () => query))).trim()
+    } catch {
+      return undefined
+    }
+    if (distilled.length === 0 || distilled.length > query.length) return undefined
+    cache.put(key, distilled)
+    return distilled
   }
 }
 
@@ -474,7 +505,12 @@ export class Retriever {
         && [...event.subjectEntityIds, ...event.objectEntityIds].some(id => entityIds.has(id)) ? 0.5 : 0
       const tBonus = temporalBonus(event, op, anchor)
       const raw = dense + overlapScore * 2 + expansionBonus + descriptorBonus + entityBonus + tBonus
-      const score = raw * speechActDiscount(event)
+      // Superseded events (LLM-marked "the newer statement replaced this
+      // value") are discounted in present-tense modes; explicit past-range
+      // queries (RANGE/IN_*) see history at full score (m11 P1-B).
+      const supersedeDiscount = event.supersededBy !== undefined
+        && (op.mode === 'DENSE' || op.mode === 'LAST_K') ? SUPERSEDED_DISCOUNT : 1
+      const score = raw * speechActDiscount(event) * supersedeDiscount
       return { score, event, coverage, idfMass }
     })
 

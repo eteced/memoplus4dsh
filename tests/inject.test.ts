@@ -70,6 +70,43 @@ describe('injection message format', () => {
     const event = seedStore(store)
     expect(formatMemoryMessage([event], store, 10)).toBeUndefined()
   })
+
+  it('suppresses near-duplicate lines (m11)', () => {
+    const store = new MemoryStore({ dir })
+    const e1 = seedStore(store)
+    const alice = store.findEntityByName('Alice')!
+    const e2 = store.addEvent({
+      subjectEntityIds: [alice.id],
+      objectEntityIds: [],
+      predicate: 'likes',
+      normalizedText: 'Alice likes tea.',  // 与 e1 完全同文（跨轮重复抽取）
+      details: '',
+      timeExpr: 'last year',
+      eventTime: null,
+      eventTimePrecision: 'unknown',
+      mentionTime: '2026-09-01T13:00:00.000Z',
+      sourceSession: 's1',
+      sourceTurn: 1,
+    })
+    const e3 = store.addEvent({
+      subjectEntityIds: [alice.id],
+      objectEntityIds: [],
+      predicate: 'visited',
+      normalizedText: 'Alice visited the dentist last Wednesday.',
+      details: '',
+      timeExpr: '',
+      eventTime: null,
+      eventTimePrecision: 'unknown',
+      mentionTime: '2026-09-01T14:00:00.000Z',
+      sourceSession: 's1',
+      sourceTurn: 2,
+    })
+    const message = formatMemoryMessage([e1, e2, e3], store, 2000)!
+    const block = message.content[0]!
+    const text = block.type === 'text' ? block.text : ''
+    expect(text.match(/Alice likes tea\./g)).toHaveLength(1)
+    expect(text).toContain('dentist')
+  })
 })
 
 describe('currentQueryText', () => {
@@ -158,6 +195,69 @@ describe('createPreStepHandler', () => {
     })
     const failed = await failingHandler({ messages: [claimed], step: 1 }, () => Promise.resolve(enter))
     expect(failed).toEqual(enter)
+  })
+
+  it('heuristic distills long scaffolded queries without calling the LLM (m11 v3)', async () => {
+    const store = new MemoryStore({ dir })
+    const event = seedStore(store)
+    const seen: string[] = []
+    let llmCalled = false
+    const handler = createPreStepHandler({
+      store,
+      retrieve: q => {
+        seen.push(q)
+        return Promise.resolve([event])
+      },
+      distill: () => {
+        llmCalled = true
+        return Promise.resolve('unused')
+      },
+    })
+    const wrapped = `${'指令填充。'.repeat(80)}\nNow Answer the Question: what does Alice like? \nAnswer:`
+    const claimed = userMessage(wrapped)
+    await handler({ messages: [claimed], step: 1 }, () =>
+      Promise.resolve({ kind: 'enter' as const, messages: [claimed] }))
+    expect(seen[0]).toBe('what does Alice like?')
+    expect(llmCalled).toBe(false)
+  })
+
+  it('uses the LLM distiller only for long messages without a question line', async () => {
+    const store = new MemoryStore({ dir })
+    const event = seedStore(store)
+    const seen: string[] = []
+    const handler = createPreStepHandler({
+      store,
+      retrieve: q => {
+        seen.push(q)
+        return Promise.resolve([event])
+      },
+      distill: () => Promise.resolve('Alice 喜欢什么'),
+    })
+    const long = '请帮我回忆一下。'.repeat(40)  // 长、无问句标点
+    expect(long.length).toBeGreaterThan(300)
+    const claimed = userMessage(long)
+    await handler({ messages: [claimed], step: 1 }, () =>
+      Promise.resolve({ kind: 'enter' as const, messages: [claimed] }))
+    expect(seen[0]).toBe('Alice 喜欢什么')
+  })
+
+  it('skips injection entirely for document-dump messages (maxQueryChars)', async () => {
+    const store = new MemoryStore({ dir })
+    const event = seedStore(store)
+    let retrieved = false
+    const handler = createPreStepHandler({
+      store,
+      retrieve: () => {
+        retrieved = true
+        return Promise.resolve([event])
+      },
+      maxQueryChars: 4000,
+    })
+    const dump = userMessage(`资料如下：${'x'.repeat(5000)}`)
+    const enter = { kind: 'enter' as const, messages: [dump] }
+    const decision = await handler({ messages: [dump], step: 1 }, () => Promise.resolve(enter))
+    expect(decision.messages).toHaveLength(1)
+    expect(retrieved).toBe(false)
   })
 
   it('does not re-inject when an injection is already in the batch', async () => {

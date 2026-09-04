@@ -59,6 +59,12 @@ export interface MemoryEvent {
    * they are never deleted and remain searchable.
    */
   speechAct?: boolean
+  /**
+   * The id of the newer event that supersedes this one (same subject and
+   * predicate, LLM-adjudicated update — m11 P1-B). The event stays in the
+   * graph with full history; retrieval discounts it in present-tense modes.
+   */
+  supersededBy?: string
   embedding?: number[]
 }
 
@@ -297,6 +303,15 @@ export class MemoryStore {
         && `${event.predicate}|${normalizeName(event.normalizedText)}|${event.timeExpr.trim().toLowerCase()}` === target) return true
     }
     return false
+  }
+
+  /** Mark `oldId` as superseded by `newId` (persisted as an upsert record). */
+  markSuperseded(oldId: string, newId: string): boolean {
+    const event = this.events.get(oldId)
+    if (event === undefined || !this.events.has(newId)) return false
+    event.supersededBy = newId
+    this.append({ v: 1, op: 'event.add', data: { ...event } })
+    return true
   }
 
   // ---------- deletes ----------

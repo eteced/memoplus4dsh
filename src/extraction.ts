@@ -8,10 +8,11 @@
  * known-entities hint, and a serial extraction queue with bounded retries.
  */
 
-import type { Entity, EntityType, MemoryStore, NewEvent, TimePrecision } from './store.js'
+import type { Entity, EntityType, MemoryEvent, MemoryStore, NewEvent, TimePrecision } from './store.js'
 import { ENTITY_TYPES } from './store.js'
 import { extractTimeExpr, resolveTimeExpr } from './temporal.js'
 import type { LlmEntityMerger, MergeMention } from './entity-merge.js'
+import type { LlmSupersedeResolver } from './supersede.js'
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 
 /**
@@ -307,6 +308,8 @@ export interface ExtractionPipelineOptions {
   callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
   /** Optional LLM entity-merge adjudication for exact-miss mentions (m11). */
   entityMerger?: LlmEntityMerger
+  /** Optional LLM supersede detection for same-(subject, predicate) updates (m11 P1-B). */
+  supersedeResolver?: LlmSupersedeResolver
 }
 
 /**
@@ -317,11 +320,13 @@ export class ExtractionPipeline {
   private readonly store: MemoryStore
   private readonly callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
   private readonly entityMerger?: LlmEntityMerger
+  private readonly supersedeResolver?: LlmSupersedeResolver
 
   constructor(options: ExtractionPipelineOptions) {
     this.store = options.store
     this.callLlm = options.callLlm
     this.entityMerger = options.entityMerger
+    this.supersedeResolver = options.supersedeResolver
   }
 
   /** Extract one turn into the store. Throws when the LLM yields no usable text. */
@@ -376,6 +381,7 @@ export class ExtractionPipeline {
     let entitiesCreated = 0
     let entitiesReused = 0
     let eventsAdded = 0
+    const addedEvents: MemoryEvent[] = []
     for (const row of rows) {
       // Idempotent re-extraction: a crash-recovered turn must not double-write
       // identical rows (same session+turn+predicate+fact text+time expr).
@@ -405,8 +411,14 @@ export class ExtractionPipeline {
         sourceTurn: job.turn,
         ...(row.speechAct ? { speechAct: true } : {}),
       }
-      this.store.addEvent(event)
+      const added = this.store.addEvent(event)
+      addedEvents.push(added)
       eventsAdded++
+    }
+    // LLM supersede detection (m11 P1-B): batched once per turn over the
+    // events just written; marks old -> new links, history untouched.
+    if (this.supersedeResolver !== undefined && addedEvents.length > 0) {
+      await this.supersedeResolver.detectAndMark(addedEvents, job)
     }
     return { entitiesCreated, entitiesReused, eventsAdded }
   }
