@@ -92,7 +92,12 @@ export class LlmEntityMerger {
 
     const lines = withCandidates.map(({ mention, candidates }, i) =>
       `NEW ${i + 1}: "${mention.name}" (${mention.type}) — context: "${mention.sampleFact.slice(0, 120)}" || CANDIDATES: ` +
-      candidates.map((c, j) => `${j + 1}) "${c.canonicalName}" (${c.type}, aka: ${c.aliases.join('/') || '-'})`).join(' '),
+      candidates.map((c, j) => {
+        // 每个候选带一条它自己的事实——mini-4/5 的错并（Islam→Iman、
+        // Shapur I→Ardashir I）证明只看名字的相似不够，上下文才是判别证据。
+        const sample = this.store.eventsForEntity(c.id)[0]?.normalizedText.slice(0, 80) ?? ''
+        return `${j + 1}) "${c.canonicalName}" (${c.type}, aka: ${c.aliases.join('/') || '-'}, known fact: "${sample}")`
+      }).join(' '),
     ).join('\n')
     const prompt = MERGE_ADJUDICATION_PROMPT.replace('{lines}', () => lines)
 

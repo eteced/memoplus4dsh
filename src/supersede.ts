@@ -24,7 +24,7 @@ import type { ExtractionJob } from './extraction.js'
 export const SUPERSEDE_ADJUDICATION_PROMPT = `You maintain a memory graph. Each line below shows a relation (predicate) between a subject and the values observed for it at different times.
 
 Decide whether each relation is SINGLE-VALUED or MULTI-VALUED:
-- SINGLE-VALUED: holds one current value at a time; a newer value replaces the older (residence, job, position, capital, chairperson, "the type of X").
+- SINGLE-VALUED: holds one current value at a time; a newer value replaces the older (residence, job, position, capital, headquarters, chairperson, "the type of X").
 - MULTI-VALUED: can hold several current values at once; a new value adds alongside (likes, hobbies, languages spoken, children, list items).
 - When unsure, answer multi (no update is marked).
 
@@ -183,9 +183,17 @@ export class LlmSupersedeResolver {
     let marked = 0
     for (const line of raw.split('\n')) {
       const m = /^\s*(\d+)\s*[:：]\s*(single|multi)/i.exec(line.trim())
-      if (!m || m[2]!.toLowerCase() !== 'single') continue
+      if (!m) continue
       const group = contested[Number(m[1]) - 1]
       if (group === undefined) continue
+      // 记录裁决结果（含 multi）——mini-4/5 的教训：只记标记无法区分
+      // "裁决说 multi" 与 "裁决根本没跑"。
+      this.onLog?.({
+        kind: 'supersede-verdict', verdict: m[2]!.toLowerCase(),
+        subject: group.subjectName, predicate: group.predicate,
+        session: job.sessionId, turn: job.turn,
+      })
+      if (m[2]!.toLowerCase() !== 'single') continue
       const newestObj = normObj(group.newest)
       for (const old of group.predecessors) {
         if (normObj(old) === newestObj) continue
