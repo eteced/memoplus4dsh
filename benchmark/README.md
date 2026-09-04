@@ -36,4 +36,20 @@ DEEPSEEK_API_KEY=... DEEPSEEK_BASE_URL=https://api.deepseek.com/v1 \
 ```
 
 常用参数：`--max_contexts N`（限 context 数，smoke 用）、`--max_queries N`（全局限查询数）、
+`--query_stride N --query_offset M`（题内确定性抽样，mini 评测用）、
 `--force`（忽略已有结果重跑）。结果在 `benchmark/results/<dataset>/*_results.json`（gitignored）。
+
+## Mini 评测（敏捷迭代）
+
+`run-mini.sh`：按场景维度降采样（CR 只跑 6k/32k 两档 + LME 只跑 1 个 context）+ 题内 stride，
+共 ~50 题，token 成本约为全量的 5%。结果写独立文件（`tag=mini-*`），题集固定、迭代间可比，
+但**不可外推全量分数**。详见 [../docs/m11-iteration-guide.md](../docs/m11-iteration-guide.md)。
+
+## 失败归因分析（零 API 消耗）
+
+- `analyze_recall_failures.py` — 逐题判定答案支撑事实的去向（injected / searched / never），
+  并对照记忆图区分读取链路 vs 写入链路问题；产物 `results/analysis/recall-attribution.json`。
+  注意：driver 的 `bench-q{N}` 会话名是 1-based，`query_id` 是 0-based（N = query_id + 1）。
+- `replay_retrieval.mjs` — 离线复现任意查询在指定记忆图上的检索排序
+  （`node replay_retrieval.mjs --dir dsh-home/memoplus4dsh --query "..." --answer "..."`）。
+- 分析方法与 run-2 结论：[../docs/m11-case-analysis.md](../docs/m11-case-analysis.md)。

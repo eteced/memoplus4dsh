@@ -53,6 +53,11 @@ def parse_args():
     parser.add_argument("--max_contexts", type=int, default=0)
     parser.add_argument("--max_queries", type=int, default=0,
                         help="global query cap across contexts (0 = no limit)")
+    parser.add_argument("--query_stride", type=int, default=1,
+                        help="mini-split: ask only every Nth question per context "
+                             "(ingest stays full; deterministic, fixed question set)")
+    parser.add_argument("--query_offset", type=int, default=0,
+                        help="mini-split: which residue class to ask (0..stride-1)")
     parser.add_argument("--dsh_home", default=None,
                         help="benchmark dsh home (default benchmark/dsh-home); "
                              "use a second home for parallel runs")
@@ -127,13 +132,18 @@ def wipe_memory_state(dsh_home):
 def archive_sessions(dsh_home, tag):
     """Move this context's session logs + guard denial log into
     results/sessions-archive/<tag>/ for the audit trail (user requirement:
-    中间过程全留存). Returns the archive dir."""
+    中间过程全留存). Also COPY the memory graph (m11: per-context graph
+    enables extraction-vs-retrieval failure attribution later).
+    Returns the archive dir."""
     archive_root = os.path.join(REPO_ROOT, "benchmark", "results", "sessions-archive", tag)
     sessions = os.path.join(dsh_home, "sessions")
     if os.path.exists(sessions):
         shutil.move(sessions, archive_root)
     else:
         os.makedirs(archive_root, exist_ok=True)
+    graph = os.path.join(dsh_home, "memoplus4dsh", "memory-graph.jsonl")
+    if os.path.exists(graph):
+        shutil.copy(graph, os.path.join(archive_root, "memory-graph.jsonl"))
     denials = os.path.join(dsh_home, "bench-guard-denials.jsonl")
     if os.path.exists(denials):
         den_dir = os.path.join(REPO_ROOT, "benchmark", "results", "guard-denials")
@@ -177,13 +187,22 @@ def main():
     out_path = output_path_for(dataset_config)
     dsh_home = args.dsh_home or os.path.join(REPO_ROOT, "benchmark", "dsh-home")
 
+    stride, offset = args.query_stride, args.query_offset
+    if stride > 1:
+        # Mini-split runs write to their own result files (never clobber full
+        # runs) via the tag component of the official output name.
+        dataset_config["tag"] = f"mini-s{stride}-o{offset}"
+        out_path = output_path_for(dataset_config)
+
     start_time = time.time()
     creator = ConversationCreator({"agent_name": AGENT_NAME}, dataset_config)
     all_chunks = creator.get_chunks()
     all_qa = creator.get_query_and_answers()
 
     metrics, results = defaultdict(list), []
-    results, done_queries = ([], 0) if args.force else load_existing(out_path)
+    results, _done = ([], 0) if args.force else load_existing(out_path)
+    # Resume is keyed by query_id (works for both full and strided runs).
+    done_ids = {entry.get("query_id") for entry in results}
     # Rebuild the metrics accumulator from prior results (same as official).
     for entry in results:
         reconstructed = {
@@ -206,14 +225,17 @@ def main():
         if args.max_queries > 0 and query_index >= args.max_queries:
             break
 
-        # Skip fully-completed contexts when resuming.
+        # Skip fully-completed contexts when resuming (without paying ingest).
         context_query_start = query_index
         query_index_end = query_index + len(qa_pairs)
-        if query_index_end <= done_queries:
+        selected = [i for i in range(len(qa_pairs))
+                    if stride <= 1 or i % stride == offset]
+        if selected and all(context_query_start + i in done_ids for i in selected):
             query_index = query_index_end
             continue
 
-        print(f"\n===== context {context_index}: {len(chunks)} chunks, {len(qa_pairs)} queries =====")
+        print(f"\n===== context {context_index}: {len(chunks)} chunks, "
+              f"{len(selected)}/{len(qa_pairs)} queries =====")
         wipe_memory_state(dsh_home)
 
         memorize_template = get_template(dataset_config["sub_dataset"], "memorize", AGENT_NAME)
@@ -229,8 +251,10 @@ def main():
         with MemoplusDshAgent(REPO_ROOT, context_tag=f"{dataset_config['sub_dataset']}-{context_index}", dsh_home=dsh_home) as agent:
             construction_time = agent.memorize(formatted)
             for local_q_idx, qa in enumerate(tqdm(qa_pairs, desc="queries")):
+                if stride > 1 and local_q_idx % stride != offset:
+                    continue
                 query, answer, qa_pair_id = qa if len(qa) == 3 else (*qa, None)
-                if context_query_start + local_q_idx < done_queries:
+                if context_query_start + local_q_idx in done_ids:
                     continue
                 query_template = get_template(dataset_config["sub_dataset"], "query", AGENT_NAME)
                 wrapped = query_template.format(question=query)

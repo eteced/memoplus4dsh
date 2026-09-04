@@ -1,0 +1,17 @@
+# Mini-split 用的 LME 配置：与官方 Longmemeval_s_star.yaml 唯一差别是
+# max_test_samples: 1（官方采样语义 = 取第 1 个 context，ingest 降为 1/5）。
+# 官方仓库零修改，本文件在 benchmark/configs/ 下。
+dataset: Accurate_Retrieval
+chunk_size: 4096
+debug: false
+seed: 42
+
+context_max_length: 400000
+sub_dataset: longmemeval_s*
+generation_max_length: 50
+test_files: ''
+demo_files: ''
+use_chat_template: true
+max_test_samples: 1
+shots: 0
+tag: null
