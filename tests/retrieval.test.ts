@@ -342,3 +342,26 @@ describe('Retriever ranking', () => {
     expect(results.map(e => e.normalizedText)).toContain('Alice likes tea.')
   })
 })
+
+describe('orderConflictsNewestFirst (mini-6 lesson)', () => {
+  it('within a conflict group the newest value presents first even at lower score', async () => {
+    const store = new MemoryStore({ dir })
+    const subject = store.createOrResolve('goaltender', 'CONCEPT').entity
+    const mk = (objName: string, text: string, mentionTime: string) => {
+      const obj = store.createOrResolve(objName, 'CONCEPT').entity
+      store.addEvent({
+        subjectEntityIds: [subject.id], objectEntityIds: [obj.id], predicate: 'associated_with',
+        normalizedText: text, details: '', timeExpr: '', eventTime: null,
+        eventTimePrecision: 'unknown', mentionTime, sourceSession: 's1', sourceTurn: 0,
+      })
+    }
+    // 旧值先入库（更早的提及），新值后入库
+    mk('ice hockey', 'goaltender is associated with the sport of ice hockey.', '2026-08-01T00:00:00.000Z')
+    mk('pesäpallo', 'goaltender is associated with the sport of pesäpallo.', '2026-09-01T00:00:00.000Z')
+    const retriever = new Retriever({ store, now: () => NOW })
+    const results = await retriever.retrieve('which sport is goaltender associated with?', { topK: 5 })
+    expect(results.length).toBeGreaterThanOrEqual(2)
+    expect(results[0]!.normalizedText).toContain('pesäpallo')
+    expect(results[1]!.normalizedText).toContain('ice hockey')
+  })
+})

@@ -246,6 +246,64 @@ interface ScoredEvent {
 }
 
 /**
+ * Conflict-group presentation order (mini-6 lesson): when several events on
+ * the same (subject, same-relation) group carry DIFFERENT values and all
+ * surface in the results, the newest must come first — models overwhelmingly
+ * trust the first listed value, and cardinality adjudication sometimes
+ * (correctly or not) calls the relation multi-valued, leaving old values
+ * unmarked. Groups are detected like supersede's: same subject entity + same
+ * predicate or masked-text Jaccard >= 0.8 (object value masked out). Applied
+ * to the final top-k slice only; score order is preserved otherwise.
+ */
+export function orderConflictsNewestFirst(scored: ScoredEvent[], store: MemoryStore): ScoredEvent[] {
+  const result = [...scored]
+  const maskedCache = new Map<string, Set<string>>()
+  const maskedOf = (ev: MemoryEvent): Set<string> => {
+    let tokens = maskedCache.get(ev.id)
+    if (tokens === undefined) {
+      let text = ev.normalizedText.toLowerCase()
+      for (const id of ev.objectEntityIds) {
+        const name = store.getEntity(id)?.canonicalName.toLowerCase()
+        if (name) text = text.split(name).join(' ')
+      }
+      tokens = new Set(wordsOf(text))
+      maskedCache.set(ev.id, tokens)
+    }
+    return tokens
+  }
+  const similar = (a: MemoryEvent, b: MemoryEvent): boolean => {
+    if (a.predicate === b.predicate) return true
+    const ta = maskedOf(a)
+    const tb = maskedOf(b)
+    if (ta.size === 0 || tb.size === 0) return false
+    let inter = 0
+    for (const t of ta) if (tb.has(t)) inter++
+    return inter / (ta.size + tb.size - inter) >= 0.8
+  }
+  const groups: number[][] = []
+  for (const [i, item] of result.entries()) {
+    const ev = item.event
+    const subject = ev.subjectEntityIds[0]
+    if (subject === undefined || ev.objectEntityIds.length === 0 || ev.speechAct === true) continue
+    const group = groups.find(g => {
+      const other = result[g[0]!]!.event
+      return other.subjectEntityIds[0] === subject && similar(other, ev)
+    })
+    if (group === undefined) groups.push([i])
+    else group.push(i)
+  }
+  for (const group of groups) {
+    if (group.length < 2) continue
+    const sorted = [...group].sort((a, b) =>
+      result[b]!.event.mentionTime.localeCompare(result[a]!.event.mentionTime))
+    for (const [slot, idx] of group.entries()) {
+      result[group[slot]!] = scored[sorted[slot]!]!
+    }
+  }
+  return result
+}
+
+/**
  * Latest-only dedup for bridge state events (m8 P1-C): within one
  * (subject entity, state family) group only the newest-mention event keeps
  * its slot; the full history stays in the graph and remains reachable via
@@ -337,7 +395,8 @@ export class Retriever {
       // without it the MMR penalty is 0 and order is score order.
       return this.diverseRerank(ranked, topK)
     }
-    return ranked.slice(0, topK).map(s => s.event)
+    // 冲突组内新值优先呈现（见 orderConflictsNewestFirst）
+    return orderConflictsNewestFirst(ranked.slice(0, topK), this.store).map(s => s.event)
   }
 
   /** Known entities whose name or alias appears in the (lowercased) query. */
