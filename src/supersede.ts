@@ -17,6 +17,8 @@
  */
 
 import type { MemoryEvent, MemoryStore } from './store.js'
+import { cosineSimilarity } from './store.js'
+import type { TextEmbedder } from './embedding.js'
 import type { ExtractionJob } from './extraction.js'
 
 export const SUPERSEDE_ADJUDICATION_PROMPT = `You maintain a memory graph. Each line below shows a relation (predicate) between a subject and the values observed for it at different times.
@@ -36,6 +38,16 @@ export const SUPERSEDED_DISCOUNT = 0.3
 export interface LlmSupersedeResolverOptions {
   store: MemoryStore
   callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
+  /**
+   * Embedder for predicate-drift-tolerant grouping: the extraction model
+   * writes the same relation with varying surface forms across turns
+   * ("has_headquarters" vs "has_headquarters_in" — mini-4 q40 lesson), so
+   * same-relation matching is exact OR predicate-embedding cosine ≥
+   * predicateThreshold. Without an embedder, exact match only.
+   */
+  embedder?: TextEmbedder
+  /** Cosine floor for treating two predicate strings as the same relation. Default 0.75. */
+  predicateThreshold?: number
   /** Audit hook: every confirmed supersede link is reported (m11). */
   onLog?: (entry: Record<string, unknown>) => void
 }
@@ -43,12 +55,43 @@ export interface LlmSupersedeResolverOptions {
 export class LlmSupersedeResolver {
   private readonly store: MemoryStore
   private readonly callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
+  private readonly embedder?: TextEmbedder
+  private readonly predicateThreshold: number
   private readonly onLog?: (entry: Record<string, unknown>) => void
+  /** predicate string -> embedding vector, per process. */
+  private readonly predVecCache = new Map<string, Float32Array>()
 
   constructor(options: LlmSupersedeResolverOptions) {
     this.store = options.store
     this.callLlm = options.callLlm
+    this.embedder = options.embedder
+    this.predicateThreshold = options.predicateThreshold ?? 0.75
     this.onLog = options.onLog
+  }
+
+  /** Predicates from `candidates` denoting the same relation as `predicate`. */
+  private async matchingPredicates(predicate: string, candidates: string[]): Promise<Set<string>> {
+    const matched = new Set<string>([predicate])
+    const others = candidates.filter(p => p !== predicate)
+    if (others.length === 0 || this.embedder === undefined) return matched
+    const all = [predicate, ...others]
+    const missing = all.filter(p => !this.predVecCache.has(p))
+    if (missing.length > 0) {
+      const vecs = await this.embedder.embed(missing.map(p => p.replace(/_/g, ' ')))
+      if (vecs !== null) for (const [i, p] of missing.entries()) {
+        const v = vecs[i]
+        if (v != null) this.predVecCache.set(p, v)
+      }
+    }
+    const query = this.predVecCache.get(predicate)
+    if (query === undefined) return matched
+    for (const other of others) {
+      const vec = this.predVecCache.get(other)
+      if (vec !== undefined && cosineSimilarity([...query], [...vec]) >= this.predicateThreshold) {
+        matched.add(other)
+      }
+    }
+    return matched
   }
 
   /**
@@ -85,11 +128,11 @@ export class LlmSupersedeResolver {
       const subject = event.subjectEntityIds[0]
       if (subject === undefined || event.predicate.length === 0) continue
       const newObj = normObj(event)
-      const predecessors = this.store.eventsForEntity(subject).filter(old =>
-        old.id !== event.id
-        && old.predicate === event.predicate
-        && old.speechAct !== true
-        && old.mentionTime < event.mentionTime)
+      const entityEvents = this.store.eventsForEntity(subject).filter(old =>
+        old.id !== event.id && old.speechAct !== true && old.mentionTime < event.mentionTime)
+      const sameRelation = await this.matchingPredicates(
+        event.predicate, [...new Set(entityEvents.map(old => old.predicate))])
+      const predecessors = entityEvents.filter(old => sameRelation.has(old.predicate))
       if (newObj !== undefined) {
         const sameValue = predecessors.filter(old => normObj(old) === newObj)
         if (sameValue.length > 0) {

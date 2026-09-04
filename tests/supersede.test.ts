@@ -70,6 +70,38 @@ describe('LlmSupersedeResolver', () => {
     }
   })
 
+  it('predicate drift: same relation with different surface forms still adjudicates (mini-4 q40)', async () => {
+    const store = new MemoryStore({ dir})
+    // 伪嵌入：shared-prefix 的谓词向量相近（has_headquarters* → 同向）
+    const embedder = {
+      embed: (texts: string[]) => Promise.resolve(texts.map(t => {
+        const v = new Float32Array(2)
+        if (t.startsWith('has headquarters')) v.set([1, 0])
+        else v.set([0, 1])
+        return v
+      })),
+      dim: 2,
+    }
+    const subj = store.createOrResolve('University of Bucharest', 'CONCEPT').entity
+    const mk = (pred: string, objName: string, text: string, mentionTime: string) => {
+      const obj = store.createOrResolve(objName, 'CONCEPT').entity
+      return store.addEvent({
+        subjectEntityIds: [subj.id], objectEntityIds: [obj.id], predicate: pred,
+        normalizedText: text, details: '', timeExpr: '', eventTime: null,
+        eventTimePrecision: 'unknown', mentionTime, sourceSession: 's0', sourceTurn: 0,
+      })
+    }
+    const old = mk('has_headquarters_in', 'Bucharest',
+      'The headquarters of University of Bucharest is located in the city of Bucharest.', '2026-09-04T18:09:18.000Z')
+    const newer = mk('has_headquarters', 'Ankara',
+      'The headquarters of University of Bucharest is located in the city of Ankara.', '2026-09-04T18:09:29.000Z')
+    const resolver = new LlmSupersedeResolver({
+      store, embedder, callLlm: () => Promise.resolve('1: single'),
+    })
+    expect(await resolver.detectAndMark([newer], JOB)).toBe(1)
+    expect(store.getEvent(old.id)!.supersededBy).toBe(newer.id)
+  })
+
   it('re-mention guard: a later repeat of the OLD value is not adjudicated (m11 mini-3)', async () => {
     const store = new MemoryStore({ dir })
     const subj = store.createOrResolve('goaltender', 'CONCEPT').entity
