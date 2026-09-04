@@ -31,15 +31,19 @@ export const SUPERSEDED_DISCOUNT = 0.3
 export interface LlmSupersedeResolverOptions {
   store: MemoryStore
   callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
+  /** Audit hook: every confirmed supersede link is reported (m11). */
+  onLog?: (entry: Record<string, unknown>) => void
 }
 
 export class LlmSupersedeResolver {
   private readonly store: MemoryStore
   private readonly callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
+  private readonly onLog?: (entry: Record<string, unknown>) => void
 
   constructor(options: LlmSupersedeResolverOptions) {
     this.store = options.store
     this.callLlm = options.callLlm
+    this.onLog = options.onLog
   }
 
   /**
@@ -83,7 +87,13 @@ export class LlmSupersedeResolver {
       const m = /^\s*(\d+)\s*[:：]\s*(yes|no)/i.exec(line.trim())
       if (!m || m[2]!.toLowerCase() !== 'yes') continue
       const pair = pairs[Number(m[1]) - 1]
-      if (pair !== undefined && this.store.markSuperseded(pair[0].id, pair[1].id)) marked++
+      if (pair !== undefined && this.store.markSuperseded(pair[0].id, pair[1].id)) {
+        marked++
+        this.onLog?.({
+          kind: 'supersede', old: pair[0].normalizedText.slice(0, 80),
+          new: pair[1].normalizedText.slice(0, 80), session: job.sessionId, turn: job.turn,
+        })
+      }
     }
     return marked
   }

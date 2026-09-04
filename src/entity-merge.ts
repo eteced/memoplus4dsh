@@ -47,6 +47,8 @@ export interface LlmEntityMergerOptions {
   candidateThreshold?: number
   /** Max candidates per mention. Default 5. */
   topCandidates?: number
+  /** Audit hook: every confirmed merge is reported (observability, m11). */
+  onLog?: (entry: Record<string, unknown>) => void
 }
 
 export class LlmEntityMerger {
@@ -55,6 +57,7 @@ export class LlmEntityMerger {
   private readonly callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
   private readonly candidateThreshold: number
   private readonly topCandidates: number
+  private readonly onLog?: (entry: Record<string, unknown>) => void
   /** entityId -> name vector, computed lazily per process. */
   private readonly vecCache = new Map<string, Float32Array>()
 
@@ -64,6 +67,7 @@ export class LlmEntityMerger {
     this.callLlm = options.callLlm
     this.candidateThreshold = options.candidateThreshold ?? 0.6
     this.topCandidates = options.topCandidates ?? 5
+    this.onLog = options.onLog
   }
 
   /**
@@ -107,6 +111,10 @@ export class LlmEntityMerger {
       const candidate = entry?.candidates[candIdx]
       if (entry !== undefined && candidate !== undefined) {
         result.set(entry.mention.name, candidate.canonicalName)
+        this.onLog?.({
+          kind: 'entity-merge', mention: entry.mention.name,
+          into: candidate.canonicalName, session: job.sessionId, turn: job.turn,
+        })
       }
     }
     return result

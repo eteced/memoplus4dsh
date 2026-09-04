@@ -282,12 +282,14 @@ export function apply(ctx: Context, config: Config) {
             // Adjudication output is a few "N: M" lines; a small budget and the
             // shared call timeout keep a turn's write path bounded.
             callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, 4096),
+            onLog: debugLog,
           }),
         supersedeResolver: config.supersedeLlm === false
           ? undefined
           : new LlmSupersedeResolver({
             store,
             callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, 4096),
+            onLog: debugLog,
           }),
       })
       // Durable pending log: interrupted jobs are requeued on restart (m8 P2).
