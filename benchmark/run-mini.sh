@@ -37,11 +37,15 @@ for len in $LENGTHS; do
   done
 done
 
-echo "================ LME mini (1 context) ================"
-./venv/bin/python run_benchmark.py \
-  --dataset_config configs/Longmemeval_s_star_mini.yaml \
-  --dsh_home "$(pwd)/dsh-home-lme" \
-  --query_stride "$LME_STRIDE" --query_offset "$OFFSET" "${TAG_ARGS[@]}" \
-  || { echo "FAILED (aborting): LME"; exit 1; }
+if [[ "${MINI_SKIP_LME:-0}" != "1" ]]; then
+  echo "================ LME mini (1 context) ================"
+  ./venv/bin/python run_benchmark.py \
+    --dataset_config configs/Longmemeval_s_star_mini.yaml \
+    --dsh_home "$(pwd)/dsh-home-lme" \
+    --query_stride "$LME_STRIDE" --query_offset "$OFFSET" "${TAG_ARGS[@]}" \
+    || { echo "FAILED (aborting): LME"; exit 1; }
+else
+  echo "================ LME skipped (MINI_SKIP_LME=1；CR-only 快速轮) ================"
+fi
 
 echo "MINI RUN ALL DONE (lengths: $LENGTHS, stride=$STRIDE offset=$OFFSET)"
