@@ -68,6 +68,37 @@ describe('LlmSupersedeResolver', () => {
       expect(store.getEvent(old.id)!.supersededBy).toBeUndefined()
     }
   })
+
+  it('re-mention guard: a later repeat of the OLD value is not adjudicated (m11 mini-3)', async () => {
+    const store = new MemoryStore({ dir })
+    const subj = store.createOrResolve('goaltender', 'CONCEPT').entity
+    const mk = (objName: string, text: string, mentionTime: string) => {
+      const obj = store.createOrResolve(objName, 'CONCEPT').entity
+      return store.addEvent({
+        subjectEntityIds: [subj.id], objectEntityIds: [obj.id], predicate: 'associated_with',
+        normalizedText: text, details: '', timeExpr: '', eventTime: null,
+        eventTimePrecision: 'unknown', mentionTime, sourceSession: 's0', sourceTurn: 0,
+      })
+    }
+    const oldIce = mk('ice hockey', 'goaltender is associated with the sport of ice hockey.', '2026-09-04T17:34:58.000Z')
+    const newPesa = mk('pesäpallo', 'goaltender is associated with the sport of pesäpallo.', '2026-09-04T17:35:02.000Z')
+    let calls = 0
+    const resolver = new LlmSupersedeResolver({ store, callLlm: () => {
+      calls++
+      return Promise.resolve('1: yes')
+    } })
+    // 新值 pesäpallo 到来：裁决并标记旧值
+    expect(await resolver.detectAndMark([newPesa], JOB)).toBe(1)
+    expect(store.getEvent(oldIce.id)!.supersededBy).toBe(newPesa.id)
+    // 旧值后来被重复提及：guard 跳过裁决（不能反向取代新值），
+    // 且重复事件继承旧值的 supersede 标记（防止旧值靠提及新近度霸榜）
+    const repeatIce = mk('ice hockey', 'Goaltender is associated with ice hockey.', '2026-09-04T17:38:24.000Z')
+    const before = calls
+    expect(await resolver.detectAndMark([repeatIce], JOB)).toBe(0)
+    expect(calls).toBe(before)  // 连 LLM 调用都没发生
+    expect(store.getEvent(newPesa.id)!.supersededBy).toBeUndefined()
+    expect(store.getEvent(repeatIce.id)!.supersededBy).toBe(newPesa.id)
+  })
 })
 
 describe('pipeline + retrieval integration', () => {

@@ -52,7 +52,24 @@ export class LlmSupersedeResolver {
    * pairs via `supersededBy`. Returns the number of links marked.
    * Conservative: any failure or ambiguity marks nothing.
    */
+  /**
+   * Find same-(subject, predicate) predecessors of the given new events and
+   * LLM-adjudicate whether each new event supersedes them. Marks confirmed
+   * pairs via `supersededBy`. Returns the number of links marked.
+   * Conservative: any failure or ambiguity marks nothing.
+   *
+   * Re-mention guard (m11 mini-3 lesson): an event whose object value already
+   * exists in an older same-(subject, predicate) event is a RE-MENTION of old
+   * information, not an update — adjudicating it would let a later-repeated
+   * stale value wrongly supersede the true newer value (mention order is not
+   * information order when old facts get re-stated). Such events are skipped.
+   */
   async detectAndMark(newEvents: MemoryEvent[], job: ExtractionJob): Promise<number> {
+    const normObj = (ev: MemoryEvent): string | undefined => {
+      const id = ev.objectEntityIds[0]
+      if (id === undefined) return undefined
+      return this.store.getEntity(id)?.canonicalName.trim().toLowerCase()
+    }
     // pair: [oldEvent, newEvent]
     const pairs: [MemoryEvent, MemoryEvent][] = []
     const seenPairs = new Set<string>()
@@ -60,11 +77,25 @@ export class LlmSupersedeResolver {
       if (event.speechAct === true) continue
       const subject = event.subjectEntityIds[0]
       if (subject === undefined || event.predicate.length === 0) continue
-      for (const old of this.store.eventsForEntity(subject)) {
-        if (old.id === event.id) continue
-        if (old.predicate !== event.predicate) continue
-        if (old.speechAct === true) continue
-        if (old.mentionTime >= event.mentionTime) continue  // 只向过去标
+      const newObj = normObj(event)
+      const predecessors = this.store.eventsForEntity(subject).filter(old =>
+        old.id !== event.id
+        && old.predicate === event.predicate
+        && old.speechAct !== true
+        && old.mentionTime < event.mentionTime)
+      // Re-mention guard: the new event's value was already stated before.
+      if (newObj !== undefined) {
+        const sameValue = predecessors.filter(old => normObj(old) === newObj)
+        if (sameValue.length > 0) {
+          // If the value's earlier statement was superseded, propagate the mark
+          // to this repeat — otherwise the re-mentioned STALE value would rank
+          // above the current one on mention recency (mini-3 q0).
+          const head = sameValue.find(old => old.supersededBy !== undefined)?.supersededBy
+          if (head !== undefined) this.store.markSuperseded(event.id, head)
+          continue
+        }
+      }
+      for (const old of predecessors) {
         const key = `${old.id}|${event.id}`
         if (seenPairs.has(key)) continue
         seenPairs.add(key)
