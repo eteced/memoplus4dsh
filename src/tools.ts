@@ -82,7 +82,9 @@ export function registerMemoryTools(ctx: Context, deps: MemoryToolsDeps): () => 
       name: 'memory_search',
       description: 'Search long-term memory for facts about the user, people, things, or past events. '
         + 'Pass the question or topic as query; optionally add a time expression '
-        + '(e.g. "last week", "in June", "2025") as time_range.',
+        + '(e.g. "last week", "in June", "2025") as time_range. '
+        + 'Results include related facts of the hits\' linked entities (marked "via <entity>") — '
+        + 'for multi-hop questions, search one hop, then follow the via-entities to the next hop.',
       parameters: {
         query: { type: 'string', required: true, description: 'What to look for in memory.' },
         time_range: { type: 'string', description: 'Optional time expression narrowing the search.' },
@@ -94,13 +96,38 @@ export function registerMemoryTools(ctx: Context, deps: MemoryToolsDeps): () => 
           ? `${args.query} ${args.time_range.trim()}`
           : args.query
         const events = await deps.retriever.retrieve(query, { topK: 10, queryTime: now() })
-        return events.map((event): SearchResultItem => ({
+        const items = events.map((event): SearchResultItem => ({
           fact: event.normalizedText,
           time: event.timeExpr.length > 0
             ? event.timeExpr
             : event.eventTime ?? event.mentionTime.slice(0, 10),
           details: event.details,
         }))
+        // Multi-hop support (m11 mini-3): a chain question ("the country of
+        // the spouse of the author of X") can only be answered hop by hop, so
+        // each search also returns the freshest OTHER facts of the top hits'
+        // linked entities — the model sees the next hop without guessing its
+        // name first. Bounded: top-3 hits × ≤2 lines each.
+        const included = new Set(events.map(e => e.id))
+        const related: SearchResultItem[] = []
+        for (const event of events.slice(0, 3)) {
+          for (const eid of [...event.subjectEntityIds, ...event.objectEntityIds]) {
+            const entity = deps.store.getEntity(eid)
+            if (entity === undefined) continue
+            const neighbors = deps.store.eventsForEntity(eid)
+              .filter(ev => !included.has(ev.id) && ev.speechAct !== true)
+              .sort((a, b) => b.mentionTime.localeCompare(a.mentionTime))
+            for (const ev of neighbors.slice(0, 2)) {
+              included.add(ev.id)
+              related.push({
+                fact: ev.normalizedText,
+                time: ev.timeExpr.length > 0 ? ev.timeExpr : ev.eventTime ?? ev.mentionTime.slice(0, 10),
+                details: `(via ${entity.canonicalName})${ev.details.length > 0 ? ` ${ev.details}` : ''}`,
+              })
+            }
+          }
+        }
+        return [...items, ...related.slice(0, 6)]
       },
     })),
     ctx.tools.register(defineTool({

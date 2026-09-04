@@ -92,6 +92,73 @@ describe('registerMemoryTools', () => {
     expect(missed).toHaveLength(0)
   })
 
+  it('memory_search returns next-hop facts of linked entities (m11 multi-hop)', async () => {
+    const { ctx, registered } = fakeToolsHost()
+    const store = new MemoryStore({ dir })
+    const book = store.createOrResolve('Our Mutual Friend', 'OBJECT').entity
+    const author = store.createOrResolve('Charles Dickens', 'PERSON').entity
+    const mk = (subject: string, object: string | null, predicate: string, text: string, mentionTime: string) => {
+      const subj = store.createOrResolve(subject, 'PERSON').entity
+      const obj = object === null ? null : store.createOrResolve(object, 'CONCEPT').entity
+      store.addEvent({
+        subjectEntityIds: [subj.id],
+        objectEntityIds: obj === null ? [] : [obj.id],
+        predicate, normalizedText: text, details: '', timeExpr: '',
+        eventTime: null, eventTimePrecision: 'unknown', mentionTime,
+        sourceSession: 's1', sourceTurn: 0,
+      })
+    }
+    // hop-1: X 的作者；hop-2: 作者的配偶；hop-3: 配偶的国籍
+    store.addEvent({
+      subjectEntityIds: [book.id], objectEntityIds: [author.id],
+      predicate: 'author_is', normalizedText: 'The author of Our Mutual Friend is Charles Dickens.',
+      details: '', timeExpr: '', eventTime: null, eventTimePrecision: 'unknown',
+      mentionTime: NOW.toISOString(), sourceSession: 's1', sourceTurn: 0,
+    })
+    mk('Charles Dickens', 'Catherine', 'spouse_is', 'Charles Dickens is married to Catherine.', NOW.toISOString())
+    mk('Catherine', 'Belgium', 'citizen_of', 'Catherine is a citizen of Belgium.', NOW.toISOString())
+    // 填料事件：把 hop-2/3 挤出直接 top-10，验证它们仍能经 via 机制返回
+    for (let i = 0; i < 12; i++) {
+      mk(`Filler${i}`, 'noise', 'did', `Filler${i} did something unrelated to anything.`, NOW.toISOString())
+    }
+    const retriever = new Retriever({ store, now: () => NOW })
+    registerMemoryTools(ctx, { store, retriever, now: () => NOW })
+    const search = registered.get('memory_search')!
+    const value = await search.execute({ query: 'Who is the author of Our Mutual Friend?' }, FAKE_EXEC) as { fact: string; details: string }[]
+    const texts = value.map(v => v.fact).join('\n')
+    expect(texts).toContain('Charles Dickens')
+    // 下一跳（作者的配偶）被返回（直接命中或经由 via 线）
+    expect(texts).toContain('Catherine')
+  })
+
+  it('via lines carry neighbors excluded from direct hits (stub retriever)', async () => {
+    const { ctx, registered } = fakeToolsHost()
+    const store = new MemoryStore({ dir })
+    const alice = store.createOrResolve('Alice', 'PERSON').entity
+    const bob = store.createOrResolve('Bob', 'PERSON').entity
+    const hit = store.addEvent({
+      subjectEntityIds: [alice.id], objectEntityIds: [bob.id],
+      predicate: 'knows', normalizedText: 'Alice knows Bob.', details: '', timeExpr: '',
+      eventTime: null, eventTimePrecision: 'unknown',
+      mentionTime: NOW.toISOString(), sourceSession: 's1', sourceTurn: 0,
+    })
+    store.addEvent({
+      subjectEntityIds: [bob.id], objectEntityIds: [],
+      predicate: 'moved_to', normalizedText: 'Bob moved to Berlin.', details: '', timeExpr: '',
+      eventTime: null, eventTimePrecision: 'unknown',
+      mentionTime: NOW.toISOString(), sourceSession: 's1', sourceTurn: 1,
+    })
+    // stub：直接命中只有 hop-1
+    const stubRetriever = { retrieve: () => Promise.resolve([hit]) } as unknown as Retriever
+    registerMemoryTools(ctx, { store, retriever: stubRetriever, now: () => NOW })
+    const search = registered.get('memory_search')!
+    const value = await search.execute({ query: 'who does Alice know?' }, FAKE_EXEC) as { fact: string; details: string }[]
+    expect(value.map(v => v.fact)).toContain('Alice knows Bob.')
+    const via = value.find(v => v.details.includes('via'))
+    expect(via?.fact).toBe('Bob moved to Berlin.')
+    expect(via?.details).toContain('via Bob')
+  })
+
   it('memory_remember writes directly to the store with resolved time', async () => {
     const { ctx, registered } = fakeToolsHost()
     const store = new MemoryStore({ dir })
