@@ -5,28 +5,16 @@
 > **状态更新（2026-09-05 晚）**：P0-A / P0-B / P1-A 已实施（130 单测全绿 + replay 实证），
 > 第一轮 mini run 验证进行中。各条目的"改动"小节标注了实施细节。
 
-## 1. Mini 评测集（敏捷迭代用）
+## 1. 分层评测：smoke / mini / 全量
 
-**降采样原则：砍场景维度，不是全量 ingest + 少题**（token 大头在 ingest）。
+| 档 | 命令 | 规模 | 成本 | 用途 |
+|---|---|---|---|---|
+| **smoke** | `./run-smoke.sh` | 1 context（sh_6k）× 5 题 | 分钟级、几千 token | 改完代码先跑：链路活着 + 审计 PASS 即可，别看分数 |
+| **mini** | `MINI_TAG=<轮次> ./run-mini.sh` | CR 6k × 10 题 + LME 1 ctx × 5 题 = 15 题 | ≈ 全量 2~3% | 迭代方向验证（默认配置，可用环境变量加回去： `MINI_LENGTHS="6k 32k" MINI_STRIDE=10 MINI_LME_STRIDE=6`） |
+| **全量** | `./run-cr-all.sh` + `./run-lme.sh` | 1100 题 | 100% | 里程碑验证 |
 
-```sh
-cd benchmark && DEEPSEEK_API_KEY=... ./run-mini.sh
-```
-
-- **CR**：只跑 6k + 32k 两档长度（64k/262k 留给里程碑全量），题内 stride 10 → 4 configs × 10 题 = 40 题；
-- **LME**：`max_test_samples: 1`（官方采样语义，取第 1 个 context，ingest ÷5）+ 题内 stride 6 → 10 题；
-- 合计 **50 题**；ingest ≈ 全量 5%，query ≈ 4.5%；
-- 题集固定（stride/offset 确定），迭代间分数直接可比；结果写独立文件（`tag=mini-*`），不覆盖全量；
-- 环境变量可调：`MINI_STRIDE` / `MINI_OFFSET` / `MINI_LENGTHS`（如 `MINI_LENGTHS="6k"` 更快）。
-
-**注意**：CR 各长度的题目互不重叠（已验证），mini 分数不能外推全量/基线，只看**迭代间变化**。里程碑节点仍跑全量。
-
-跑完后归因复跑：
-
-```sh
-venv/bin/python analyze_recall_failures.py   # 注意：脚本目前指向全量结果文件名，
-                                             # 分析 mini 结果时需把 glob 换成 mini 文件（tag=mini-*）
-```
+mini/smoke 的题集固定（stride/offset 确定），同档内迭代间分数直接可比；跨档/对全量不可比。
+跑完后归因复跑：`venv/bin/python analyze_recall_failures.py <结果文件名过滤> [轮次标签]`。
 
 ## 2. 修复路线（按优先级）
 

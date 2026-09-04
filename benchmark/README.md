@@ -41,9 +41,10 @@ DEEPSEEK_API_KEY=... DEEPSEEK_BASE_URL=https://api.deepseek.com/v1 \
 
 ## Mini 评测（敏捷迭代）
 
-`run-mini.sh`：按场景维度降采样（CR 只跑 6k/32k 两档 + LME 只跑 1 个 context）+ 题内 stride，
-共 ~50 题，token 成本约为全量的 5%。结果写独立文件（`tag=mini-*`），题集固定、迭代间可比，
-但**不可外推全量分数**。详见 [../docs/m11-iteration-guide.md](../docs/m11-iteration-guide.md)。
+三档：`run-smoke.sh`（1 context × 5 题，分钟级，只验证链路）→ `run-mini.sh`（CR 6k × 10 题 + LME 1 ctx × 5 题，
+≈ 全量 2~3% token）→ `run-cr-all.sh` + `run-lme.sh`（全量 1100 题，里程碑用）。
+结果按轮次隔离（`MINI_TAG=<轮次>`），题集固定、迭代间可比，**不可外推全量分数**。
+详见 [../docs/m11-iteration-guide.md](../docs/m11-iteration-guide.md)。
 
 ## 失败归因分析（零 API 消耗）
 
