@@ -80,7 +80,7 @@ venv/bin/python analyze_recall_failures.py   # 注意：脚本目前指向全量
 1. **归档记忆图**：`run_benchmark.py` 的 `archive_sessions` 目前只归档会话日志，不归档 `memoplus4dsh/memory-graph.jsonl`——导致历史 context 的图无法回溯（本次 CR 图归因只能靠"各 config 共享事实池"的运气）。改进：归档时复制（不是移动）图文件到 archive 目录。
 2. **会话命名偏移文档化**：driver 的 `bench-q{N}` 是 1-based，结果 JSON 的 `query_id` 是 0-based——N = query_id + 1。已写进 `analyze_recall_failures.py` 注释。
 3. **mini 结果归因**：`analyze_recall_failures.py` 传文件名过滤子串即可分析 mini 结果（如 `analyze_recall_failures.py mini-s10`）；图归因用终态图，仅供方向参考。
-4. **LME mini 的 judge 适配（待做）**：`judge_lme.py` 按 references 全量顺序 positional 对齐 hypotheses，mini 只有 10 题会错位。需要加按问题文本匹配的子集判定模式（mini 结果 entry 带 `query`，references 带 `question`，提取 `Now Answer the Question:` 后缀做匹配）。第一轮 mini 的 LME 部分先用 runner 自带的 f1/substring 指标看方向。
+4. **LME mini 的 judge 适配（已完成）**：`judge_lme.py --hyp_file <结果JSON>` 显式指定结果文件，hypotheses 数量与 references 不一致时自动切换为按问题文本匹配（提取 `Now Answer the Question:` 后缀归一化比对）；全量运行仍按位置对齐，行为不变。
 
 ## 4. 每轮迭代的标准流程
 
