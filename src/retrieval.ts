@@ -22,30 +22,18 @@ import type { TemporalOp } from './temporal.js'
 import { resolveTemporalQuery, temporalBonus, temporalMatch } from './temporal.js'
 
 /**
- * Speech-act predicate roots (language-level, universal verbs of saying).
- * Events like "User asked …" / "Assistant answered …" carry conversational
- * noise, not facts, and rank artificially high because question-asking turns
- * share exact vocabulary with later questions (m11 RC2: Q&A and template
- * noise crowded gold facts out of the top-k). Matched on the first word of
- * the predicate by prefix (ask/answered/asking all hit "ask").
+ * Speech-act events (flagged `speechAct` by the extraction model at write
+ * time — semantic judgment, language-independent by construction) record
+ * conversational acts ("User asked …"), not facts. They rank artificially
+ * high because question-asking turns share exact vocabulary with later
+ * questions (m11 RC2), so they are scored at a discount. Never deleted,
+ * never hidden from explicit search — only de-preferred in ranking.
  */
-const SPEECH_ACT_ROOTS = [
-  'ask', 'answer', 'say', 'said', 'tell', 'told', 'reply', 'repli', 'respond',
-  'instruct', 'request', 'mention', 'note', 'state', 'question', 'comment', 'praise',
-]
-
-/** Speech-act events are scored at this fraction of their raw score. */
 export const SPEECH_ACT_DISCOUNT = 0.3
 
-/** True for speech-act predicates ("asked", "answered_from", "told", …). */
-export function isSpeechActPredicate(predicate: string): boolean {
-  const first = (predicate.toLowerCase().match(/[a-z]+/) ?? [''])[0]
-  return SPEECH_ACT_ROOTS.some(root => first.startsWith(root))
-}
-
-/** Score multiplier: speech-act events keep 30% of their score. */
-function speechActDiscount(predicate: string): number {
-  return isSpeechActPredicate(predicate) ? SPEECH_ACT_DISCOUNT : 1
+/** Score multiplier: flagged speech-act events keep 30% of their score. */
+function speechActDiscount(event: MemoryEvent): number {
+  return event.speechAct === true ? SPEECH_ACT_DISCOUNT : 1
 }
 
 /** Universal English function words excluded from keyword matching. */
@@ -124,44 +112,56 @@ export function isListQuestion(query: string): boolean {
     .some(token => q.includes(token))
 }
 
-/** LLM-backed query expansion, ported from `_expand_query`. */
-export const QUERY_EXPANSION_PROMPT = `You are helping a memory retrieval system. Given a question, output up to 12 concise keywords or short phrases that would appear in memory snippets containing the answer.
-- Correct any typos in the question.
-- Include synonyms, related concepts, and likely domains or activities implied by the question.
-- Output one per line, no numbering, no explanations.
+/**
+ * LLM-backed query analysis (m11: subsumes the old query expansion). One
+ * cached call yields both the distilled core question — instructions and
+ * scaffolding stripped by the model itself, language-independent — and the
+ * expansion keywords.
+ */
+export const QUERY_ANALYSIS_PROMPT = `You are helping a memory retrieval system. Given the user's message:
+- Line 1: the core question or request in the message, with all instructions, formatting, and meta text removed, written in the message's original language. If the message is already a short direct question or request, repeat it verbatim on line 1.
+- Lines 2 onwards: up to 12 concise keywords or short phrases that would appear in memory snippets containing the answer. Correct any typos; include synonyms, related concepts, and likely domains or activities implied by the question. One per line, no numbering, no explanations.
 
-Question: {query}
-Keywords:`
+Message: {query}`
 
-export interface QueryExpanderOptions {
+export interface QueryAnalysis {
+  /** Core question/request with scaffolding removed (line 1). */
+  distilled: string
+  /** Expansion keywords (remaining lines, tokenized). */
+  keywords: string[]
+}
+
+export interface QueryAnalyzerOptions {
   /** One LLM call: prompt in, raw text out. */
   callLlm: (prompt: string) => Promise<string>
-  /** Disk cache path; expansion results are keyed by normalized query text. */
+  /** Disk cache path; analysis results are keyed by normalized query text. */
   cachePath: string
-  /** Number of samples whose union is cached. Default 1. */
-  samples?: number
+}
+
+interface QueryAnalysisCacheEntry {
+  distilled?: string
+  keywords: string[]
 }
 
 /**
- * Build a query expander with a persistent per-query cache. Only non-empty
- * expansions are cached (an empty result is usually a transient failure and
- * must not poison the cache). LLM/IO failures degrade to no expansion.
+ * Build a query analyzer with a persistent per-query cache. Only non-empty
+ * results are cached (an empty result is usually a transient failure and
+ * must not poison the cache). LLM/IO failures degrade to
+ * { distilled: query, keywords: [] } — callers layer their own heuristic
+ * fallback on top if they want one.
  */
-export function createQueryExpander(options: QueryExpanderOptions): (query: string) => Promise<string[]> {
-  // One sample by default: a second sampling pass doubles latency/cost on the
-  // pre-step critical path for a marginal recall gain.
-  const samples = options.samples ?? 1
-  const loadCache = (): Record<string, string[]> => {
+export function createQueryAnalyzer(options: QueryAnalyzerOptions): (query: string) => Promise<QueryAnalysis> {
+  const loadCache = (): Record<string, QueryAnalysisCacheEntry> => {
     if (!existsSync(options.cachePath)) return {}
     try {
       const parsed = JSON.parse(readFileSync(options.cachePath, 'utf8')) as unknown
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
-      return parsed as Record<string, string[]>
+      return parsed as Record<string, QueryAnalysisCacheEntry>
     } catch {
       return {}
     }
   }
-  const saveCache = (cache: Record<string, string[]>): void => {
+  const saveCache = (cache: Record<string, QueryAnalysisCacheEntry>): void => {
     const tmp = `${options.cachePath}.tmp`
     writeFileSync(tmp, JSON.stringify(cache), 'utf8')
     renameSync(tmp, options.cachePath)
@@ -170,30 +170,33 @@ export function createQueryExpander(options: QueryExpanderOptions): (query: stri
     const key = query.toLowerCase().split(/\s+/).join(' ')
     const cache = loadCache()
     const hit = cache[key]
-    if (hit !== undefined) return hit
-    const words = new Set<string>()
-    try {
-      for (let i = 0; i < Math.max(1, samples); i++) {
-        // Replacement-function form: user text may contain $-patterns.
-        const content = await options.callLlm(QUERY_EXPANSION_PROMPT.replace('{query}', () => query))
-        for (const line of content.split('\n')) {
-          const cleaned = line.trim().replace(/^[-•]\s*/, '').trim()
-          if (cleaned.length > 0) for (const w of wordsOf(cleaned)) words.add(w)
-        }
-      }
-    } catch {
-      return []
+    if (hit !== undefined) {
+      // v1 cache entries were plain keyword arrays (pre-distillation).
+      if (Array.isArray(hit)) return { distilled: query, keywords: hit as unknown as string[] }
+      return { distilled: hit.distilled ?? query, keywords: hit.keywords ?? [] }
     }
-    const result = [...words].sort()
-    if (result.length > 0) {
-      cache[key] = result
+    try {
+      // Replacement-function form: user text may contain $-patterns.
+      const content = await options.callLlm(QUERY_ANALYSIS_PROMPT.replace('{query}', () => query))
+      const lines = content.split('\n').map(l => l.trim()).filter(l => l.length > 0)
+      if (lines.length === 0) return { distilled: query, keywords: [] }
+      const distilled = lines[0]!
+      const words = new Set<string>()
+      for (const line of lines.slice(1)) {
+        const cleaned = line.replace(/^[-•]\s*/, '').trim()
+        if (cleaned.length > 0) for (const w of wordsOf(cleaned)) words.add(w)
+      }
+      const keywords = [...words].sort()
+      cache[key] = { distilled, keywords }
       try {
         saveCache(cache)
       } catch {
-        // A cache write failure only loses reproducibility, not the expansion.
+        // A cache write failure only loses reproducibility, not the analysis.
       }
+      return { distilled, keywords }
+    } catch {
+      return { distilled: query, keywords: [] }
     }
-    return result
   }
 }
 
@@ -386,7 +389,7 @@ export class Retriever {
     if (events.length === 0) return []
     if (queryVec !== null) await this.ensureEmbeddings(events)
     const scored = events.map((event): { event: MemoryEvent; score: number } => {
-      const discount = speechActDiscount(event.predicate)
+      const discount = speechActDiscount(event)
       if (queryVec !== null) {
         const vec = this.eventVector(event)
         if (vec !== undefined) return { event, score: cosineSimilarity([...queryVec], [...vec]) * discount }
@@ -470,7 +473,7 @@ export class Retriever {
         && [...event.subjectEntityIds, ...event.objectEntityIds].some(id => entityIds.has(id)) ? 0.5 : 0
       const tBonus = temporalBonus(event, op, anchor)
       const raw = dense + overlapScore * 2 + expansionBonus + descriptorBonus + entityBonus + tBonus
-      const score = raw * speechActDiscount(event.predicate)
+      const score = raw * speechActDiscount(event)
       return { score, event, coverage, idfMass }
     })
 

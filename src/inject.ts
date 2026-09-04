@@ -47,13 +47,13 @@ export function currentQueryText(messages: readonly UserMessage[]): string | und
 }
 
 /**
- * Distill the retrieval query from a raw user message (m11 RC3). Long
- * messages often embed the actual question inside scaffolding/instructions
- * ("Pretend you are… Now Answer the Question: …?"); retrieving on the raw
- * text drowns the question's content words in boilerplate and matches
- * instruction-noise memories instead of facts. When the message is long and
- * contains a question line, retrieve on that line (stripping a leading
- * "Label: " scaffold); short messages pass through untouched.
+ * Heuristic query distillation — FALLBACK ONLY (m11 RC3). The primary path
+ * is the LLM query analyzer (semantic, language-independent); this runs when
+ * the analyzer is unavailable/disabled. Long messages often embed the actual
+ * question inside scaffolding/instructions; retrieving on the raw text
+ * drowns the question's content words in boilerplate. When the message is
+ * long and contains a question line, retrieve on that line (stripping a
+ * leading "Label: " / "标签：" scaffold); everything else passes through.
  */
 export function distillQuery(text: string): string {
   if (text.length <= 300) return text
@@ -61,9 +61,9 @@ export function distillQuery(text: string): string {
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!
     if (!line.includes('?') && !line.includes('？')) continue
-    const colon = line.lastIndexOf(': ')
+    const colon = Math.max(line.lastIndexOf(': '), line.lastIndexOf('：'))
     if (colon >= 0) {
-      const tail = line.slice(colon + 2)
+      const tail = line.slice(line[colon] === '：' ? colon + 1 : colon + 2)
       if (tail.includes('?') || tail.includes('？')) return tail
     }
     return line
@@ -105,6 +105,11 @@ export interface InjectionDeps {
   store: MemoryStore
   /** Character cap for the injected block. */
   maxChars?: number
+  /**
+   * LLM query distillation (primary path; semantic, language-independent).
+   * When absent or failing, the heuristic {@link distillQuery} fallback runs.
+   */
+  distill?: (query: string) => Promise<string | undefined>
 }
 
 /**
@@ -123,7 +128,17 @@ export function createPreStepHandler(deps: InjectionDeps) {
     if (decision.kind !== 'enter' || payload.step !== 1) return decision
     const rawQuery = currentQueryText(payload.messages)
     if (rawQuery === undefined) return decision
-    const query = distillQuery(rawQuery)
+    let query: string
+    if (deps.distill !== undefined) {
+      try {
+        const distilled = await deps.distill(rawQuery)
+        query = distilled !== undefined && distilled.trim().length > 0 ? distilled.trim() : distillQuery(rawQuery)
+      } catch {
+        query = distillQuery(rawQuery)
+      }
+    } else {
+      query = distillQuery(rawQuery)
+    }
     let events: MemoryEvent[]
     try {
       events = await deps.retrieve(query)

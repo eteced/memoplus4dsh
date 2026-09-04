@@ -15,7 +15,7 @@ import type { ExtractionJob } from './extraction.js'
 import { registerBridges } from './bridges.js'
 import { OnnxEmbedder, NULL_EMBEDDER, EMBEDDING_MODELS } from './embedding.js'
 import type { TextEmbedder } from './embedding.js'
-import { Retriever, createQueryExpander } from './retrieval.js'
+import { Retriever, createQueryAnalyzer } from './retrieval.js'
 import { createPreStepHandler } from './inject.js'
 import { registerMemoryTools } from './tools.js'
 
@@ -212,19 +212,26 @@ export function apply(ctx: Context, config: Config) {
         model: EMBEDDING_MODELS[config.embeddingModel ?? 'multilingual'],
       })
 
+    // One cached LLM call per distinct user message yields both the
+    // expansion keywords (retrieval) and the distilled core question
+    // (injection) — semantic, language-independent by construction.
+    const analyzeQuery = config.queryExpansion === false
+      ? undefined
+      : createQueryAnalyzer({
+          cachePath: join(dataDir, 'query-expansion-cache.json'),
+          // Analysis output is ≤13 short lines: 1024 tokens cover a reasoning
+          // model's thinking for that; 30s keeps the pre-step critical path
+          // responsive when the endpoint degrades (failure → passthrough).
+          callLlm: prompt => callPluginLlm(ctx, config, lastRoute, prompt, 1024, 30_000),
+        })
+
     const retriever = new Retriever({
       store,
       embedder,
       stateDedup: config.stateDedup !== false,
-      expandQuery: config.queryExpansion === false
+      expandQuery: analyzeQuery === undefined
         ? undefined
-        : createQueryExpander({
-          cachePath: join(dataDir, 'query-expansion-cache.json'),
-          // Expansion output is ≤12 short lines: 1024 tokens cover a reasoning
-          // model's thinking for that; 30s keeps the pre-step critical path
-          // responsive when the endpoint degrades (failure → no expansion).
-          callLlm: prompt => callPluginLlm(ctx, config, lastRoute, prompt, 1024, 30_000),
-        }),
+        : async query => (await analyzeQuery(query)).keywords,
     })
 
     let queue: ExtractionQueue | undefined
@@ -295,6 +302,9 @@ export function apply(ctx: Context, config: Config) {
         store,
         maxChars: config.injectMaxChars,
         retrieve: query => retriever.retrieve(query, { topK: config.injectTopK ?? 8 }),
+        distill: analyzeQuery === undefined
+          ? undefined
+          : async query => (await analyzeQuery(query)).distilled,
       })
       ctx.on('agent/pre-step', (payload, next) => {
         const header = payload.agent.session.requestHeader()

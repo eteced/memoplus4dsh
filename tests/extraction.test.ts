@@ -60,6 +60,19 @@ describe('parseExtractionOutput', () => {
     expect(entities[0]).toMatchObject({ type: 'PERSON', canonical: 'Alice', aliases: ['Al'] })
   })
 
+  it('parses the KIND column: speech marks speechAct, anything else is fact', () => {
+    const text = [
+      'PERSON|Alice|_|asked|weekend plans|_|Alice asked about the weekend plans.|_|speech',
+      'PERSON|Bob|_|painted|landscape|last year|Bob painted a landscape last year.|_|fact',
+      'PERSON|Carol|_|likes|tea|_|Carol likes tea very much.|_',  // 8 列旧格式 → fact
+    ].join('\n')
+    const { events } = parseExtractionOutput(text)
+    expect(events).toHaveLength(3)
+    expect(events[0]!.speechAct).toBe(true)
+    expect(events[1]!.speechAct).toBe(false)
+    expect(events[2]!.speechAct).toBe(false)
+  })
+
   it('skips headers, blanks, and unknown entity types', () => {
     const text = [
       'ENTITY_TYPE|CANONICAL_NAME|ALIASES|PREDICATE|OBJECT|TIME_EXPR|NORMALIZED_FACT|DETAILS',
@@ -341,6 +354,22 @@ describe('ExtractionPipeline', () => {
     const sliced = segmentTurnText(huge)
     expect(sliced.length).toBeGreaterThan(1)
     expect(sliced.join('')).toBe(huge)
+  })
+
+  it('stores the speechAct flag from the KIND column end to end', async () => {
+    const store = new MemoryStore({ dir })
+    const pipeline = new ExtractionPipeline({
+      store,
+      callLlm: async () => [
+        'PERSON|User|_|asked|weekend plans|_|User asked about the weekend plans.|_|speech',
+        'PERSON|User|_|painted|landscape|last year|User painted a landscape last year.|_|fact',
+      ].join('\n'),
+    })
+    await pipeline.extractTurn(makeJob())
+    const user = store.findEntityByName('User')!
+    const events = store.eventsForEntity(user.id)
+    expect(events.find(e => e.predicate === 'asked')?.speechAct).toBe(true)
+    expect(events.find(e => e.predicate === 'painted')?.speechAct).toBeUndefined()
   })
 
   it('extracts rows into the store with dual time anchors and source refs', async () => {

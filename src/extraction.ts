@@ -21,7 +21,7 @@ import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs
 export const EXTRACTION_PROMPT_TURN = `You extract facts from conversation for a memory graph. Read ONLY the turn below and extract ALL explicitly stated facts.
 
 Output one row per fact, pipe-separated, in EXACTLY this column order:
-ENTITY_TYPE|CANONICAL_NAME|ALIASES|PREDICATE|OBJECT|TIME_EXPR|NORMALIZED_FACT|DETAILS
+ENTITY_TYPE|CANONICAL_NAME|ALIASES|PREDICATE|OBJECT|TIME_EXPR|NORMALIZED_FACT|DETAILS|KIND
 
 Column rules:
 - ENTITY_TYPE: one of PERSON, OBJECT, CONCEPT.
@@ -32,10 +32,12 @@ Column rules:
 - TIME_EXPR: copied VERBATIM from the text (e.g. "last year", "last Saturday"); never compute dates yourself.
 - NORMALIZED_FACT: one self-contained sentence with the key fact.
 - DETAILS: extra context phrases that don't fit the main fact, or _.
+- KIND: "speech" when the row only records that someone asked/said/answered/commented (a conversational act), otherwise "fact".
 
 Example:
-PERSON|Alice|_|is_from|hometown|_|Alice is from her hometown.|_
-PERSON|Bob|Bobby|painted|landscape|last year|Bob painted a landscape last year.|_
+PERSON|Alice|_|is_from|hometown|_|Alice is from her hometown.|_|fact
+PERSON|Bob|Bobby|painted|landscape|last year|Bob painted a landscape last year.|_|fact
+PERSON|Alice|_|asked|weekend plans|_|Alice asked about the weekend plans.|_|speech
 
 Known names so far, with their established types in parentheses (reuse both name and type; add nicknames as aliases):
 {known_entities}
@@ -69,6 +71,10 @@ export interface ExtractedRow {
   timeExpr: string
   fact: string
   details: string
+  /** True when the row records a conversational act (asked/said/answered…)
+   *  rather than a fact — judged by the extraction model itself (KIND column),
+   *  so it works in any language; no lexical wordlists. */
+  speechAct: boolean
 }
 
 export interface ParsedExtraction {
@@ -92,6 +98,7 @@ function parsePipeRow(parts: string[]): ExtractedRow | null {
   while (parts.length < 7) parts.push('')
   const [etypeRaw, canonicalRaw, aliasesRaw, predicate, object, timeExpr, fact] = parts
   const details = parts.length > 7 ? parts[7]! : ''
+  const kind = parts.length > 8 ? parts[8]! : ''
   const canonical = canonicalRaw!.trim()
   const entityType = etypeRaw!.trim().toUpperCase()
   if (canonical.length === 0 || entityType === 'ENTITY_TYPE') return null
@@ -108,6 +115,7 @@ function parsePipeRow(parts: string[]): ExtractedRow | null {
     timeExpr: cleanField(timeExpr!),
     fact: cleanField(fact!),
     details: cleanField(details),
+    speechAct: cleanField(kind).toLowerCase() === 'speech',
   }
 }
 
@@ -358,6 +366,7 @@ export class ExtractionPipeline {
         mentionTime: job.mentionTime,
         sourceSession: job.sessionId,
         sourceTurn: job.turn,
+        ...(row.speechAct ? { speechAct: true } : {}),
       }
       this.store.addEvent(event)
       eventsAdded++

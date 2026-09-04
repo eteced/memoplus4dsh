@@ -52,6 +52,13 @@ export interface MemoryEvent {
   mentionTime: string
   sourceSession: string
   sourceTurn: number
+  /**
+   * Set by the extraction model (KIND=speech): the event records a
+   * conversational act, not a fact. Retrieval discounts these (they echo the
+   * wording of later questions and would otherwise crowd out facts);
+   * they are never deleted and remain searchable.
+   */
+  speechAct?: boolean
   embedding?: number[]
 }
 

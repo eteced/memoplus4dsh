@@ -168,13 +168,16 @@ $$v = (S,\ O,\ p,\ f,\ d,\ x,\ t_e,\ \rho,\ t_m,\ s)$$
 
 ### 4.2 LLM 抽取：pipe 表格协议
 
-抽取是一次 LLM 调用，输出协议为 pipe 分隔的八列表格：
+抽取是一次 LLM 调用，输出协议为 pipe 分隔的九列表格：
 
 ```
-ENTITY_TYPE|CANONICAL_NAME|ALIASES|PREDICATE|OBJECT|TIME_EXPR|NORMALIZED_FACT|DETAILS
-PERSON|Alice|_|is_from|hometown|_|Alice is from her hometown.|_
-PERSON|Bob|Bobby|painted|landscape|last year|Bob painted a landscape last year.|_
+ENTITY_TYPE|CANONICAL_NAME|ALIASES|PREDICATE|OBJECT|TIME_EXPR|NORMALIZED_FACT|DETAILS|KIND
+PERSON|Alice|_|is_from|hometown|_|Alice is from her hometown.|_|fact
+PERSON|Bob|Bobby|painted|landscape|last year|Bob painted a landscape last year.|_|fact
+PERSON|Alice|_|asked|weekend plans|_|Alice asked about the weekend plans.|_|speech
 ```
+
+`KIND` 列（M11 新增）由抽取模型自己判断该行是事实还是言语行为（`fact`/`speech`）——**语义判定而非词表匹配，任何语言都成立**。言语行为事件写入时打上 `speechAct` 标记，检索侧按标记降权（§5.2），不删除、显式搜索仍可命中。
 
 选择 LLM 抽取（而非正则/NER/embedding 聚类）是因为记忆里最难的从来不是实体识别，而是**指代消解与自包含化**。prompt 中沉淀的关键规则（前作 LoCoMo 实验逐条验证过）：
 
@@ -249,7 +252,7 @@ dsh 的 goal/todo/schedule/plan 状态是 per-session 事件日志，跨会话�
 
 $$\text{score}(v) = \delta_{\text{speech}}(p_v)\cdot\Big[\underbrace{\cos(\mathbf{v}_q, \mathbf{v}_v)}_{\text{dense}} +\ 2\cdot\underbrace{\frac{\sum_{w \in q^\*} \text{idf}(w)\cdot [w \in W_v]}{\sum_{w \in q^+} \text{idf}(w)}}_{\text{IDF 归一化词重叠}} +\ \underbrace{\min\!\big(0.25\!\!\sum_{w \in q^+\setminus q^*}\!\!\text{idf}(w)\,[w \in W_v],\ 2\big)}_{\text{扩展词奖励}} +\ \underbrace{0.5\!\!\sum_{d \in D}\!\text{idf}(d)\,[d \in W_v]}_{\text{关键描述词}} +\ \underbrace{0.5\cdot[V(v) \cap E_q \ne \emptyset]}_{\text{实体奖励}} +\ \underbrace{b_T(v, \text{op})}_{\text{时间奖励}}\Big]$$
 
-其中 $\delta_{\text{speech}}(p) = 0.3$ 当谓词 $p$ 是言语行为（asked/answered/said/told/…，首词前缀匹配语言级通用词根表），否则为 1——"User asked …"类事件与后来的问题逐字重合，不打折会霸占 top-k（评测归因 RC2：Q&A 噪声曾把金事件挤出 top-12）；折扣只降权不删除，显式搜索仍可命中。
+其中 $\delta_{\text{speech}}(v) = 0.3$ 当事件 $v$ 带 `speechAct` 标记（写入时由抽取模型语义判定，见 §4.2——**不是**检索侧的词表匹配，对任何语言都成立），否则为 1。言语行为事件（"User asked …"）与后来的问题逐字重合，不打折会霸占 top-k（评测归因 RC2：Q&A 噪声曾把金事件挤出 top-12）；折扣只降权不删除，显式搜索仍可命中。旧图事件无此标记，自动按全分处理（向后兼容）。
 
 其中：
 
@@ -298,7 +301,7 @@ $$\text{match}(v, \text{range}) \iff t_e \in \text{range}\ \lor\ t_m \in \text{r
 
 top-k 事件渲染为紧凑列表（`- [时间] 事实 (细节)`），以 plugin 来源的 user/message 注入到已认领消息之后，总量受字符上限约束（默认 2000）。注入走 `agent/pre-step` 的 waterfall 决策链，因此**它和普通用户消息一样落盘进会话日志**——dsh 的"模型可见 ⟺ 日志可见"约束天然满足，记忆对调试与审计完全透明。
 
-注入前的检索查询经过 `distillQuery` 提取（M11 RC3）：长消息（>300 字符）里真正的问句常被指令/脚手架文本包围，直接拿全文检索会让模板噪声事件霸榜——评测中同一检索器用模型自造的短查询召回 68~74%，用包装全文只有 0~9%。规则是纯语言级的：取最后一个含 `?`/`？` 的行并剥离 `Label: ` 前缀；短消息原样透传。
+注入前的检索查询经过蒸馏（M11 RC3）：长消息里真正的问句常被指令/脚手架文本包围，直接拿全文检索会让模板噪声事件霸榜——评测中同一检索器用模型自造的短查询召回 68~74%，用包装全文只有 0~9%。**主路是 LLM 查询分析器**（与查询扩展同一次缓存调用：第 1 行输出剥掉指令/元文本的核心问题、原语言；其余行输出扩展关键词）——语义判断，语言无关。LLM 不可用/超时/关闭时退到启发式（取最后一个含 `?`/`？` 的行、剥离 `Label: `/`标签：` 前缀），再不行用原文。
 
 三个模型侧工具：`memory_search`（主动回忆，支持可选时间表达式参数）、`memory_remember`（用户说"记住…"时显式直写，绕过抽取管线）、`memory_visualize`（把当前记忆图渲染为自包含的交互式 HTML：力导向图 + 时间标记 + 事件列表，零外部依赖）。
 
@@ -324,7 +327,7 @@ top-k 事件渲染为紧凑列表（`- [时间] 事实 (细节)`），以 plugin
 
 ### 6.3 可靠性
 
-除 §4.6 的队列与日志外，还包括：抽取/扩展调用 120s/30s 超时（端点挂死不会卡死串行队列）；`memory_visualize` 大图上 1200 节点展示上限；全部辅助 I/O best-effort（任何持久化失败不得弄断对话）。当前 **130 个 vitest 单测全绿**（store/temporal/retrieval/extraction/inject/tools/bridges/visualize/embedding）。
+除 §4.6 的队列与日志外，还包括：抽取/扩展调用 120s/30s 超时（端点挂死不会卡死串行队列）；`memory_visualize` 大图上 1200 节点展示上限；全部辅助 I/O best-effort（任何持久化失败不得弄断对话）。当前 **132 个 vitest 单测全绿**（store/temporal/retrieval/extraction/inject/tools/bridges/visualize/embedding）。
 
 ## 7. 效果评测
 
@@ -440,7 +443,7 @@ ingest 的 LLM 抽取比 embed 方案贵约一个量级（每 ~8k 字符一次�
 scripts/install.sh && scripts/uninstall.sh   # 验证
 
 # 单测
-npm test                                      # 130 个用例
+npm test                                      # 132 个用例
 
 # MemoryAgentBench 复现（见 benchmark/README.md）
 cd benchmark && DEEPSEEK_API_KEY=... ./run-cr-all.sh   # 或 run-lme.sh

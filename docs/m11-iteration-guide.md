@@ -42,21 +42,21 @@ venv/bin/python analyze_recall_failures.py   # 注意：脚本目前指向全量
 - **预期**：实体锚定与一跳扩展恢复设计强度；MH 的"搜过仍 miss"（164 题）显著下降。
 - **验证**：mini run 后 mh_6k/mh_32k 的 never-recalled 中"搜过仍 miss"数量下降；图上重名组数从千级降到 ~0（`memory_visualize` 或一行 jq 可查）。**注意：类型无关合并只防新碎裂，已碎的旧图不会自愈——mini run 的图是新建的，直接反映修复效果。**
 
-### P0-B 言语行为/指令噪声降权 【已实施】
+### P0-B 言语行为/指令噪声降权 【已实施·v2 去 hardcode】
 
-- **改动**（均已实施）：
-  1. ✅ `src/retrieval.ts`：谓词命中言语行为词根（ask/answer/say/tell/reply/respond/instruct/request/mention/note/state/question/comment/praise，首词前缀匹配）的事件打分 ×0.3（`SPEECH_ACT_DISCOUNT`），topSlice 候选切片与最终打分都应用；不删除、仍可被显式搜索命中。
-  2. ✅ `src/extraction.ts` 抽取 prompt 新增规则：不抽指令/规则/任务元叙述（"answer only from the knowledge pool" 这类），只抽人/物/事件的事实。
+- **改动**（最终形态，语言无关）：
+  1. ✅ `src/extraction.ts`：抽取协议加第 9 列 `KIND`（`fact`/`speech`），**由抽取模型语义判定**言语行为行（中文"问/回答"与英文 asked/answered 一视同仁）；写入 `MemoryEvent.speechAct` 标记。
+  2. ✅ `src/retrieval.ts`：折扣只看 `speechAct` 标记（×0.3，候选切片与最终打分都应用）。~~英文谓词词根表~~ 已删除——v1 的 `SPEECH_ACT_ROOTS` 是英文 hardcode，中文谓词完全漏检，被用户打回重做。旧图事件无标记自动按全分（向后兼容）。
+  3. ✅ 抽取 prompt 新增规则：不抽指令/规则/任务元叙述。
 - **根因**：RC2（replay 实证：模板噪声把金事件挤出 top-12；模板示例"Russia→Trump"变成假事实）。
-- **replay 验证**（sh_6k q9，包装查询）：`asked`/`answered` 事件被压出 top-10 ✅；但指令类事件（谓词 `requires`/`based_on`/`has_rule`）仍霸榜、金事件仍未进 top-10——**P0-B 单独不够，P1-A（查询提取）是主导修复**（distill 后金事件 rank #1）。prompt 规则 2 的效果要等 mini run 的新图验证。
-- **预期**：注入召回率（CR 0~9%）显著上升；SH 的"未搜"类失败（~70 题）部分自愈。
+- **replay 验证**（sh_6k q9，包装查询，v1 词表版）：`asked`/`answered` 被压出 top-10，但指令类噪声（requires/based_on）仍在——**P0-B 单独不够，P1-A 是主导修复**。v2 标记版的效果随 mini-2 的新图验证（旧图无标记）。
 
-### P1-A 注入查询构造：剥离脚手架 【已实施】
+### P1-A 注入查询构造：剥离脚手架 【已实施·v2 LLM 主路】
 
-- **改动**（✅ `src/inject.ts` `distillQuery`）：注入检索前对查询做"问题主体提取"——消息 >300 字符且含问句行时，取最后一个含 `?`/`？` 的行，并剥离 `Label: ` 前缀；短消息与无问句的长消息原样透传。`memory_search` 工具的查询是模型自造的，不经过此处理。
+- **改动**（✅ 最终形态）：`src/retrieval.ts` `createQueryAnalyzer`——**LLM 查询分析器作为主路**：与查询扩展合并为同一次缓存调用（prompt 第 1 行要求输出"剥掉指令/元文本的核心问题，保持原语言"，其余行输出扩展关键词）；`src/inject.ts` 注入前优先用 LLM 蒸馏结果，启发式 `distillQuery`（最后问句行 + `": "/"："` 前缀剥离）**仅作 LLM 不可用时的兜底**。~~v1 只靠标点启发式~~ 被用户打回：中文疑问句可不带问号，标点规则是语言 hardcode。
 - **根因**：RC3（同一检索器，模型自造的短查询 SH 召回 68~74%，注入的全文查询 0~9%）。
 - **replay 验证**：sh_6k q9 distill 后查询金事件 rank **#1**（修复前包装查询跌出 top-12）。
-- **注意**：蒸馏只影响注入通道的检索词，注入给模型的仍是正常记忆列表；模型看到的用户消息原文不变。
+- **成本**：每去重后查询一次 LLM 调用（1024 tokens 上限、30s 超时、磁盘缓存），pre-step 关键路径上失败即透传。
 
 ### P1-B 冲突版本的新值偏好（supersede 泛化）
 
