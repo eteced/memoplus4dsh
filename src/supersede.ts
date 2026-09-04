@@ -112,8 +112,12 @@ export class LlmSupersedeResolver {
       const subject = event.subjectEntityIds[0]
       if (subject === undefined || event.predicate.length === 0) continue
       const newObj = normObj(event)
-      const entityEvents = this.store.eventsForEntity(subject).filter(old =>
-        old.id !== event.id && old.speechAct !== true && old.mentionTime < event.mentionTime)
+      // eventsForEntity 返回插入序——它就是信息的新旧序（mini-5 教训：
+      // 同轮到达的冲突事实 mentionTime 相同，按时间比较会整组漏裁）。
+      const allForEntity = this.store.eventsForEntity(subject)
+      const eventPos = allForEntity.findIndex(e => e.id === event.id)
+      const entityEvents = allForEntity.slice(0, eventPos === -1 ? undefined : eventPos)
+        .filter(old => old.speechAct !== true)
       // 同关系 = 谓词相同 或 掩码文本相似（漂移容忍，见 textSimilar 的 docstring）
       const predecessors = entityEvents.filter(old =>
         old.predicate === event.predicate || this.textSimilar(old, event))
@@ -130,8 +134,8 @@ export class LlmSupersedeResolver {
       const subjectName = this.store.getEntity(subject)?.canonicalName ?? subject
       const key = `${subject}|${event.predicate}`
       const group = groups.get(key)
-      // 同组可能一轮来多个新事件；以提及时间最新者为准
-      if (group === undefined || event.mentionTime > group.newest.mentionTime) {
+      // 同组可能一轮来多个新事件；以插入序最新者为准（mentionTime 同轮相同）
+      if (group === undefined || event.mentionTime >= group.newest.mentionTime) {
         groups.set(key, {
           subjectName,
           predicate: event.predicate,

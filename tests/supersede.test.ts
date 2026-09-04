@@ -169,3 +169,26 @@ describe('cardinality prior', () => {
     expect(calls).toBe(0)  // 三个不同值 → 直接按多值处理，不调 LLM
   })
 })
+
+describe('same-turn conflicts (mini-5 lesson)', () => {
+  it('adjudicates conflicts within one turn using insertion order', async () => {
+    const store = new MemoryStore({ dir })
+    const subj = store.createOrResolve('goaltender', 'CONCEPT').entity
+    const mk = (objName: string, text: string) => {
+      const obj = store.createOrResolve(objName, 'CONCEPT').entity
+      return store.addEvent({
+        subjectEntityIds: [subj.id], objectEntityIds: [obj.id], predicate: 'associated_with',
+        normalizedText: text, details: '', timeExpr: '', eventTime: null,
+        eventTimePrecision: 'unknown',
+        mentionTime: '2026-09-04T18:00:00.000Z',  // 同一轮：mentionTime 相同
+        sourceSession: 's0', sourceTurn: 0,
+      })
+    }
+    const old = mk('ice hockey', 'goaltender is associated with the sport of ice hockey.')
+    const newer = mk('pesäpallo', 'goaltender is associated with the sport of pesäpallo.')
+    const resolver = new LlmSupersedeResolver({ store, callLlm: () => Promise.resolve('1: single') })
+    // 两个事件同轮到达（一次 detectAndMark 处理该轮全部新增）
+    expect(await resolver.detectAndMark([old, newer], JOB)).toBe(1)
+    expect(store.getEvent(old.id)!.supersededBy).toBe(newer.id)
+  })
+})
