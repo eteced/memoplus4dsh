@@ -90,6 +90,9 @@ if __name__ == '__main__':
     parser.add_argument('--huggingface_dataset_name', type=str, default="ai-hyz/MemoryAgentBench")
     parser.add_argument('--dataset', type=str, default='longmemeval_s*')
     parser.add_argument('--output_dir', type=str, default='./outputs/')
+    parser.add_argument('--hyp_file', type=str, default=None,
+                        help='explicit results JSON path (mini/subset runs); bypasses the folder walk '
+                             'and matches hypotheses to references by question text instead of position')
     args = parser.parse_args()
 
     verbose = True
@@ -103,7 +106,14 @@ if __name__ == '__main__':
     
     ## find the json file in the folder
     print('Evaluating method:', args.evaluated_method)
-    if args.dataset == 'longmemeval_s':
+    if args.hyp_file is not None:
+        hyp_file = args.hyp_file
+        with open(hyp_file, 'r', encoding='utf-8') as f:
+            hypotheses = (json.load(f))["data"]
+        hyper_file_tag = hyp_file.split('/')[-1].split('.')[0]
+        result_file = os.path.join(args.output_dir, '.eval-results-{}-{}'.format(args.evaluated_method, hyper_file_tag))
+        references = load_references_from_huggingface(args.huggingface_dataset_name, args.dataset)
+    elif args.dataset == 'longmemeval_s':
         for root, _, files in os.walk(hyp_folder):
             for file in files:
                 if file.endswith('.json') and 'longmemeval_s_' in file and "*" not in file:
@@ -128,25 +138,55 @@ if __name__ == '__main__':
         result_file = os.path.join(args.output_dir, '.eval-results-{}-{}'.format(args.evaluated_method, hyper_file_tag))
         references = load_references_from_huggingface(args.huggingface_dataset_name, args.dataset)
             
-    ### make sure every question from references and hypotheses are the same   
+    ### make sure every question from references and hypotheses are the same
     qid2qdata = {entry['question_id']: entry for entry in references}
     qid2qtype = {entry['question_id']: entry['question_type'] for entry in references}
     qtypes = set(list(qid2qtype.values()))
     qtype2acc = {t: [] for t in qtypes}
 
+    def _norm_q(text):
+        return ' '.join(str(text).split()).strip().lower()
+
+    def _hyp_question(hyp):
+        # our query template wraps the raw question: "... Now Answer the Question: <q>"
+        q = hyp.get('query', '')
+        marker = 'Now Answer the Question:'
+        if marker in q:
+            q = q.split(marker, 1)[1]
+        return _norm_q(q)
+
+    # Full runs align positionally; subset (mini) runs match by question text.
+    if len(hypotheses) == len(references):
+        pairs = list(zip(references, hypotheses))
+    else:
+        ref_by_q = {}
+        for r in references:
+            ref_by_q.setdefault(_norm_q(r['question']), r)
+        pairs = []
+        for h in hypotheses:
+            ref = ref_by_q.get(_hyp_question(h))
+            if ref is None:
+                print('Warning: no reference match for hypothesis question:', str(h.get('query'))[-120:])
+                continue
+            if ref['answer'] != h['answer']:
+                print('Warning: answer mismatch for matched question; skipping.')
+                continue
+            pairs.append((ref, h))
+        print(f'Subset mode: matched {len(pairs)}/{len(hypotheses)} hypotheses to references')
+
     if not os.path.exists(result_file):
         with open(result_file, 'w') as out_f:
             logs = []
-            for idx, entry in tqdm(enumerate(references), total=len(references)):
+            for entry, hyp_entry in tqdm(pairs, total=len(pairs)):
                 if entry['question_id'] not in qid2qtype:
                     print('Warning: skipping {} as it is not in reference data.'.format(entry['question_id']))
                     continue
-                
+
                 qtype = qid2qtype[entry['question_id']]
                 q = qid2qdata[entry['question_id']]['question']
                 ans = qid2qdata[entry['question_id']]['answer']
-                hyp = hypotheses[idx]['output']
-                ans2= hypotheses[idx]['answer']
+                hyp = hyp_entry['output']
+                ans2 = hyp_entry['answer']
                 if ans2 != ans:
                     print("ans2 != ans, please check the data.")
                     print('Reference answer:', ans)
