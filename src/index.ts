@@ -288,7 +288,6 @@ export function apply(ctx: Context, config: Config) {
           ? undefined
           : new LlmSupersedeResolver({
             store,
-            embedder,
             callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, 4096),
             onLog: debugLog,
           }),
