@@ -74,6 +74,23 @@ def main():
     parser.add_argument("--keep", action="store_true", help="保留 probe 的 dsh home（默认跑完不删，便于检查图）")
     args = parser.parse_args()
 
+    # 固定剧本需要全新状态：续跑的会话会让 finalResponse 取不到值。
+    # 清掉会话与插件数据（保留 models 目录——135MB 嵌入模型不重复下载）。
+    import shutil
+    sessions_dir = os.path.join(args.dsh_home, "sessions")
+    if os.path.exists(sessions_dir):
+        shutil.rmtree(sessions_dir)
+    plugin_data = os.path.join(args.dsh_home, "memoplus4dsh")
+    if os.path.exists(plugin_data):
+        for name in os.listdir(plugin_data):
+            if name == "models":
+                continue
+            target = os.path.join(plugin_data, name)
+            if os.path.isdir(target):
+                shutil.rmtree(target)
+            else:
+                os.remove(target)
+
     driver = DshDriver(REPO_ROOT, args.dsh_home)
     try:
         for i, line in enumerate(SCRIPT):
