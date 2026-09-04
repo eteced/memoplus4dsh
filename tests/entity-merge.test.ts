@@ -42,7 +42,7 @@ describe('LlmEntityMerger', () => {
     const merger = new LlmEntityMerger({
       store,
       embedder: fakeEmbedder(),
-      callLlm: () => Promise.resolve('1: 1'),
+      callLlm: () => Promise.resolve('1: 1: sure'),
     })
     const merges = await merger.findMerges(
       [{ name: 'Bob Smith', type: 'PERSON', aliases: [], sampleFact: 'Bob Smith painted a fence.' }],
@@ -80,7 +80,7 @@ describe('LlmEntityMerger', () => {
       embedder: undefined,  // 无嵌入：纯包含候选
       callLlm: (prompt) => {
         expect(prompt).toContain('雪球')
-        return Promise.resolve('1: 1')
+        return Promise.resolve('1: 1: sure')
       },
     })
     const merges = await merger.findMerges(
@@ -106,7 +106,7 @@ describe('pipeline integration: merge + re-extraction dedup', () => {
       entityMerger: new LlmEntityMerger({
         store,
         embedder: fakeEmbedder(),
-        callLlm: () => Promise.resolve('1: 1'),
+        callLlm: () => Promise.resolve('1: 1: sure'),
       }),
     })
     const result = await pipeline.extractTurn(JOB)

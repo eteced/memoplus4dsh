@@ -29,13 +29,15 @@ export interface MergeMention {
 export const MERGE_ADJUDICATION_PROMPT = `You resolve entity mentions for a memory graph. For each NEW mention below, decide whether it refers to the SAME entity as one of the EXISTING candidates on its line.
 
 Rules:
-- Same means identical real-world referent: nicknames, abbreviations, translations, and descriptions of the same thing ("my cat X" = "X"; "雪球" = "Snowball" the cat).
-- Merely sharing a word is NOT enough ("Apple" the fruit ≠ "Apple" the company; "Mercury" planet ≠ "Mercury" element).
+- Same means identical real-world referent: nicknames, abbreviations, translations, and descriptions of the same thing ("my cat X" = "X"; "雪球" = "Snowball" the cat; "city of Paris" = "Paris").
+- Merely sharing or resembling a word is NOT enough ("Apple" the fruit ≠ "Apple" the company; "Islam" the religion ≠ "Iman" the person; "Shapur I" ≠ "Ardashir I").
+- Different entity types (PERSON vs OBJECT vs CONCEPT) are strong evidence AGAINST merging.
 - When unsure, answer 0 (no merge).
 
 {lines}
 
-Answer one line per NEW mention, exactly: <N>: <candidate number, or 0 for none>`
+Answer one line per NEW mention, exactly: <N>: <candidate number, or 0 for none>: <sure|unsure>
+Only "sure" merges happen; "unsure" is treated as no merge.`
 
 export interface LlmEntityMergerOptions {
   store: MemoryStore
@@ -100,10 +102,13 @@ export class LlmEntityMerger {
     } catch {
       return result
     }
-    // Parse "N: M" lines; invalid indices are ignored (no merge).
+    // Parse "N: M: sure|unsure" lines; only "sure" merges (mini-4 lesson:
+    // lookalike proper nouns like Islam→Iman got merged on a bare yes).
+    // Bare "N: M" (legacy/no confidence) counts as unsure — no merge.
     for (const line of raw.split('\n')) {
-      const m = /^\s*(\d+)\s*[:：]\s*(\d+)\s*$/.exec(line.trim())
+      const m = /^\s*(\d+)\s*[:：]\s*(\d+)\s*(?:[:：]\s*(sure|unsure))?/i.exec(line.trim())
       if (!m) continue
+      if (m[3]?.toLowerCase() !== 'sure') continue
       const mentionIdx = Number(m[1]) - 1
       const candIdx = Number(m[2]) - 1
       if (candIdx < 0) continue
