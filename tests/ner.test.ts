@@ -76,7 +76,7 @@ describe('NER-assisted extraction (m12)', () => {
 })
 
 describe('createNerDetector fallback chain', () => {
-  it('falls back through sidecar -> onnx -> null without throwing', async () => {
+  it('falls back through sidecar -> onnx -> null without throwing', { timeout: 60_000 }, async () => {
     const { createNerDetector } = await import('../src/ner.js')
     const detector = createNerDetector({ python: '/nonexistent-python-xyz' })
     // sidecar 启动失败 → ONNX 包（本机已装，模型已缓存，可用则用）

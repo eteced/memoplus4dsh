@@ -127,3 +127,25 @@ describe('pipeline integration: merge + re-extraction dedup', () => {
     expect(store.listEvents()).toHaveLength(2)
   })
 })
+
+describe('alias-token-overlap blocking (m12 hardening)', () => {
+  it('finds "Bob" as candidate for "Bob Smith" without containment', async () => {
+    const store = new MemoryStore({ dir })
+    store.createOrResolve('Bob', 'PERSON')
+    let promptSeen = ''
+    const merger = new LlmEntityMerger({
+      store,
+      embedder: undefined,  // 无嵌入：只靠包含/token 信号
+      callLlm: (prompt) => {
+        promptSeen = prompt
+        return Promise.resolve('1: 1: sure: both refer to same painter Bob from context')
+      },
+    })
+    const merges = await merger.findMerges(
+      [{ name: 'Bob Smith', type: 'PERSON', aliases: [], sampleFact: 'Bob Smith painted a fence.' }],
+      JOB,
+    )
+    expect(promptSeen).toContain('Bob')
+    expect(merges.get('Bob Smith')).toBe('Bob')
+  })
+})

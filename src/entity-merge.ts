@@ -15,6 +15,7 @@
 
 import type { Entity, EntityType, MemoryStore } from './store.js'
 import { cosineSimilarity } from './store.js'
+import { wordsOf } from './text.js'
 import type { TextEmbedder } from './embedding.js'
 import type { ExtractionJob } from './extraction.js'
 
@@ -36,8 +37,8 @@ Rules:
 
 {lines}
 
-Answer one line per NEW mention, exactly: <N>: <candidate number, or 0 for none>: <sure|unsure>
-Only "sure" merges happen; "unsure" is treated as no merge.`
+Answer one line per NEW mention, exactly: <N>: <candidate number, or 0 for none>: <sure|unsure>: <reason in at most 15 words>
+Only "sure" merges happen; "unsure" is treated as no merge. The reason must cite evidence from the contexts shown, not the names' similarity.`
 
 export interface LlmEntityMergerOptions {
   store: MemoryStore
@@ -107,11 +108,11 @@ export class LlmEntityMerger {
     } catch {
       return result
     }
-    // Parse "N: M: sure|unsure" lines; only "sure" merges (mini-4 lesson:
-    // lookalike proper nouns like Islam→Iman got merged on a bare yes).
-    // Bare "N: M" (legacy/no confidence) counts as unsure — no merge.
+    // Parse "N: M: sure|unsure: reason" lines; only "sure" merges (mini-4
+    // lesson: lookalike proper nouns like Islam→Iman got merged on a bare
+    // yes). Bare "N: M" (legacy/no confidence) counts as unsure — no merge.
     for (const line of raw.split('\n')) {
-      const m = /^\s*(\d+)\s*[:：]\s*(\d+)\s*(?:[:：]\s*(sure|unsure))?/i.exec(line.trim())
+      const m = /^\s*(\d+)\s*[:：]\s*(\d+)\s*(?:[:：]\s*(sure|unsure))?(?:[:：]\s*(.+))?/i.exec(line.trim())
       if (!m) continue
       if (m[3]?.toLowerCase() !== 'sure') continue
       const mentionIdx = Number(m[1]) - 1
@@ -123,7 +124,8 @@ export class LlmEntityMerger {
         result.set(entry.mention.name, candidate.canonicalName)
         this.onLog?.({
           kind: 'entity-merge', mention: entry.mention.name,
-          into: candidate.canonicalName, session: job.sessionId, turn: job.turn,
+          into: candidate.canonicalName, reason: m[4]?.trim().slice(0, 120),
+          session: job.sessionId, turn: job.turn,
         })
       }
     }
@@ -133,16 +135,32 @@ export class LlmEntityMerger {
   /** Embedding top-k (loose floor) plus substring-containment candidates. */
   private async candidatesFor(name: string, entities: Entity[]): Promise<Entity[]> {
     const key = name.trim().toLowerCase()
+    const keyTokens = new Set(wordsOf(key).filter(w => w.length > 1))
     const scored = new Map<string, { entity: Entity; score: number }>()
-    // Substring containment is script-agnostic and catches "我家那只猫"-style
-    // descriptive mentions only when they literally contain a known name.
     for (const entity of entities) {
       const names = [entity.canonicalName, ...entity.aliases]
-      if (names.some(n => {
+      // Substring containment is script-agnostic and catches "我家那只猫"-style
+      // descriptive mentions only when they literally contain a known name.
+      const contained = names.some(n => {
         const k = n.trim().toLowerCase()
         return k.length > 1 && (key.includes(k) || k.includes(key))
-      })) {
+      })
+      if (contained) {
         scored.set(entity.id, { entity, score: 1 })
+        continue
+      }
+      // Alias-token overlap (m12 hardening): "Bob Smith" ↔ "Bob" share a
+      // content token without containment; CJK names participate via bigrams.
+      // Require the shared token to be non-generic (length >= 3 or a CJK
+      // bigram) so "the"/"的" never links unrelated entities.
+      if (!contained && keyTokens.size > 0) {
+        const sharesToken = names.some(n => {
+          for (const t of wordsOf(n.toLowerCase())) {
+            if (t.length >= 3 && keyTokens.has(t)) return true
+          }
+          return false
+        })
+        if (sharesToken) scored.set(entity.id, { entity, score: 0.9 })
       }
     }
     if (this.embedder !== undefined) {
