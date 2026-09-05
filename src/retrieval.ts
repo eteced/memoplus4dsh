@@ -442,12 +442,15 @@ export class Retriever {
     if (missing.length === 0) return
     const vectors = await this.embedder.embed(missing.map(ev => this.eventText(ev)))
     if (vectors === null) return
-    for (const [i, event] of missing.entries()) {
-      const vec = vectors[i]
-      if (vec === undefined) continue
-      this.vectorCache.set(event.id, vec)
-      this.store.setEventEmbedding(event.id, [...vec])
-    }
+    // Bulk persist: one deferred snapshot instead of N/threshold full rewrites.
+    this.store.bulkWrite(() => {
+      for (const [i, event] of missing.entries()) {
+        const vec = vectors[i]
+        if (vec === undefined) continue
+        this.vectorCache.set(event.id, vec)
+        this.store.setEventEmbedding(event.id, [...vec])
+      }
+    })
   }
 
   /** The text an event is embedded and keyword-matched on. */

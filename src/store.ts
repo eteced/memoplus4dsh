@@ -141,6 +141,8 @@ export class MemoryStore {
   /** "session|turn" -> event ids written for that turn (extraction dedup). */
   private eventsBySource = new Map<string, Set<string>>()
   private opsSinceSnapshot = 0
+  /** Inside a bulkWrite block: snapshot compaction is deferred to the end. */
+  private bulkDepth = 0
   /** Number of journal lines skipped as corrupted during load. */
   corruptLineCount = 0
 
@@ -349,14 +351,19 @@ export class MemoryStore {
   /** Rewrite the journal as one upsert per live record (tmp + rename). */
   snapshot(): void {
     const tmp = `${this.filePath}.tmp`
-    const lines: string[] = []
+    // Incremental write: building the whole file as one joined string blows
+    // past V8's max string length (~512MB) around ~45k embedded events
+    // (storage bench 50k: RangeError: Invalid string length).
+    writeFileSync(tmp, '', 'utf8')
+    const write = (record: StoreRecord): void => {
+      appendFileSync(tmp, JSON.stringify(record) + '\n', 'utf8')
+    }
     for (const entity of this.entities.values()) {
-      lines.push(JSON.stringify({ v: 1, op: 'entity.upsert', data: entity } satisfies StoreRecord))
+      write({ v: 1, op: 'entity.upsert', data: entity })
     }
     for (const event of this.events.values()) {
-      lines.push(JSON.stringify({ v: 1, op: 'event.add', data: event } satisfies StoreRecord))
+      write({ v: 1, op: 'event.add', data: event })
     }
-    writeFileSync(tmp, lines.length === 0 ? '' : lines.join('\n') + '\n', 'utf8')
     renameSync(tmp, this.filePath)
     this.opsSinceSnapshot = 0
   }
@@ -484,6 +491,22 @@ export class MemoryStore {
   private append(record: StoreRecord): void {
     appendFileSync(this.filePath, JSON.stringify(record) + '\n', 'utf8')
     this.opsSinceSnapshot++
-    if (this.opsSinceSnapshot >= this.snapshotThreshold) this.snapshot()
+    if (this.opsSinceSnapshot >= this.snapshotThreshold && this.bulkDepth === 0) this.snapshot()
+  }
+
+  /**
+   * Run `fn` with snapshot compaction deferred to one final snapshot.
+   * Bulk embedding persistence writes thousands of journal ops; compacting
+   * every 1000 ops turns it into O(N/1000) full-file rewrites (storage bench:
+   * 20k events never finished in 13min+).
+   */
+  bulkWrite<T>(fn: () => T): T {
+    this.bulkDepth++
+    try {
+      return fn()
+    } finally {
+      this.bulkDepth--
+      if (this.bulkDepth === 0 && this.opsSinceSnapshot >= this.snapshotThreshold) this.snapshot()
+    }
   }
 }

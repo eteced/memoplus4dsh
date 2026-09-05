@@ -217,3 +217,22 @@ describe('journal crash safety', () => {
     expect(reloaded.getEvent(event.id)).toBeDefined()
   })
 })
+
+describe('snapshot at scale', () => {
+  it('rewrites incrementally without giant-string join (V8 string-length guard)', () => {
+    const store = new MemoryStore({ dir })
+    const long = 'x'.repeat(2000)
+    for (let i = 0; i < 2000; i++) {
+      const e = store.createOrResolve(`e${i}`, 'CONCEPT').entity
+      store.addEvent({
+        subjectEntityIds: [e.id], objectEntityIds: [], predicate: 'did',
+        normalizedText: `event ${i} ${long}`, details: '', timeExpr: '',
+        eventTime: null, eventTimePrecision: 'unknown',
+        mentionTime: '2026-09-01T00:00:00.000Z', sourceSession: 's', sourceTurn: i,
+      })
+    }
+    expect(() => store.snapshot()).not.toThrow()
+    const reloaded = new MemoryStore({ dir })
+    expect(reloaded.listEvents().length).toBe(2000)
+  })
+})

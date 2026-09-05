@@ -256,10 +256,26 @@ export class OnnxEmbedder implements TextEmbedder {
     return this.spec.dim
   }
 
+  /** 单次 ONNX 调用的最大文本数（大批量分块执行，防巨型张量与 GC 颠簸）。 */
+  private static readonly BATCH_CHUNK = 512
+
   async embed(texts: string[]): Promise<Float32Array[] | null> {
     if (texts.length === 0) return []
     const init = await this.init()
     if (init === null) return null
+    // 大批量分块：万级文本一次跑会产生 ~8GB 输出张量与 JS 侧数十亿次投影
+    // 运算，全图预热曾因此卡死检索（实测 20k 事件 13min+）。分块后内存
+    // 有界、进度稳定。
+    const out: Float32Array[] = []
+    for (let i = 0; i < texts.length; i += OnnxEmbedder.BATCH_CHUNK) {
+      const part = await this.embedChunk(init, texts.slice(i, i + OnnxEmbedder.BATCH_CHUNK))
+      if (part === null) return null
+      out.push(...part)
+    }
+    return out
+  }
+
+  private async embedChunk(init: EmbedderInit, texts: string[]): Promise<Float32Array[] | null> {
     const { session, tokenizer, ort } = init
     try {
       const batch = texts.map(t => tokenizer.encode(t))
