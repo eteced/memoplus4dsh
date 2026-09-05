@@ -370,7 +370,7 @@ export class Retriever {
     // Candidate pool: entity events + dense (or keyword-fallback) top slice,
     // then one-hop graph expansion through entities shared with the top hits.
     const all = this.store.listEvents()
-    const queryVec = await this.embedQuery(query)
+    const queryVec = await this.embedQueryText(query)
     const denseTop = await this.topSlice(all, queryVec, expanded, topK * 2)
     const candidateMap = new Map<string, MemoryEvent>()
     for (const entity of mentionedEntities) {
@@ -412,8 +412,11 @@ export class Retriever {
   }
 
   /** Embed one query text, or null when the embedder is unavailable. */
-  private async embedQuery(query: string): Promise<Float32Array | null> {
-    const result = await this.embedder.embed([query])
+  private async embedQueryText(query: string): Promise<Float32Array | null> {
+    // 查询侧优先走指令式 embedQuery（harrier）；无此前端的后端走普通 embed。
+    const result = this.embedder.embedQuery !== undefined
+      ? await this.embedder.embedQuery([query])
+      : await this.embedder.embed([query])
     return result?.[0] ?? null
   }
 

@@ -74,6 +74,11 @@ export type EmbeddingModelName = keyof typeof EMBEDDING_MODELS
 export interface TextEmbedder {
   embed(texts: string[]): Promise<Float32Array[] | null>
   /**
+   * Optional query-side embed (e.g. harrier 的指令式查询向量——其训练要求查询
+   * 带任务指令、文档不带；不支持的后端退化为 embed）。
+   */
+  embedQuery?(texts: string[]): Promise<Float32Array[] | null>
+  /**
    * Vector dimension when known; retrieval uses it to detect stale vectors
    * persisted by a different model and recompute them.
    */

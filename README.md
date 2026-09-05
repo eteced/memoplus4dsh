@@ -68,6 +68,8 @@ Set under the plugin's `config:` in the profile's `cordis.patch.yml`:
 | `stateDedup` | `true` | Retrieval keeps only the newest bridge state event per entity+family; history stays in the graph |
 | `embedding` | `true` | Local ONNX embeddings; failure degrades to keyword-only retrieval |
 | `embeddingModel` | `multilingual` | `multilingual` = distiluse-base-multilingual-cased-v2 (512-dim, ~135MB first-download, 50+ languages incl. Chinese); `english` = all-MiniLM-L6-v2 (384-dim, ~23MB). Switching re-embeds stored vectors lazily |
+| `embeddingBackend` | `auto` | `auto` = harrier sidecar (microsoft/harrier-oss-v1-0.6b, 1024-dim, multilingual, ~10ms/text CPU) when its python env has `sentence-transformers`, else ONNX encoder; `onnx` / `harrier` to force. Query-side uses the model's trained instruction prompt |
+| `embedPython` | (nerPython or python3) | Python executable for the harrier embedding sidecar |
 | `hfBaseUrl` | `https://huggingface.co` | Mirror base URL for the embedding model download |
 | `queryExpansion` | `true` | LLM query expansion during retrieval + verbatim-quote query distillation for injection (1024-token/30s bounded calls, results cached on disk per query) |
 | `entityMergeLlm` | `true` | LLM-adjudicated entity merge at extraction (embedding candidates + one bounded call per turn; only explicit `sure` merges) |

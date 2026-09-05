@@ -15,6 +15,7 @@ import type { ExtractionJob } from './extraction.js'
 import { LlmEntityMerger } from './entity-merge.js'
 import { LlmSupersedeResolver } from './supersede.js'
 import { createNerDetector, NULL_NER } from './ner.js'
+import { FallbackEmbedder, HarrierEmbedder } from './embed-sidecar.js'
 import { registerBridges } from './bridges.js'
 import { OnnxEmbedder, NULL_EMBEDDER, EMBEDDING_MODELS } from './embedding.js'
 import type { TextEmbedder } from './embedding.js'
@@ -56,6 +57,13 @@ export interface Config {
   stateDedup?: boolean
   /** Local ONNX embeddings; default true. Failure degrades to keyword-only retrieval. */
   embedding?: boolean
+  /**
+   * Embedding backend: 'auto' (default; harrier sidecar if its python env has
+   * sentence-transformers, else ONNX) | 'onnx' | 'harrier'.
+   */
+  embeddingBackend?: 'auto' | 'onnx' | 'harrier'
+  /** Python executable for the harrier embedding sidecar (default: nerPython, else python3). */
+  embedPython?: string
   /**
    * Embedding model preset: 'multilingual' (default, distiluse-base-multilingual-cased-v2,
    * 512-dim, ~135MB download, 50+ languages incl. Chinese) or 'english'
@@ -227,19 +235,34 @@ export function apply(ctx: Context, config: Config) {
       text: 'You have a unified long-term memory (memoplus4dsh). ' +
         'Relevant memories may appear as plugin messages; use them naturally. ' +
         'Use the memory_search tool to actively recall past facts when the user asks about them. ' +
+        'When a question depends on a chain of facts (e.g. "the country of the spouse of the author of X"), ' +
+        'DO NOT answer from your own knowledge or from the first plausible memory: ' +
+        'decompose the question and call memory_search once per hop — ' +
+        'each result includes related facts marked "via <entity>", follow those entities to the next hop ' +
+        'until the chain is complete. ' +
+        'When facts conflict, prefer the one marked as current over ones marked "[superseded]". ' +
         'When the user asks you to remember something, you MUST call the memory_remember tool with the fact as one self-contained sentence.',
     })
 
     // Progress bridge: goal/todo/schedule/plan events -> memory events (m8 P0-A).
     const bridges = config.progressBridge === false ? [] : registerBridges(ctx, store)
 
+    // Embedding backend (m14): harrier sidecar（多语言 decoder，1024 维，
+    // 查询侧用其训练指令）优先，ONNX 编码器兜底；任一不可用自动降级。
+    const onnxEmbedder: TextEmbedder = new OnnxEmbedder({
+      modelsDir: join(dataDir, 'models'),
+      hfBaseUrl: config.hfBaseUrl,
+      model: EMBEDDING_MODELS[config.embeddingModel ?? 'multilingual'],
+    })
+    const backend = config.embeddingBackend ?? 'auto'
     const embedder: TextEmbedder = config.embedding === false
       ? NULL_EMBEDDER
-      : new OnnxEmbedder({
-        modelsDir: join(dataDir, 'models'),
-        hfBaseUrl: config.hfBaseUrl,
-        model: EMBEDDING_MODELS[config.embeddingModel ?? 'multilingual'],
-      })
+      : backend === 'onnx'
+        ? onnxEmbedder
+        : new FallbackEmbedder(
+          new HarrierEmbedder({ python: config.embedPython ?? config.nerPython }),
+          onnxEmbedder,
+        )
 
     // Query-side LLM helpers (m11 v3): keyword expansion (proven prompt) for
     // retrieval; verbatim-quote distillation for injection — used only when

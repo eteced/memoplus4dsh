@@ -310,9 +310,9 @@ top-k 事件渲染为紧凑列表（`- [时间] 事实 (细节)`），以 plugin
 
 ## 6. 工程实现
 
-### 6.1 嵌入栈：一个反直觉的选型
+### 6.1 嵌入栈：双后端（harrier 优先，ONNX 兜底）
 
-稠密通道用**本地 ONNX 嵌入**（onnxruntime-node，全平台预编译二进制），默认模型 **distiluse-base-multilingual-cased-v2**（512 维，50+ 语言含中文，int8 约 135MB，首次使用自动下载）。选型过程值得记录，因为它说明"最强"不等于"最合适"：
+稠密通道支持两种后端（m14）：**harrier sidecar 优先**——microsoft/harrier-oss-v1-0.6b（多语言 decoder-only 嵌入，1024 维，MTEB v2 69.0，CPU ~10ms/句；查询侧用其训练要求的指令式 prompt，模型卡实测不带指令会掉点）；**ONNX 编码器兜底**（onnxruntime-node，全平台预编译二进制；distiluse-base-multilingual-cased-v2，512 维，int8 约 135MB，首次使用自动下载）。后端自动选择：python 环境有 `sentence-transformers` 即启用 harrier，否则静默回退 ONNX；维度变化触发旧向量惰性重算（嵌入接口保持可注入，任何失败降级纯关键词检索）。ONNX 选型过程值得记录，因为它说明"最强"不等于"最合适"：
 
 - 同档位**更强**的 multilingual MiniLM（paraphrase-multilingual-MiniLM-L12-v2）使用 SentencePiece 分词；我们的极简栈只有一个 ~70 行的 WordPiece 分词器（直接消费 BERT 风格的 `vocab.txt`），引入 SentencePiece 意味着原生绑定或大规模 JS 依赖——违背跨平台与轻量准则；
 - distiluse 是同档位唯一保留 **mBERT WordPiece 词表**的多语言模型，分词器可直接服务；
