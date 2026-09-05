@@ -98,7 +98,11 @@ if __name__ == '__main__':
 
     verbose = True
     metric_model=os.environ.get("JUDGE_MODEL", "deepseek-v4-flash")
-    metric_client = OpenAI(base_url=os.environ.get("JUDGE_BASE_URL", "https://api.deepseek.com/v1"), api_key=os.environ["DEEPSEEK_API_KEY"])
+    # OpenCode Go 要求会话头（其邮件通知：09/06 起缺失可能报错）——
+    # 一个稳定 ID 贯穿一次评测即可；对 DeepSeek 官方端点无害。
+    judge_base = os.environ.get("JUDGE_BASE_URL", "https://api.deepseek.com/v1")
+    judge_headers = {"x-opencode-session": "memoplus4dsh-judge"} if "opencode" in judge_base else None
+    metric_client = OpenAI(base_url=judge_base, api_key=os.environ["DEEPSEEK_API_KEY"], default_headers=judge_headers)
     hyp_folder = f'./outputs/{args.evaluated_method}/Accurate_Retrieval'
     
     # make the output dir
