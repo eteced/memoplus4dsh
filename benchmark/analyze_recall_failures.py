@@ -169,8 +169,8 @@ def main():
             sorted(glob.glob(os.path.join(RESULTS, "Accurate_Retrieval", "*.json"))):
         if name_filter and name_filter not in os.path.basename(path):
             continue
-        if not name_filter and "mini-s" in os.path.basename(path):
-            continue  # 默认只分析全量结果
+        if not name_filter and "_None_" not in os.path.basename(path):
+            continue  # 默认只分析全量结果（tag=None）；mini/轮次结果用过滤参数指定
         data = json.load(open(path))
         sub = data["dataset_config"]["sub_dataset"]
         is_lme = data["dataset_config"]["dataset"] == "Accurate_Retrieval"

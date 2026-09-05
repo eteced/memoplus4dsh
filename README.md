@@ -62,13 +62,16 @@ Set under the plugin's `config:` in the profile's `cordis.patch.yml`:
 | `injection` | `true` | Inject top-k relevant memories at the first step of each turn |
 | `injectTopK` | `8` | Max memories injected per turn |
 | `injectMaxChars` | `2000` | Character cap for the injected memory block |
+| `injectMaxQueryChars` | `4000` | Skip retrieval+injection for longer user messages (document dumps, not queries) |
 | `tools` | `true` | Register `memory_search` / `memory_remember` / `memory_visualize` tools |
 | `progressBridge` | `true` | Bridge goal/todo/schedule/plan progress events into the memory graph (M8) |
 | `stateDedup` | `true` | Retrieval keeps only the newest bridge state event per entity+family; history stays in the graph |
 | `embedding` | `true` | Local ONNX embeddings; failure degrades to keyword-only retrieval |
 | `embeddingModel` | `multilingual` | `multilingual` = distiluse-base-multilingual-cased-v2 (512-dim, ~135MB first-download, 50+ languages incl. Chinese); `english` = all-MiniLM-L6-v2 (384-dim, ~23MB). Switching re-embeds stored vectors lazily |
 | `hfBaseUrl` | `https://huggingface.co` | Mirror base URL for the embedding model download |
-| `queryExpansion` | `true` | LLM query expansion during retrieval (1 sample, 1024-token/30s bounded call, results cached on disk per query) |
+| `queryExpansion` | `true` | LLM query expansion during retrieval + verbatim-quote query distillation for injection (1024-token/30s bounded calls, results cached on disk per query) |
+| `entityMergeLlm` | `true` | LLM-adjudicated entity merge at extraction (embedding candidates + one bounded call per turn; only explicit `sure` merges) |
+| `supersedeLlm` | `true` | LLM-adjudicated supersede detection (relation cardinality; older values marked `supersededBy`, history kept; re-mention guard + mark propagation) |
 | `dataDir` | `<dsh-home>/memoplus4dsh` | Plugin data directory (journal, snapshots, model cache, expansion cache) |
 | `extractionProvider` / `extractionModel` | session's own route | Override the model route used for extraction/expansion calls |
 | `extractionMaxTokens` | `8192` | Output cap for extraction calls (reasoning models need the headroom) |
