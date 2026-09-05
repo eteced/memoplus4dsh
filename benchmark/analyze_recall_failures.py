@@ -176,12 +176,30 @@ def main():
         is_lme = data["dataset_config"]["dataset"] == "Accurate_Retrieval"
         judged = None
         if is_lme:
-            jf = glob.glob(os.path.join(RESULTS, "judge-run2", "*", ".eval-results-*"))
-            judged = [json.loads(l) for l in open(jf[0]) if l.strip()]
-            assert len(judged) == len(data["data"]), "judge 与结果条目数不一致"
+            # judge 文件按结果文件名 tag 匹配：run-2 在 results/judge-run2，
+            # mini 轮次在 outputs/longmemeval_s*/（judge_lme.py 的 --hyp_file 子集模式产物）
+            name_tag = os.path.basename(path).replace("_results.json", "")
+            candidates = (
+                glob.glob(os.path.join(RESULTS, "judge-run2", "*", f".eval-results-*{name_tag}*"))
+                + glob.glob(os.path.join(HERE, "outputs", "longmemeval_s*", f".eval-results-*{name_tag}*"))
+            )
+            # run-2 全量的老命名（无 tag 匹配时回退唯一文件且仅当数量一致）
+            if not candidates:
+                fallback = glob.glob(os.path.join(RESULTS, "judge-run2", "*", ".eval-results-*"))
+                candidates = [f for f in fallback
+                              if len([l for l in open(f) if l.strip()]) == len(data["data"])]
+            if not candidates:
+                print(f"[warn] {sub}: 无匹配 judge 文件，跳过 LME 判分（failed 记 None）")
+                judged = None
+            else:
+                judged = [json.loads(l) for l in open(candidates[0]) if l.strip()]
+                if len(judged) != len(data["data"]):
+                    print(f"[warn] {sub}: judge 数 {len(judged)} != 结果数 {len(data['data'])}，跳过")
+                    judged = None
         for i, entry in enumerate(data["data"]):
             answers = entry["answer"] if isinstance(entry["answer"], list) else [entry["answer"]]
-            failed = (not judged[i]["autoeval_label"]["label"]) if is_lme else (not entry["exact_match"])
+            failed = (not judged[i]["autoeval_label"]["label"]) if (is_lme and judged is not None) else \
+                (None if is_lme else (not entry["exact_match"]))
             checkable = [a for a in answers if verifiable(a)]
             case = {
                 "config": sub, "query_id": entry.get("query_id"),

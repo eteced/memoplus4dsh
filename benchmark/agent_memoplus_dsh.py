@@ -180,7 +180,7 @@ class MemoplusDshAgent:
         session = f"bench-ingest-{self.context_tag}-{batch_no}"
         self.driver.call("ingest", session=session, text=text)
 
-    def wait_queue_drain(self, timeout=1800, poll=3.0):
+    def wait_queue_drain(self, timeout=7200, poll=3.0):
         """Wait until the durable extraction queue has no unsettled jobs."""
         pending_file = os.path.join(self.plugin_data, "extraction-pending.jsonl")
         deadline = time.time() + timeout
