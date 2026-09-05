@@ -33,13 +33,28 @@
 
 **结论**：暴力余弦 O(N) 在当前规模（万级事件）完全够用；SQLite 不解决向量暴力扫描（向量仍要全量加载算余弦），真正的扩展路径是 **hnsw ANN 索引 + 按需加载**。**迁移触发点**：单用户 5 万事件以上、或冷启动 >2s 时再做；`MemoryStore` 已是接口隔离，届时可整体换实现。
 
+**伸缩实测（2026-09-05 修复后）**：
+
+| 事件数 | 写入 | 冷启动 | 首次查询（预热） | 稳态查询 | 文件 |
+|---|---|---|---|---|---|
+| 5k | 47ms | 11ms | 33s | 101ms | 56MB |
+| 20k | 362ms | 41ms | 105s | 359ms | 224MB |
+| 50k | 3.4s | 107ms | 251s | 862ms | 559MB |
+
+实测顺带抓到并修复了三个**生产级 bug**（已提交）：
+1. 全图预热时单个巨型 ONNX 批次 + 纯 JS 768→512 投影（20k 事件 13min+ 跑不完——用户实测"跑一天"的根源）→ 嵌入分块 512/批；
+2. 每 1000 条日志触发一次全文件快照重写（批量持久化时 O(N/1000) 次全量重写）→ `bulkWrite` 延迟快照；
+3. `snapshot()` 把全文件拼成单字符串，~45k 事件触发 V8 字符串上限 RangeError → 增量写。
+
+剩余的真实扩展痛点（不是 SQLite 能解决的）：(a) 预热计算应在后台进行而非堵在 pre-step；(b) 文件体积由 JSON 浮点向量主导（559MB/50k），紧凑路径是**二进制向量 sidecar 文件**（560MB→~120MB）；(c) 10 万事件以上查询需要 hnsw ANN。维持 JSONL 主存储 + 上述触发点不变。
+
 ## 3. 实体合并的稳定性（文献对照 + 我们的加固）
 
 文献共识（[Less is More (arXiv:2510.14271)](https://arxiv.org/html/2510.14271v1)、[Graphlet AI](https://blog.graphlet.ai/the-rise-of-semantic-entity-resolution-45c48d5eb00a/)）：**blocking（粗召回）+ matcher（精判决）**两阶段是标准做法，与我们一致。我们的现状：嵌入/包含 blocking + LLM matcher（sure 门槛 + 候选带上下文事实）。进一步加固项：
 
-1. **blocking 多信号并集**：当前是"嵌入 OR 包含"，加"别名 token 重叠"（如 "Bob Smith" 与 "Bob" 共享 token）——候选更全；
-2. **裁决输出带一行理由**（≤20 词，token 极少）：迫使模型核对上下文事实而非凭名字猜——配合 sure 门槛进一步压错并；
-3. **合并可逆**：`memory_forget`/管理侧将来加 `separate_entities`（当前合并只进不出是已知残留，列入 backlog）。
+1. **blocking 多信号并集**（✅ 已实施）：嵌入 OR 包含 OR **别名 token 重叠**（"Bob Smith" 与 "Bob" 共享 token；≥3 字符的 token 才算数，中文双字 bigram 不参与——姓氏级误链风险被排除）；
+2. **裁决带一行理由**（✅ 已实施）：输出格式 `<N>: <M>: <sure|unsure>: <理由≤15词>`，理由必须引用上下文证据；理由随 onLog 落审计日志；
+3. **合并可逆**：`separate_entities` 仍列入 backlog（合并只进不出是已知残留）。
 
 ### 实测记录（2026-09-05，lmo3/gliner2-multi-v1-onnx）
 
