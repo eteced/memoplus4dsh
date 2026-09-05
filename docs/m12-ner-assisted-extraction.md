@@ -11,7 +11,8 @@
 
 ### 方案：GLiNER2 多语言版做候选生成器
 
-- **模型**：`lmo3/gliner2-multi-v1-onnx`（GLiNER2 Multilingual 的 ONNX 导出，零样本、自定义标签、中英皆可；[GLiNER2](https://github.com/fastino-ai/GLiNER2) ·[@lmoe/gliner-onnx](https://www.npmjs.com/package/@lmoe/gliner-onnx)，纯 JS/onnxruntime，无 PyTorch）。
+- **模型（最终形态，双引擎 sidecar）**：调研实测发现单一模型都不够——ONNX 导出的 GLiNER2-multi 质量降级（[GLiNER#270](https://github.com/urchade/GLiNER/issues/270) 佐证）、PyTorch 原版 GLiNER multi 中文 span 仍过并、stanza zh-hans 中文 span 正规但只有 PER/ORG/GPE 类。最终方案：`scripts/ner-sidecar/ner_sidecar.py`（stdio JSON-lines）同时挂 **GLiNER multi（PyTorch 原版，object/concept 强）+ stanza zh/en（CJK span 正规）**，按文本自动选 stanza 语种，两引擎结果按 span 取高分合并。回退链：sidecar → ONNX 包（@lmoe/gliner-onnx，optionalDependency）→ 关闭。
+- **成本**：torch CPU + gliner + stanza 共 ~1GB 依赖 + 209M 模型；每句 ~50-75ms CPU；零 API token。sidecar 不可用（用户没装 python 栈）时自动降级为无提示，功能不损。
 - **分工**：NER 小模型负责**召回**（宁可多报）；LLM 负责**核实、规范化、消解、关联**（它出错在漏，不在滥）。这正符合两者的能力画像——[UBIAI 的对比](https://ubiai.tools/comparing-gliner-with-llm-zero-shot-labeling-for-named-entity-recognition/)也显示小模型召回中等但 LLM 精度高。
 - **标签集**：与图的三类实体对齐——`person, object, concept`（GLiNER 零样本靠自然语言标签，无需训练）。
 - **接入点**：抽取 prompt 加候选区（"A fast detector spotted these candidate mentions (may include noise): …"），规则：以此为先核对清单，逐条验证并采用/丢弃，文本里遗漏的实体仍可补充。
@@ -40,9 +41,10 @@
 
 ### 实测记录（2026-09-05，lmo3/gliner2-multi-v1-onnx）
 
-- 英文：良好（"Alice moved to Shanghai and adopted a cat named Snowball" → Alice:person:1.00, Snowball:object:0.86, cat:object:0.81，49ms/句）。
-- **中文：不达标**——"我上周三去看了牙医，我家猫雪球把花瓶打碎了。"返回空或错误 span（整句误判为"地点"）；中英文标签、降阈值均无效。GLiNER2-multi 的 CJK span 切分不可用。
-- 因此：**nerAssist 对拉丁文字有效，对中文无效但不产生副作用**（无候选提示=现状行为；prompt 明示"候选可能有噪声"，LLM 会丢弃错误 span）。已知残留：中文需要更好的多语言 NER（WikiANN/mBERT 系无现成 ONNX；GLiNER2.5 multilingual 尚无 ONNX 运行时支持），列入 backlog。
+- GLiNER2-multi ONNX（第一版）：英文良好（49ms/句），中文不达标（空/整句错标）。
+- GLiNER multi PyTorch 原版：中文 span 仍过并（整句判为 person）。
+- stanza zh-hans：中文 span 正规（上海→GPE、Alice→PERSON，12-20ms/句）但无 object/concept 覆盖。
+- **双引擎合并后**：英文句 Alice+cat+Snowball+Shanghai 全中（stanza 的 Snowball 0.9 反超 gliner 0.81）；中文句补齐 上海/杭州 等地点。已知残留：中文口语里的昵称/物体（雪球/花瓶）span 仍弱——靠 LLM 核实层兜底（候选只是提示，LLM 可补充）。
 
 ## 4. 验证计划
 
