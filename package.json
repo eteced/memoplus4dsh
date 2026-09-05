@@ -41,5 +41,8 @@
   },
   "optionalDependencies": {
     "onnxruntime-node": "^1.29.0"
+  },
+  "dependencies": {
+    "@lmoe/gliner-onnx": "^0.2.0"
   }
 }

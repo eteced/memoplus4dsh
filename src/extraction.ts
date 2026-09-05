@@ -13,6 +13,8 @@ import { ENTITY_TYPES } from './store.js'
 import { extractTimeExpr, resolveTimeExpr } from './temporal.js'
 import type { LlmEntityMerger, MergeMention } from './entity-merge.js'
 import type { LlmSupersedeResolver } from './supersede.js'
+import type { NerDetector } from './ner.js'
+import { NULL_NER } from './ner.js'
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 
 /**
@@ -43,6 +45,9 @@ PERSON|Alice|_|asked|weekend plans|_|Alice asked about the weekend plans.|_|spee
 
 Known names so far, with their established types in parentheses (reuse both name and type; add nicknames as aliases):
 {known_entities}
+
+Candidate mentions spotted by a fast detector (may include noise — verify each against the text, adopt or drop it; you may also add entities it missed):
+{candidate_mentions}
 
 Rules:
 - Use _ for empty fields. No headers, no example rows in output.
@@ -310,6 +315,8 @@ export interface ExtractionPipelineOptions {
   entityMerger?: LlmEntityMerger
   /** Optional LLM supersede detection for same-(subject, predicate) updates (m11 P1-B). */
   supersedeResolver?: LlmSupersedeResolver
+  /** Optional NER candidate detector (m12): candidate mentions join the prompt as a checklist. */
+  ner?: NerDetector
 }
 
 /**
@@ -321,12 +328,14 @@ export class ExtractionPipeline {
   private readonly callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
   private readonly entityMerger?: LlmEntityMerger
   private readonly supersedeResolver?: LlmSupersedeResolver
+  private readonly ner: NerDetector
 
   constructor(options: ExtractionPipelineOptions) {
     this.store = options.store
     this.callLlm = options.callLlm
     this.entityMerger = options.entityMerger
     this.supersedeResolver = options.supersedeResolver
+    this.ner = options.ner ?? NULL_NER
   }
 
   /** Extract one turn into the store. Throws when the LLM yields no usable text. */
@@ -339,10 +348,16 @@ export class ExtractionPipeline {
     const rows: ExtractedRow[] = []
     for (const segment of segmentTurnText(turnText)) {
       const known = formatKnownEntities(this.store.listEntities(), segment)
+      // m12: NER 候选区（检测器不可用 → 无候选，与旧行为一致）
+      const mentions = await this.ner.detect(segment)
+      const candidateMentions = mentions === null || mentions.length === 0
+        ? '(none)'
+        : mentions.map(m => `${m.text} (${m.type})`).join(', ')
       // Replacement-function form: turn text may contain $-patterns.
       const prompt = EXTRACTION_PROMPT_TURN
         .replace('{turn_text}', () => segment)
         .replace('{known_entities}', () => known)
+        .replace('{candidate_mentions}', () => candidateMentions)
       const raw = (await this.callLlm(prompt, job)).trim()
       if (raw.length === 0) throw new Error('extraction produced empty content')
       const parsed = parseExtractionOutput(raw)

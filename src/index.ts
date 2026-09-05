@@ -14,6 +14,7 @@ import { ExtractionPipeline, ExtractionQueue, PendingJobLog } from './extraction
 import type { ExtractionJob } from './extraction.js'
 import { LlmEntityMerger } from './entity-merge.js'
 import { LlmSupersedeResolver } from './supersede.js'
+import { GlinerNer, NULL_NER } from './ner.js'
 import { registerBridges } from './bridges.js'
 import { OnnxEmbedder, NULL_EMBEDDER, EMBEDDING_MODELS } from './embedding.js'
 import type { TextEmbedder } from './embedding.js'
@@ -78,6 +79,12 @@ export interface Config {
    * discounts it in present-tense modes). Default true.
    */
   supersedeLlm?: boolean
+  /**
+   * NER-assisted extraction (m12): a small zero-shot GLiNER2-multilingual
+   * model spots candidate mentions per turn; the extraction LLM verifies and
+   * relates them. Default true; any failure degrades to no hints.
+   */
+  nerAssist?: boolean
   /** Character cap for the injected memory block. */
   injectMaxChars?: number
   /**
@@ -274,6 +281,7 @@ export function apply(ctx: Context, config: Config) {
       const pipeline = new ExtractionPipeline({
         store,
         callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, config.extractionMaxTokens ?? 8192),
+        ner: config.nerAssist === false ? NULL_NER : new GlinerNer(),
         entityMerger: config.entityMergeLlm === false
           ? undefined
           : new LlmEntityMerger({
