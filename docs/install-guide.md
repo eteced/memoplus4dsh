@@ -33,6 +33,8 @@ scripts/install.sh --profile sdk      # 装进别的 profile
 
 - `extraction: 'off'` 关闭自动抽取（省 API 额度）；
 - `embedding: false` 关掉本地 embedding（纯关键词检索）；
+- `nerAssist: false` 关掉 NER 候选提示（默认开；检测器回退链：PyTorch sidecar → ONNX 包 → 无提示）；
+- `nerPython: '/path/to/python'` 指定 NER sidecar 的 python（需要该环境里有 `torch gliner stanza`；sidecar 会按需自动下载 GLiNER/stanza 模型。装法：`pip install torch --index-url https://download.pytorch.org/whl/cpu && pip install gliner stanza`——可选增强，不装则自动降级，不影响功能）；
 - `hfBaseUrl: 'https://hf-mirror.com'` 网络受限时的模型下载镜像；
 - 完整配置表见 [README](../README.md#configuration)。
 

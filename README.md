@@ -72,6 +72,8 @@ Set under the plugin's `config:` in the profile's `cordis.patch.yml`:
 | `queryExpansion` | `true` | LLM query expansion during retrieval + verbatim-quote query distillation for injection (1024-token/30s bounded calls, results cached on disk per query) |
 | `entityMergeLlm` | `true` | LLM-adjudicated entity merge at extraction (embedding candidates + one bounded call per turn; only explicit `sure` merges) |
 | `supersedeLlm` | `true` | LLM-adjudicated supersede detection (relation cardinality; older values marked `supersededBy`, history kept; re-mention guard + mark propagation) |
+| `nerAssist` | `true` | NER candidate hints for extraction (detector chain: PyTorch sidecar → ONNX package → off) |
+| `nerPython` | `python3` | Python executable for the NER sidecar (needs `torch gliner stanza` in that env; models auto-download on first use) |
 | `dataDir` | `<dsh-home>/memoplus4dsh` | Plugin data directory (journal, snapshots, model cache, expansion cache) |
 | `extractionProvider` / `extractionModel` | session's own route | Override the model route used for extraction/expansion calls |
 | `extractionMaxTokens` | `8192` | Output cap for extraction calls (reasoning models need the headroom) |
