@@ -38,6 +38,12 @@
 2. **裁决输出带一行理由**（≤20 词，token 极少）：迫使模型核对上下文事实而非凭名字猜——配合 sure 门槛进一步压错并；
 3. **合并可逆**：`memory_forget`/管理侧将来加 `separate_entities`（当前合并只进不出是已知残留，列入 backlog）。
 
+### 实测记录（2026-09-05，lmo3/gliner2-multi-v1-onnx）
+
+- 英文：良好（"Alice moved to Shanghai and adopted a cat named Snowball" → Alice:person:1.00, Snowball:object:0.86, cat:object:0.81，49ms/句）。
+- **中文：不达标**——"我上周三去看了牙医，我家猫雪球把花瓶打碎了。"返回空或错误 span（整句误判为"地点"）；中英文标签、降阈值均无效。GLiNER2-multi 的 CJK span 切分不可用。
+- 因此：**nerAssist 对拉丁文字有效，对中文无效但不产生副作用**（无候选提示=现状行为；prompt 明示"候选可能有噪声"，LLM 会丢弃错误 span）。已知残留：中文需要更好的多语言 NER（WikiANN/mBERT 系无现成 ONNX；GLiNER2.5 multilingual 尚无 ONNX 运行时支持），列入 backlog。
+
 ## 4. 验证计划
 
 - 单测：ner.ts 降级路径 + prompt 候选区构造（mock GLiNER 输出）。
