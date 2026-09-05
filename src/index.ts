@@ -14,7 +14,7 @@ import { ExtractionPipeline, ExtractionQueue, PendingJobLog } from './extraction
 import type { ExtractionJob } from './extraction.js'
 import { LlmEntityMerger } from './entity-merge.js'
 import { LlmSupersedeResolver } from './supersede.js'
-import { GlinerNer, NULL_NER } from './ner.js'
+import { createNerDetector, NULL_NER } from './ner.js'
 import { registerBridges } from './bridges.js'
 import { OnnxEmbedder, NULL_EMBEDDER, EMBEDDING_MODELS } from './embedding.js'
 import type { TextEmbedder } from './embedding.js'
@@ -80,11 +80,14 @@ export interface Config {
    */
   supersedeLlm?: boolean
   /**
-   * NER-assisted extraction (m12): a small zero-shot GLiNER2-multilingual
-   * model spots candidate mentions per turn; the extraction LLM verifies and
-   * relates them. Default true; any failure degrades to no hints.
+   * NER-assisted extraction (m12): detector spots candidate mentions per
+   * turn; the extraction LLM verifies and relates them. Default true.
+   * Detector order: PyTorch sidecar (gliner+stanza, best) → ONNX package →
+   * off; any failure degrades to no hints.
    */
   nerAssist?: boolean
+  /** Python executable for the NER sidecar (default python3). */
+  nerPython?: string
   /** Character cap for the injected memory block. */
   injectMaxChars?: number
   /**
@@ -281,7 +284,7 @@ export function apply(ctx: Context, config: Config) {
       const pipeline = new ExtractionPipeline({
         store,
         callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, config.extractionMaxTokens ?? 8192),
-        ner: config.nerAssist === false ? NULL_NER : new GlinerNer(),
+        ner: config.nerAssist === false ? NULL_NER : createNerDetector({ python: config.nerPython }),
         entityMerger: config.entityMergeLlm === false
           ? undefined
           : new LlmEntityMerger({

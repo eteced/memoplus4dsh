@@ -55,10 +55,25 @@ interface GlinerModule {
   }
 }
 
+import { PySidecarNer } from './ner-sidecar.js'
+
 /**
- * Lazily-loaded GLiNER2-multilingual detector. Construction never touches the
- * network; the first `detect` loads the model (HuggingFace cache).
+ * Detector selection: PyTorch sidecar (GLiNER+stanza 双引擎，质量最好) →
+ * ONNX 包（轻量但多语言质量弱）→ 关闭。两侧都不可用时静默降级为无提示
+ * （与无 nerAssist 的历史行为一致）。
  */
+export function createNerDetector(options: { python?: string; model?: string } = {}): NerDetector {
+  const sidecar = new PySidecarNer(options)
+  const onnx = new GlinerNer()
+  return {
+    detect: async text => {
+      const viaSidecar = await sidecar.detect(text)
+      if (viaSidecar !== null) return viaSidecar
+      return onnx.detect(text)
+    },
+  }
+}
+
 export class GlinerNer implements NerDetector {
   private initPromise: Promise<GlinerRuntime | null> | undefined
 

@@ -40,9 +40,7 @@
     "vitest": "^3.0.0"
   },
   "optionalDependencies": {
-    "onnxruntime-node": "^1.29.0"
-  },
-  "dependencies": {
+    "onnxruntime-node": "^1.29.0",
     "@lmoe/gliner-onnx": "^0.2.0"
   }
 }
