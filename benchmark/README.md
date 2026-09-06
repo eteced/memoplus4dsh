@@ -54,3 +54,8 @@ DEEPSEEK_API_KEY=... DEEPSEEK_BASE_URL=https://api.deepseek.com/v1 \
 - `replay_retrieval.mjs` — 离线复现任意查询在指定记忆图上的检索排序
   （`node replay_retrieval.mjs --dir dsh-home/memoplus4dsh --query "..." --answer "..."`）。
 - 分析方法与 run-2 结论：[../docs/m11-case-analysis.md](../docs/m11-case-analysis.md)。
+
+## 评测调度约束（用户规则，必须遵守）
+
+**北京时间 09:00–18:00 不跑任何评测任务**（DeepSeek 高峰时段）；任务只能在北京时间
+**18:00–次日 09:00** 启动，**周末全天不限**。跑任何脚本前先确认本地时间在窗口内。
