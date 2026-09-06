@@ -38,6 +38,12 @@ export interface Config {
   extractionModel?: string
   /** Retries after the first extraction attempt before a turn is skipped. */
   extractionMaxRetries?: number
+  /**
+   * Extraction worker pool size (default 1 = strict serial). >1 overlaps
+   * extraction LLM calls — the main lever against write-heavy ingest wall
+   * clock. Raise only when the endpoint tolerates it.
+   */
+  extractionConcurrency?: number
   /** Output token cap for extraction calls (reasoning models need a large budget). */
   extractionMaxTokens?: number
   /** Per-call timeout for extraction/expansion calls (default 120s). */
@@ -333,6 +339,7 @@ export function apply(ctx: Context, config: Config) {
         debugLog({ kind: 'extracted', session: job.sessionId, turn: job.turn, ...result })
       }), {
         maxRetries: config.extractionMaxRetries,
+        concurrency: config.extractionConcurrency,
         onAttemptFailed: (job, attempt, error) => debugLog({
           kind: 'attempt-failed', session: job.sessionId, turn: job.turn, attempt,
           error: error instanceof Error ? error.message : String(error),

@@ -483,3 +483,45 @@ describe('retro-link orphan remembered events (m14)', () => {
     expect(subj.canonicalName).toBe('Malaysia')
   })
 })
+
+describe('ExtractionQueue concurrency', () => {
+  const j = (turn: number): ExtractionJob => ({
+    sessionId: 's1', turn, turnText: 'User: x', mentionTime: '2026-09-01T00:00:00.000Z',
+  })
+
+  it('concurrency=1 processes strictly serially', async () => {
+    const order: number[] = []
+    const q = new ExtractionQueue(async job => {
+      order.push(job.turn)
+      await new Promise(r => setTimeout(r, 5))
+    }, { concurrency: 1 })
+    for (const t of [1, 2, 3]) q.enqueue(j(t))
+    await q.whenIdle()
+    expect(order).toEqual([1, 2, 3])
+  })
+
+  it('concurrency=3 overlaps jobs and drains faster; dedupe and skip preserved', async () => {
+    let active = 0
+    let maxActive = 0
+    const q = new ExtractionQueue(async job => {
+      active++
+      maxActive = Math.max(maxActive, active)
+      await new Promise(r => setTimeout(r, 20))
+      active--
+    }, { concurrency: 3 })
+    const t0 = Date.now()
+    for (const t of [1, 2, 3, 4, 5, 6, 1]) q.enqueue(j(t))  // 1 是重复，应被去重
+    await q.whenIdle()
+    expect(maxActive).toBe(3)
+    expect(Date.now() - t0).toBeLessThan(20 * 6)  // 串行需 120ms+，并发 3 应 ~40-60ms
+
+    // 失败任务按重试后跳过，不阻塞队列
+    const skipped: number[] = []
+    const q2 = new ExtractionQueue(async job => {
+      if (job.turn === 2) throw new Error('boom')
+    }, { concurrency: 2, maxRetries: 1, retryDelayMs: [1], onSkip: job => { skipped.push(job.turn) } })
+    for (const t of [1, 2, 3]) q2.enqueue(j(t))
+    await q2.whenIdle()
+    expect(skipped).toEqual([2])
+  })
+})

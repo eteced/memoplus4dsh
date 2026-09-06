@@ -466,6 +466,13 @@ export interface ExtractionQueueOptions {
    * rate-limit/timeout while burning another full prompt.
    */
   retryDelayMs?: number[]
+  /**
+   * Worker pool size (default 1 = strict serial). >1 overlaps extraction
+   * calls — the main lever against wall-clock cost on write-heavy loads
+   * (LME context ingest: ~50min serial). Raise only when the endpoint's
+   * rate limit tolerates it; retries/backoff are unchanged per job.
+   */
+  concurrency?: number
   /** Called when a job is skipped after exhausting retries. */
   onSkip?: (job: ExtractionJob, error: unknown) => void
   /** Called after each failed attempt (before retrying or skipping). */
@@ -473,17 +480,21 @@ export interface ExtractionQueueOptions {
 }
 
 /**
- * Serial extraction queue: one LLM call at a time, keyed dedupe, bounded
- * retries, then skip-and-record. The queue never rejects — one failing job
- * must not stall the conversation's memory writes.
+ * Extraction queue: keyed dedupe, bounded retries, then skip-and-record.
+ * The queue never rejects — one failing job must not stall the
+ * conversation's memory writes. concurrency=1 keeps the historical strict
+ * serial behavior; N>1 runs a small worker pool over the same guarantees.
  */
 export class ExtractionQueue {
   private readonly run: (job: ExtractionJob) => Promise<unknown>
   private readonly maxRetries: number
   private readonly retryDelayMs: number[]
+  private readonly concurrency: number
   private readonly onSkip?: (job: ExtractionJob, error: unknown) => void
   private readonly onAttemptFailed?: (job: ExtractionJob, attempt: number, error: unknown) => void
-  private chain: Promise<void> = Promise.resolve()
+  private queue: ExtractionJob[] = []
+  private activeWorkers = 0
+  private readonly idleResolvers: (() => void)[] = []
   private pendingKeys = new Set<string>()
   private skippedCount = 0
 
@@ -491,6 +502,7 @@ export class ExtractionQueue {
     this.run = run
     this.maxRetries = options.maxRetries ?? 2
     this.retryDelayMs = options.retryDelayMs ?? [5_000, 30_000]
+    this.concurrency = Math.max(1, options.concurrency ?? 1)
     this.onSkip = options.onSkip
     this.onAttemptFailed = options.onAttemptFailed
   }
@@ -505,17 +517,31 @@ export class ExtractionQueue {
     const key = `${job.sessionId}:${job.turn}`
     if (this.pendingKeys.has(key)) return false
     this.pendingKeys.add(key)
-    this.chain = this.chain.then(() => this.runWithRetries(job)).finally(() => {
-      this.pendingKeys.delete(key)
-    })
-    // The chain is internal: failures are contained by runWithRetries.
-    this.chain.catch(() => undefined)
+    this.queue.push(job)
+    this.pump()
     return true
   }
 
   /** Resolves when every job enqueued so far has settled. */
   async whenIdle(): Promise<void> {
-    await this.chain
+    if (this.queue.length === 0 && this.activeWorkers === 0) return
+    await new Promise<void>(resolve => this.idleResolvers.push(resolve))
+  }
+
+  private pump(): void {
+    while (this.activeWorkers < this.concurrency && this.queue.length > 0) {
+      const job = this.queue.shift()!
+      const key = `${job.sessionId}:${job.turn}`
+      this.activeWorkers++
+      void this.runWithRetries(job).finally(() => {
+        this.activeWorkers--
+        this.pendingKeys.delete(key)
+        this.pump()
+        if (this.activeWorkers === 0 && this.queue.length === 0) {
+          for (const resolve of this.idleResolvers.splice(0)) resolve()
+        }
+      })
+    }
   }
 
   private async runWithRetries(job: ExtractionJob): Promise<void> {
