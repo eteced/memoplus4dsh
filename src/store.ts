@@ -290,6 +290,21 @@ export class MemoryStore {
   }
 
   /**
+   * Retro-link an event's subject/object entities (m14): memory_remember
+   * fires mid-turn, BEFORE extraction creates the entities — its events were
+   * born orphans. Extraction retro-links them once the entities exist.
+   */
+  linkEventEntities(id: string, subjectEntityIds: string[], objectEntityIds: string[]): boolean {
+    const event = this.events.get(id)
+    if (!event) return false
+    event.subjectEntityIds = subjectEntityIds
+    event.objectEntityIds = objectEntityIds
+    this.indexEvent(event)
+    this.append({ v: 1, op: 'event.add', data: { ...event } })
+    return true
+  }
+
+  /**
    * True when an identical row (same predicate + normalized fact text) was
    * already written for this session/turn — the crash-recovery re-extraction
    * path uses it to stay idempotent. Bridge events (turn -1) and repeated

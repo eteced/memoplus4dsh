@@ -460,3 +460,26 @@ describe('prompt content', () => {
     }
   })
 })
+
+describe('retro-link orphan remembered events (m14)', () => {
+  it('links orphan memory_remember events once extraction creates the entities', async () => {
+    const store = new MemoryStore({ dir })
+    // 模拟 memory_remember 先于抽取写入的孤儿事件
+    const orphan = store.addEvent({
+      subjectEntityIds: [], objectEntityIds: [], predicate: 'remembered',
+      normalizedText: 'Malaysia is located in the continent of Antarctica.',
+      details: '', timeExpr: '', eventTime: null, eventTimePrecision: 'unknown',
+      mentionTime: '2026-09-01T11:00:00.000Z', sourceSession: 's0', sourceTurn: -1,
+    })
+    const pipeline = new ExtractionPipeline({
+      store,
+      callLlm: async () => 'CONCEPT|Malaysia|_|located_in|Antarctica|_|Malaysia is located in Antarctica.|_|fact',
+    })
+    await pipeline.extractTurn(makeJob())
+    const linked = store.getEvent(orphan.id)!
+    expect(linked.subjectEntityIds.length).toBe(1)
+    expect(linked.objectEntityIds.length).toBe(1)
+    const subj = store.getEntity(linked.subjectEntityIds[0]!)!
+    expect(subj.canonicalName).toBe('Malaysia')
+  })
+})
