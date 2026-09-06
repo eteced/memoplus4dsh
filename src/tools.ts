@@ -108,7 +108,7 @@ export function registerMemoryTools(ctx: Context, deps: MemoryToolsDeps): () => 
             : event.eventTime ?? event.mentionTime.slice(0, 10),
           details: event.details + staleTag(event),
         }))
-        const related = collectNeighborEvents(deps.store, events).map(({ event: ev, via }): SearchResultItem => ({
+        const related = collectNeighborEvents(deps.store, events, 6, 2).map(({ event: ev, via }): SearchResultItem => ({
           fact: ev.normalizedText,
           time: ev.timeExpr.length > 0 ? ev.timeExpr : ev.eventTime ?? ev.mentionTime.slice(0, 10),
           details: `(via ${via})${ev.details.length > 0 ? ` ${ev.details}` : ''}${staleTag(ev)}`,

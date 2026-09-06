@@ -304,26 +304,39 @@ export function orderConflictsNewestFirst(scored: ScoredEvent[], store: MemorySt
 }
 
 /**
- * Multi-hop neighbor collection (m11 via, m14 泛化到注入): for the top hits'
- * linked entities, the freshest other facts — the next hop of a chain
- * ("Back to Black → performer → his death place") becomes visible without
- * guessing the hop's name. Bounded: top-3 hits × ≤2 each, ≤ maxTotal total.
+ * Multi-hop neighbor collection (m11 via, m14 泛化到注入, m15 深度 2):
+ * BFS over the top hits' linked entities — the freshest facts of each hop.
+ * A two-hop chain ("Back to Black → performer → his spouse → her
+ * citizenship") becomes visible without guessing the hops' names.
+ * Bounded: top-3 hits as seeds, ≤2 facts per entity per depth, ≤ maxTotal.
  */
-export function collectNeighborEvents(store: MemoryStore, events: MemoryEvent[], maxTotal = 6): { event: MemoryEvent; via: string }[] {
+export function collectNeighborEvents(
+  store: MemoryStore,
+  events: MemoryEvent[],
+  maxTotal = 6,
+  depth = 1,
+): { event: MemoryEvent; via: string }[] {
   const included = new Set(events.map(e => e.id))
   const related: { event: MemoryEvent; via: string }[] = []
-  for (const event of events.slice(0, 3)) {
-    for (const eid of [...event.subjectEntityIds, ...event.objectEntityIds]) {
-      const entity = store.getEntity(eid)
-      if (entity === undefined) continue
-      const neighbors = store.eventsForEntity(eid)
-        .filter(ev => !included.has(ev.id) && ev.speechAct !== true)
-        .sort((a, b) => b.mentionTime.localeCompare(a.mentionTime))
-      for (const ev of neighbors.slice(0, 2)) {
-        included.add(ev.id)
-        related.push({ event: ev, via: entity.canonicalName })
+  let frontier = events.slice(0, 3)
+  for (let d = 0; d < depth && related.length < maxTotal; d++) {
+    const nextFrontier: MemoryEvent[] = []
+    for (const event of frontier) {
+      for (const eid of [...event.subjectEntityIds, ...event.objectEntityIds]) {
+        const entity = store.getEntity(eid)
+        if (entity === undefined) continue
+        const neighbors = store.eventsForEntity(eid)
+          .filter(ev => !included.has(ev.id) && ev.speechAct !== true)
+          .sort((a, b) => b.mentionTime.localeCompare(a.mentionTime))
+        for (const ev of neighbors.slice(0, 2)) {
+          if (related.length >= maxTotal) break
+          included.add(ev.id)
+          related.push({ event: ev, via: entity.canonicalName })
+          nextFrontier.push(ev)
+        }
       }
     }
+    frontier = nextFrontier
   }
   return related.slice(0, maxTotal)
 }

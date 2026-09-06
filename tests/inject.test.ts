@@ -330,3 +330,41 @@ describe('injection via-neighbor lines (m14)', () => {
     expect(text).toContain('Frank Zappa died in the city of Berlin.')
   })
 })
+
+describe('injection via-neighbor depth-2 (m15)', () => {
+  it('two-hop chain (author -> spouse -> citizenship) is fully visible', async () => {
+    const store = new MemoryStore({ dir })
+    const book = store.createOrResolve('Our Mutual Friend', 'OBJECT').entity
+    const darwin = store.createOrResolve('Charles Darwin', 'PERSON').entity
+    const amala = store.createOrResolve('Amala Paul', 'PERSON').entity
+    const mk = (subj: string, obj: string | null, pred: string, text: string, mt: string) => {
+      const s = store.createOrResolve(subj, 'PERSON').entity
+      const o = obj === null ? null : store.createOrResolve(obj, 'CONCEPT').entity
+      store.addEvent({
+        subjectEntityIds: [s.id], objectEntityIds: o === null ? [] : [o.id],
+        predicate: pred, normalizedText: text, details: '', timeExpr: '',
+        eventTime: null, eventTimePrecision: 'unknown', mentionTime: mt,
+        sourceSession: 's1', sourceTurn: 0,
+      })
+    }
+    store.addEvent({
+      subjectEntityIds: [book.id], objectEntityIds: [darwin.id],
+      predicate: 'author_is', normalizedText: 'The author of Our Mutual Friend is Charles Darwin.',
+      details: '', timeExpr: '', eventTime: null, eventTimePrecision: 'unknown',
+      mentionTime: '2026-09-01T12:00:00.000Z', sourceSession: 's1', sourceTurn: 0,
+    })
+    mk('Charles Darwin', 'Amala Paul', 'married_to', 'Charles Darwin is married to Amala Paul.', '2026-09-01T12:01:00.000Z')
+    mk('Amala Paul', 'Belgium', 'citizen_of', 'Amala Paul is a citizen of Belgium.', '2026-09-01T12:02:00.000Z')
+    const hit = store.eventsForEntity(book.id)[0]!
+    const handler = createPreStepHandler({ store, retrieve: () => Promise.resolve([hit]) })
+    const claimed = userMessage('What is the country of citizenship of the spouse of the author of Our Mutual Friend?')
+    const decision = await handler(
+      { messages: [claimed], step: 1 },
+      () => Promise.resolve({ kind: 'enter', messages: [claimed] }),
+    )
+    const block = decision.kind === 'enter' && decision.messages[1]!.content[0]!
+    const text = block.type === 'text' ? block.text : ''
+    expect(text).toContain('married to Amala Paul')
+    expect(text).toContain('citizen of Belgium')
+  })
+})

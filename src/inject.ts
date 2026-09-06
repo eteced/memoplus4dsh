@@ -181,7 +181,7 @@ export function createPreStepHandler(deps: InjectionDeps) {
       // m14: via 邻接行也进注入——链式问题（"X 的表演者的去世地"）的下一跳
       // 事实（新值链上的）借此进入 top-k 之外的呈现位，上限 3 行。
       if (events.length > 0 && deps.neighborLines !== false) {
-        const neighbors = collectNeighborEvents(deps.store, events, 3).map(n => n.event)
+        const neighbors = collectNeighborEvents(deps.store, events, 3, 2).map(n => n.event)
         events = [...events, ...neighbors]
       }
     } catch {
