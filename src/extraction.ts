@@ -59,6 +59,7 @@ Rules:
 - For "as a X" roles/status, also output a separate is|X row.
 - For static attributes (identity, relationship status, home country), use PREDICATE=is and the value in OBJECT.
 - Extract EVERY fact explicitly stated. Do not skip details.
+- Explicitly named works and titles (books, films, cartoons, songs, paintings, shows) are always facts worth a row, even when mentioned mid-list as examples ("the cartoon X mocked Y" -> row about X).
 - Do NOT extract instructions, rules, or meta statements about the task or conversation itself (e.g. "answer only from the knowledge pool", "each fact has a serial number") — only facts about people, things, and events.
 - ONLY output facts from this turn.
 - Write NORMALIZED_FACT and DETAILS in the same language as the conversation turn.
