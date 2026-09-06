@@ -300,3 +300,33 @@ describe('superseded marker (mini-4 mh q0 lesson)', () => {
     expect(text).toContain('Alice likes coffee.')
   })
 })
+
+describe('injection via-neighbor lines (m14)', () => {
+  it('appends newest facts of top hits\' linked entities (chain hop-2 visible)', async () => {
+    const store = new MemoryStore({ dir })
+    const song = store.createOrResolve('Back to Black', 'OBJECT').entity
+    const frank = store.createOrResolve('Frank Zappa', 'PERSON').entity
+    const hit = store.addEvent({
+      subjectEntityIds: [song.id], objectEntityIds: [frank.id],
+      predicate: 'performed_by', normalizedText: 'Back to Black was performed by Frank Zappa.',
+      details: '', timeExpr: '', eventTime: null, eventTimePrecision: 'unknown',
+      mentionTime: '2026-09-01T12:00:00.000Z', sourceSession: 's1', sourceTurn: 0,
+    })
+    store.addEvent({
+      subjectEntityIds: [frank.id], objectEntityIds: [],
+      predicate: 'died_in', normalizedText: 'Frank Zappa died in the city of Berlin.',
+      details: '', timeExpr: '', eventTime: null, eventTimePrecision: 'unknown',
+      mentionTime: '2026-09-01T13:00:00.000Z', sourceSession: 's1', sourceTurn: 1,
+    })
+    const handler = createPreStepHandler({ store, retrieve: () => Promise.resolve([hit]) })
+    const claimed = userMessage('What is the place of death of the performer of Back to Black?')
+    const decision = await handler(
+      { messages: [claimed], step: 1 },
+      () => Promise.resolve({ kind: 'enter', messages: [claimed] }),
+    )
+    const block = decision.kind === 'enter' && decision.messages[1]!.content[0]!
+    const text = block.type === 'text' ? block.text : ''
+    expect(text).toContain('Back to Black was performed by Frank Zappa.')
+    expect(text).toContain('Frank Zappa died in the city of Berlin.')
+  })
+})

@@ -180,3 +180,24 @@ describe('registerMemoryTools', () => {
     expect(event.predicate).toBe('remembered')
   })
 })
+
+describe('memory_remember entity linking (m14)', () => {
+  it('links mentioned known entities as subject/object (no more orphan events)', async () => {
+    const { ctx, registered } = fakeToolsHost()
+    const store = new MemoryStore({ dir })
+    const malaysia = store.createOrResolve('Malaysia', 'CONCEPT').entity
+    const antarctica = store.createOrResolve('Antarctica', 'CONCEPT').entity
+    const retriever = new Retriever({ store, now: () => NOW })
+    registerMemoryTools(ctx, { store, retriever, now: () => NOW })
+    const remember = registered.get('memory_remember')!
+    const value = await remember.execute(
+      { fact: 'Malaysia is located in the continent of Antarctica.', time_expr: '' },
+      FAKE_EXEC,
+    ) as { id: string }
+    const event = store.getEvent(value.id)!
+    expect(event.subjectEntityIds).toEqual([malaysia.id])
+    expect(event.objectEntityIds).toEqual([antarctica.id])
+    // 实体锚定检索能找到它
+    expect(store.eventsForEntity(malaysia.id).map(e => e.id)).toContain(event.id)
+  })
+})

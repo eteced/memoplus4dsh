@@ -304,6 +304,31 @@ export function orderConflictsNewestFirst(scored: ScoredEvent[], store: MemorySt
 }
 
 /**
+ * Multi-hop neighbor collection (m11 via, m14 泛化到注入): for the top hits'
+ * linked entities, the freshest other facts — the next hop of a chain
+ * ("Back to Black → performer → his death place") becomes visible without
+ * guessing the hop's name. Bounded: top-3 hits × ≤2 each, ≤ maxTotal total.
+ */
+export function collectNeighborEvents(store: MemoryStore, events: MemoryEvent[], maxTotal = 6): { event: MemoryEvent; via: string }[] {
+  const included = new Set(events.map(e => e.id))
+  const related: { event: MemoryEvent; via: string }[] = []
+  for (const event of events.slice(0, 3)) {
+    for (const eid of [...event.subjectEntityIds, ...event.objectEntityIds]) {
+      const entity = store.getEntity(eid)
+      if (entity === undefined) continue
+      const neighbors = store.eventsForEntity(eid)
+        .filter(ev => !included.has(ev.id) && ev.speechAct !== true)
+        .sort((a, b) => b.mentionTime.localeCompare(a.mentionTime))
+      for (const ev of neighbors.slice(0, 2)) {
+        included.add(ev.id)
+        related.push({ event: ev, via: entity.canonicalName })
+      }
+    }
+  }
+  return related.slice(0, maxTotal)
+}
+
+/**
  * Latest-only dedup for bridge state events (m8 P1-C): within one
  * (subject entity, state family) group only the newest-mention event keeps
  * its slot; the full history stays in the graph and remains reachable via

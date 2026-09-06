@@ -13,6 +13,7 @@ import type { MemoryEvent, MemoryStore } from './store.js'
 import type { Retriever } from './retrieval.js'
 import { resolveTimeExpr } from './temporal.js'
 import { formatMemoryLine } from './inject.js'
+import { collectNeighborEvents } from './retrieval.js'
 import { renderGraphHTML } from './visualize.js'
 import { writeFile } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
@@ -107,31 +108,12 @@ export function registerMemoryTools(ctx: Context, deps: MemoryToolsDeps): () => 
             : event.eventTime ?? event.mentionTime.slice(0, 10),
           details: event.details + staleTag(event),
         }))
-        // Multi-hop support (m11 mini-3): a chain question ("the country of
-        // the spouse of the author of X") can only be answered hop by hop, so
-        // each search also returns the freshest OTHER facts of the top hits'
-        // linked entities — the model sees the next hop without guessing its
-        // name first. Bounded: top-3 hits × ≤2 lines each.
-        const included = new Set(events.map(e => e.id))
-        const related: SearchResultItem[] = []
-        for (const event of events.slice(0, 3)) {
-          for (const eid of [...event.subjectEntityIds, ...event.objectEntityIds]) {
-            const entity = deps.store.getEntity(eid)
-            if (entity === undefined) continue
-            const neighbors = deps.store.eventsForEntity(eid)
-              .filter(ev => !included.has(ev.id) && ev.speechAct !== true)
-              .sort((a, b) => b.mentionTime.localeCompare(a.mentionTime))
-            for (const ev of neighbors.slice(0, 2)) {
-              included.add(ev.id)
-              related.push({
-                fact: ev.normalizedText,
-                time: ev.timeExpr.length > 0 ? ev.timeExpr : ev.eventTime ?? ev.mentionTime.slice(0, 10),
-                details: `(via ${entity.canonicalName})${ev.details.length > 0 ? ` ${ev.details}` : ''}${staleTag(ev)}`,
-              })
-            }
-          }
-        }
-        return [...items, ...related.slice(0, 6)]
+        const related = collectNeighborEvents(deps.store, events).map(({ event: ev, via }): SearchResultItem => ({
+          fact: ev.normalizedText,
+          time: ev.timeExpr.length > 0 ? ev.timeExpr : ev.eventTime ?? ev.mentionTime.slice(0, 10),
+          details: `(via ${via})${ev.details.length > 0 ? ` ${ev.details}` : ''}${staleTag(ev)}`,
+        }))
+        return [...items, ...related]
       },
     })),
     ctx.tools.register(defineTool({
@@ -152,9 +134,20 @@ export function registerMemoryTools(ctx: Context, deps: MemoryToolsDeps): () => 
         const at = now()
         const timeExpr = args.time_expr?.trim() ?? ''
         const resolved = timeExpr.length > 0 ? resolveTimeExpr(timeExpr, at) : undefined
+        // 链接事实中提及的已知实体（m14 修复：之前直写不带链接，事件成为
+        // 图孤儿——实体锚定检索不到、supersede 冲突组也组不起来，多跳断链
+        // 的直接根因）。第一个作主语，其余作客体。
+        const lower = fact.toLowerCase()
+        const mentioned: string[] = []
+        for (const entity of deps.store.listEntities()) {
+          const names = [entity.canonicalName, ...entity.aliases]
+          if (names.some(n => n.length > 1 && lower.includes(n.toLowerCase()))) {
+            mentioned.push(entity.id)
+          }
+        }
         const event = deps.store.addEvent({
-          subjectEntityIds: [],
-          objectEntityIds: [],
+          subjectEntityIds: mentioned.slice(0, 1),
+          objectEntityIds: mentioned.slice(1),
           predicate: 'remembered',
           normalizedText: fact,
           details: '',
