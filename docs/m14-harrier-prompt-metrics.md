@@ -34,3 +34,32 @@
 ## 5. 结论
 
 多跳 prompt 显著改变了模型行为（搜索 4.4 倍），harrier 嵌入真实启用且质量更优；剩余 mh 失败已非记忆系统可归因（三跳以上深链的模型策略问题，prompt 缓解但未根治）。
+
+
+## 6. 多跳断点取证与修复（用户追问"多跳应该能支持"）
+
+对 mh 失败的逐案取证（会话日志 + 图），找到并修复三个真实断点：
+
+1. **memory_remember 孤儿事件**：工具直写不带实体链接（`subjectEntityIds: []`），
+   导致实体锚定检索不到、supersede 冲突组也组不起来（q80 "Malaysia→Antarctica"
+   事件即孤儿）。修复：remember 写入时链接已知实体；且因工具在轮内先于抽取执行
+   （实体尚不存在），抽取每轮**回填**孤儿事件的链接。验证：m14v2 307/307 孤儿
+   → m14v4 **307 链接 / 0 孤儿**。
+2. **注入缺 via 机制**：pre-step 注入只有 top-k 直中项，新值链的第二跳事实
+   （"Frank Zappa died in Berlin"）到不了模型眼前（q60）。修复：注入追加 via
+   邻接行（与 memory_search 共用 `collectNeighborEvents`），上限 3 行。
+3. **回填门控缺陷**：首版只在"本轮有新建实体"时回填——跳过即漏。已去门。
+
+**剩余失败的真实分类**（m14v4: sh 80%, mh 60%）：
+- **抽取方差**：个别事实被截断/切碎（"d in the continent of Antarctica"、
+  "Malaysia is located in _"）——反事实池长文档上的尾部噪声，RC5 量级。
+- **参数化先验压过反事实**：Malaysia 现实属 Asia，模型面对两个候选仍答 Asia
+  （与 q0 的 goaltender→ice hockey 同类）——模型侧，非记忆系统可归因。
+- **裁决器关系基数误判**（located_in 判 multi）：旧值未标，新值已在呈现层
+  居首+标记兜底，但模型先验仍可能压过。
+- **q0 驱动超时**：`agent_memoplus_dsh.ask()` 每题 900s 上限，侦探循环
+  未收敛即记为错误答案（空输出）——基建保护，非记忆问题。
+
+**机制现状**：多跳链路（实体图 + via 邻接 + supersede 链 + 新值居首 +
+[superseded] 标记 + 逐跳 prompt）已端到端打通并有实证：memory_search
+调用 4.4 倍、探针 6/6、链接率 100%、纯检索失败 0。
