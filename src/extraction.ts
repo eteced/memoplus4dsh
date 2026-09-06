@@ -431,23 +431,21 @@ export class ExtractionPipeline {
       eventsAdded++
     }
     // Retro-link orphan memory_remember events (m14): the tool fires mid-turn
-    // before the entities it mentions exist; now that extraction has created
-    // them, attach the links so entity-anchored retrieval and supersede
-    // grouping reach these events (multi-hop chains broke on exactly this).
-    if (entitiesCreated > 0) {
-      for (const orphan of this.store.listEvents()) {
-        if (orphan.predicate !== 'remembered' || orphan.subjectEntityIds.length > 0) continue
-        const lower = orphan.normalizedText.toLowerCase()
-        const mentioned: string[] = []
-        for (const entity of this.store.listEntities()) {
-          const names = [entity.canonicalName, ...entity.aliases]
-          if (names.some(n => n.length > 1 && lower.includes(n.toLowerCase()))) {
-            mentioned.push(entity.id)
-          }
+    // before the entities it mentions exist; extraction retro-links them once
+    // the entities exist (multi-hop chains broke on exactly this). 每轮都扫，
+    // 不限于本论新建实体——孤儿可能等待多轮才有匹配实体。
+    for (const orphan of this.store.listEvents()) {
+      if (orphan.predicate !== 'remembered' || orphan.subjectEntityIds.length > 0) continue
+      const lower = orphan.normalizedText.toLowerCase()
+      const mentioned: string[] = []
+      for (const entity of this.store.listEntities()) {
+        const names = [entity.canonicalName, ...entity.aliases]
+        if (names.some(n => n.length > 1 && lower.includes(n.toLowerCase()))) {
+          mentioned.push(entity.id)
         }
-        if (mentioned.length > 0) {
-          this.store.linkEventEntities(orphan.id, mentioned.slice(0, 1), mentioned.slice(1))
-        }
+      }
+      if (mentioned.length > 0) {
+        this.store.linkEventEntities(orphan.id, mentioned.slice(0, 1), mentioned.slice(1))
       }
     }
     // LLM supersede detection (m11 P1-B): batched once per turn over the
