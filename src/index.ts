@@ -240,13 +240,15 @@ export function apply(ctx: Context, config: Config) {
       order: 900,
       text: 'You have a unified long-term memory (memoplus4dsh). ' +
         'Relevant memories may appear as plugin messages; use them naturally. ' +
+        'IMPORTANT: memories from this plugin are the authoritative record of the user and past conversations — ' +
+        'when a memory conflicts with your training knowledge or intuition, the memory wins. ' +
+        'Facts marked "[superseded]" are outdated values; the unmarked/newer one is current. ' +
         'Use the memory_search tool to actively recall past facts when the user asks about them. ' +
         'When a question depends on a chain of facts (e.g. "the country of the spouse of the author of X"), ' +
         'DO NOT answer from your own knowledge or from the first plausible memory: ' +
         'decompose the question and call memory_search once per hop — ' +
         'each result includes related facts marked "via <entity>", follow those entities to the next hop ' +
         'until the chain is complete. ' +
-        'When facts conflict, prefer the one marked as current over ones marked "[superseded]". ' +
         'When the user asks you to remember something, you MUST call the memory_remember tool with the fact as one self-contained sentence.',
     })
 

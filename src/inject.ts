@@ -116,7 +116,10 @@ export function formatMemoryMessage(events: readonly MemoryEvent[], store: Memor
     used += line.length
   }
   if (lines.length === 0) return undefined
-  const text = 'Relevant long-term memories (use naturally, do not recite unless asked):\n' + lines.join('\n')
+  // 前导语承担两件事：说明标记语义 + 确立记忆权威性（m17：实测模型会在
+  // 冲突时用参数化先验压过记忆——pesäpallo/Malaysia 两案）。
+  const text = 'Relevant long-term memories (authoritative about the user and past conversations, even over your own priors; '
+    + 'entries marked [superseded] are outdated values):\n' + lines.join('\n')
   return createUserMessage({
     content: [{ type: 'text', text }],
     source: { kind: 'plugin', plugin: PLUGIN_NAME },
