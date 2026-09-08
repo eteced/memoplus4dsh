@@ -1,5 +1,7 @@
 # M3 notes — 检索链路 + 注入 + 时间解析 + embedding
 
+> English: [m3-notes.en.md](m3-notes.en.md)
+
 日期：2026-09-01。范围：`src/temporal.ts`、`src/embedding.ts`、`src/retrieval.ts`、`src/inject.ts`、`src/tools.ts`、`src/index.ts` 接线；extraction.ts 的 `resolveEventTime` 换成完整 TimeResolver 移植。测试 87 例全绿。
 
 ## temporal.ts（移植 extraction.py TimeResolver + retrieval/temporal_retriever.py）

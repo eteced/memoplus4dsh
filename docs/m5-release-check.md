@@ -1,5 +1,7 @@
 # M5 release check
 
+> English: [m5-release-check.en.md](m5-release-check.en.md)
+
 日期：2026-09-01。dsh `@deepseek-ai/dsh@0.1.2-alpha.3`，node v22.23.2。
 
 ## 卸载回退验证（实测）

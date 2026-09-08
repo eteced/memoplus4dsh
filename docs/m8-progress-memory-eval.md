@@ -1,5 +1,7 @@
 # M8 — 关键记忆（任务进度）丢失风险：系统评估与改进方案
 
+> English: [m8-progress-memory-eval.en.md](m8-progress-memory-eval.en.md)
+
 > 日期：2026-09-01 状态：**已实施并验证**（场景测试 S1-S4 PASS；M9 benchmark 第二轮全程工作）
 > 范围：agent 记忆插件最核心的承诺是"不丢关键记忆"。本文系统评估**任务进度**（尤其是长程任务）在 memoplus4dsh 全链路（写入 → 存储 → 检索 → 注入）中的丢失风险，并给出改进方案。
 > 方法：本仓库代码走查 + dsh 上游事件表面调查（packages/goal、todo、schedule、plan、core/session、compaction），所有结论附 文件:行号 证据。

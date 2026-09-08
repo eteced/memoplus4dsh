@@ -1,5 +1,7 @@
 # MemoryAgentBench 评测（memoplus4dsh + dsh）
 
+> English: [README.en.md](README.en.md)
+
 用 [MemoryAgentBench](https://github.com/HUST-AI-HYZ/MemoryAgentBench) 官方仓库与数据集评测
 **deepseek-harness + memoplus4dsh** 组合。方案与可比性口径见 [../docs/m9-benchmark-plan.md](../docs/m9-benchmark-plan.md)，
 结果报告见 [../docs/m9-benchmark.md](../docs/m9-benchmark.md)。

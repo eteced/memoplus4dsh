@@ -1,5 +1,7 @@
 # M2 notes — 记忆图存储 + turn/end 异步抽取
 
+> English: [m2-notes.en.md](m2-notes.en.md)
+
 日期：2026-09-01。范围：`src/store.ts`、`src/extraction.ts`、`src/bridges.ts`（占位）、`src/index.ts` 接线、`tests/`（vitest，41 个用例）。
 
 ## 数据模型（相对 Python 版的变化）

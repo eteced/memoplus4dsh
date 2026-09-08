@@ -1,5 +1,7 @@
 # memoplus4dsh：给 deepseek-harness 的统一长期记忆
 
+> English: [intro.en.md](intro.en.md)
+
 > 一个 dsh 插件：把 agent 需要记住的一切（事实、偏好、日程、任务进度）存进**一张实体-时间融合的记忆图**，替代"每天一个 md 文件"式的碎片化记忆。
 > 本文档：方法创新点 → 实现思路 → 评测结果。
 

@@ -1,5 +1,7 @@
 # M9 — MemoryAgentBench 评测方案（memoplus4dsh + dsh 组合）
 
+> English: [m9-benchmark-plan.en.md](m9-benchmark-plan.en.md)
+
 > 日期：2026-09-02 状态：**已实施完成**（第二轮有效成绩见 docs/m9-benchmark.md）
 > 目标：用 MemoryAgentBench 官方仓库与数据集，对**最终应用组合（deepseek-harness + memoplus4dsh 插件）**跑出可横向对比的分数。评测 LLM 走 DeepSeek 官方 API（避开 Zen 网关的 F1 工具 bug）。
 > 可比性原则：**数据加载、模板、指标计算全部复用官方代码零修改**；自定义内容只有 agent 适配层与运行编排。

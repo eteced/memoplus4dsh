@@ -1,5 +1,7 @@
 # M16 — 泛化性验证（全新题集 + 跨长度）
 
+> English: [m16-generalization.en.md](m16-generalization.en.md)
+
 > 日期：2026-09-08 · 目的：回答"之前的迭代是不是对固定题集过拟合了"
 > 集合：**第二 mini 集**（`MINI_OFFSET=1` + `MINI_LENGTHS="6k 32k"`）——题目与此前全部 7 轮迭代零重叠，并加回 32k 档验证跨长度泛化。tag=m16v1。
 

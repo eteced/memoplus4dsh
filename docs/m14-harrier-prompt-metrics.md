@@ -1,5 +1,7 @@
 # M14 — harrier 嵌入 / 工程指标 / 多跳 prompt（mini 验证）
 
+> English: [m14-harrier-prompt-metrics.en.md](m14-harrier-prompt-metrics.en.md)
+
 > 日期：2026-09-06 · 构建：M13 全部 + harrier 嵌入后端 + 多跳 prompt + metrics_summary
 > 集合：mini（CR sh/mh 6k 各 5 题 + LME 1 context 5 题，`MINI_TAG=m14v1`）
 

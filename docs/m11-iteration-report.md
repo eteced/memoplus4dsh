@@ -1,5 +1,7 @@
 # memoplus4dsh 机制详解与迭代结论
 
+> English: [m11-iteration-report.en.md](m11-iteration-report.en.md)
+
 > 日期：2026-09-05 · 本文回答三个核心问题：抽取怎么做、去重/关联怎么做、检索注入怎么做。
 > 迭代过程（7 轮 smoke/mini 的每轮发现）压缩在附录 A；全量复测需用户授权。
 

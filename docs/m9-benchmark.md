@@ -1,5 +1,7 @@
 # M9 — MemoryAgentBench 评测报告（memoplus4dsh + deepseek-harness）
 
+> English: [m9-benchmark.en.md](m9-benchmark.en.md)
+
 > 日期：2026-09-03 状态：**第二轮（加固后）全部完成，成绩有效**
 > 被测组合：dsh sdk profile + memoplus4dsh（默认配置，deepseek-v4-flash @ DeepSeek 官方 API）
 > 方案与口径：docs/m9-benchmark-plan.md；复现：benchmark/README.md

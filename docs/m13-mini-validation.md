@@ -1,5 +1,7 @@
 # M13 — mini 集合验证（记忆插件性能评估）
 
+> English: [m13-mini-validation.en.md](m13-mini-validation.en.md)
+
 > 日期：2026-09-05 · 构建：含全部 M11 修复 + M12 NER 辅助 + 存储三项修复 + 合并加固
 > 集合：mini（CR sh/mh 6k 各 5 题 + LME 1 context 5 题，`MINI_TAG=m13v1`）
 > 重点（用户要求）：评估记忆插件本身的性能，而非模型能力。

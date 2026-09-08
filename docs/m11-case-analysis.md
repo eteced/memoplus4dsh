@@ -1,5 +1,7 @@
 # M11 — 召回失败 case 分析报告（run-2 结果）
 
+> English: [m11-case-analysis.en.md](m11-case-analysis.en.md)
+
 > 日期：2026-09-05 · 数据：MemoryAgentBench 第二轮有效成绩（审计 PASS 的那轮）+ 全量归档会话日志 + 终态记忆图
 > 范围约定（用户要求）：**只关注记忆系统没有正确召回的情况**，模型拿到记忆但没用好的情况不在本报告范围。
 > 分析工具：`benchmark/analyze_recall_failures.py`（逐题归因）+ `benchmark/replay_retrieval.mjs`（离线检索复现），产物 `results/analysis/recall-attribution.json`（1100 题逐题判定）。

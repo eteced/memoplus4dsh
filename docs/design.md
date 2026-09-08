@@ -1,5 +1,7 @@
 # memoplus4dsh 设计文档
 
+> English: [design.en.md](design.en.md)
+
 > 版本：v0.1（已实施） 日期：2026-09-01
 > 状态：M1–M5 全部完成（骨架 / 存储+抽取 / 检索注入 / 真人场景测试 / 发布收尾）。
 > 实施记录：docs/m2-notes.md、docs/m3-notes.md、docs/m4-scenario-test.md、docs/m5-release-check.md；

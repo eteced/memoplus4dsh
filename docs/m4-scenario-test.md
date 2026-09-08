@@ -1,5 +1,7 @@
 # M4 scenario test — real-LLM behavior of the memory plugin
 
+> English: [m4-scenario-test.en.md](m4-scenario-test.en.md)
+
 日期：2026-08-31 / 2026-09-01。
 环境：`dsh --profile sdk`（@deepseek-ai/dsh 0.1.2-alpha.3，test/dsh-install），DSH_HOME=test/dsh-home，
 端点 `$DEEPSEEK_BASE_URL`（zen，deepseek-v4-flash，reasoning 常开且不可关）。

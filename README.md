@@ -1,5 +1,7 @@
 # memoplus4dsh
 
+> 中文：[README.zh.md](README.zh.md)
+
 Unified long-term memory plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh).
 
 One coherent entity-time fused memory graph for everything an agent needs to remember — facts, preferences, plans, and events from conversations — instead of scattered per-day markdown files. The core algorithms are ported from the memoplus/ETMS research codebase, validated on LoCoMo (82.9% under the mem0 protocol).

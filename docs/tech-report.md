@@ -1,5 +1,7 @@
 # memoplus4dsh 技术报告
 
+> English: [tech-report.en.md](tech-report.en.md)
+
 **面向 deepseek-harness 的实体-时间融合统一记忆插件**
 
 > 版本：v0.2 · 日期：2026-09-05

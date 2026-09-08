@@ -1,5 +1,7 @@
 # M11 — 迭代指引（mini 评测 + 修复路线）
 
+> English: [m11-iteration-guide.en.md](m11-iteration-guide.en.md)
+
 > 日期：2026-09-05 · 配套：`docs/m11-case-analysis.md`（根因证据）
 > 目的：用 ~5% 的 token 成本做快速迭代验证，每次改动有明确的预期收益假设。
 > **状态更新（2026-09-05 晚）**：P0-A / P0-B / P1-A 已实施（130 单测全绿 + replay 实证），

@@ -1,5 +1,7 @@
 # M1 verification — empty plugin loads in a real dsh instance
 
+> 中文：[m1-verification.zh.md](m1-verification.zh.md)
+
 Date: 2026-08-31. dsh: `@deepseek-ai/dsh@0.1.2-alpha.3` (npm), node v22.23.2.
 
 ## Method

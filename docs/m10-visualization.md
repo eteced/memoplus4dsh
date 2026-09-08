@@ -1,5 +1,7 @@
 # M10 — 记忆图可视化（交互式 HTML）
 
+> English: [m10-visualization.en.md](m10-visualization.en.md)
+
 > 日期：2026-09-04 状态：**已实施并验证**（2026-09-05）
 > 需求：用户希望可视化现有记忆——产出一张有交互的 HTML 图。
 >

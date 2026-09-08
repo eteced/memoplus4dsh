@@ -1,5 +1,7 @@
 # Known issues
 
+> English: [known-issues.en.md](known-issues.en.md)
+
 ## F1 — dsh 流式 tool_calls null 覆盖 bug（外部，影响所有工具）
 
 **状态**：上游 bug，已定位根因，准备上报。本插件不做拦截修补（那会越权改变全宿主的工具调用行为）。

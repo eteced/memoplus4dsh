@@ -1,5 +1,7 @@
 # M12 — NER 辅助抽取 + 存储与合并的评估结论
 
+> English: [m12-ner-assisted-extraction.en.md](m12-ner-assisted-extraction.en.md)
+
 > 日期：2026-09-05 · 状态：**已实施并验证**（164 单测全绿）
 > sidecar 双引擎验证：smoke **5/5（100%）**、时间探针 6/6、mini（CR 快轮）审计 PASS、图事件量 +19%（391→417 实体 / 732→875 事件 vs 无提示轮）。
 > mini 分数与上轮持平（n=5 噪声区间内）——NER 辅助的价值在覆盖度。

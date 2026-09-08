@@ -1,5 +1,7 @@
 # 安装指南（部署者向）
 
+> English: [install-guide.en.md](install-guide.en.md)
+
 从零到可用的完整步骤。前提：已安装 dsh（`@deepseek-ai/dsh@0.1.2-alpha.3`）和 Node `^22.19 || >=24`，npm 在 PATH 上（或用 `NODE_BIN=/path/to/bin` 指定）；安装/卸载脚本还需要 `python3`（用于改写 profile 的 `cordis.patch.yml`）。
 
 ## 1. 获取并构建插件
