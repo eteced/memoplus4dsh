@@ -65,3 +65,23 @@
 **机制现状**：多跳链路（实体图 + via 邻接 + supersede 链 + 新值居首 +
 [superseded] 标记 + 逐跳 prompt）已端到端打通并有实证：memory_search
 调用 4.4 倍、探针 6/6、链接率 100%、纯检索失败 0。
+
+## m17 附记：prompt 权威性提示与 dsh 0.1.5 升级（2026-09-10）
+
+- **m17 改动**：注入前导加"记忆权威性"声明（注入记忆优先于模型自身先验）+
+  `[superseded]` 标记语义说明。动机：m14v4 剩余失败中"已注入但答错"多为
+  参数化先验压过注入记忆。
+- **mini 对比**：m17v1 vs m14v4 总分持平（7/10 vs 7/10；sh 40↔80、mh 60↔80
+  交叉，n=5 噪声带内）。归因：m17v1 的失败 2/3 是"已注入但答错"（模型侧），
+  非检索回退。**决定**：保留 m17 进入全量 r2（机制上有动机，mini 无回退证据）。
+- **dsh 0.1.5 升级事故（重大教训）**：Session V3 移除 `session.events`
+  （改 `snapshotEvents()`），插件类型包钉在 0.1.2，编译静默通过、运行时
+  turn_end 监听器逐事件抛异常被宿主吞掉 → 抽取静默全灭，记忆全靠模型
+  主动调 memory_remember（孤儿事件，无实体链接/合并/时间线）。
+  修复 `497db0e`：buildTurnText 适配 V3（带 0.1.2 回退）、类型包升 0.1.5
+  （编译期可拦截此类断裂）、补上游漏声明的 dsh-sdk-protocol 依赖。
+  护栏：`run_benchmark.py` memorize 后无抽取产出事件（sourceTurn≥0）即 abort。
+- **端点结论**：OpenCode Go 对密集大请求触发 WAF 403 风暴且不生效
+  thinking:disabled（M9 F-1 空输出复发）→ 全量 r2 使用官方 DeepSeek API；
+  官方 API 接受 maxTokens 任意值且 35s 完成抽取闭环。opencode 仅作
+  轻量场景备选（需 zen-session-proxy.mjs 注入 x-opencode-session）。

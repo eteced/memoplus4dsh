@@ -72,3 +72,30 @@ Case-by-case forensics on the mh failures (session logs + graph) found and fixed
 new value first + [superseded] marker + hop-by-hop prompt) is now connected end to end with
 empirical evidence: memory_search calls up 4.4×, probes 6/6, link rate 100%, pure retrieval
 failures 0.
+
+## m17 addendum: authority prompt and the dsh 0.1.5 upgrade (2026-09-10)
+
+- **m17 change**: the injection preamble now declares memory authority (injected
+  memories outrank the model's own priors) and explains the `[superseded]` marker.
+  Motivation: m14v4's residual "injected but answered wrong" failures were mostly
+  parametric priors overriding injected memories.
+- **Mini comparison**: m17v1 ties m14v4 overall (7/10 vs 7/10; sh 40↔80, mh 60↔80
+  crossed — inside the n=5 noise band). Attribution: 2 of 3 m17v1 failures are
+  "injected but answered wrong" (model side), not retrieval regressions.
+  **Decision**: keep m17 for the r2 full run (mechanistically motivated, no
+  regression evidence on mini).
+- **dsh 0.1.5 upgrade incident (major lesson)**: Session V3 removed
+  `session.events` (replaced by `snapshotEvents()`); the plugin's type packages
+  were pinned to 0.1.2, so the build stayed green while the turn_end listener
+  threw per event at runtime (swallowed by the host) — extraction silently died
+  and memory was built only by the model's own memory_remember tool calls
+  (orphan events: no entity linking, merging, or timeline). Fix `497db0e`:
+  buildTurnText adapted to V3 (with a 0.1.2 fallback), type packages bumped to
+  0.1.5 so tsc catches such breaks at build time, and the undeclared upstream
+  dsh-sdk-protocol dependency added. Guardrail: `run_benchmark.py` aborts when
+  memorize yields no extraction-produced events (sourceTurn ≥ 0).
+- **Endpoint conclusion**: OpenCode Go triggers WAF 403 storms under dense large
+  requests and ignores thinking:disabled (M9 F-1 empty-output recurrence) → the
+  r2 full run uses the official DeepSeek API, which accepts any maxTokens and
+  closes the extraction loop in ~35s. opencode remains a light-duty fallback
+  (requires zen-session-proxy.mjs to inject x-opencode-session).
