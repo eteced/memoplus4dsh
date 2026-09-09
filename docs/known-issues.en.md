@@ -2,15 +2,25 @@
 
 > 中文：[known-issues.md](known-issues.md)
 
-## F1 — dsh streaming tool_calls null-overwrite bug (external, affects all tools)
+## F1 — dsh streaming tool_calls null-overwrite bug (external, **fixed upstream**)
 
-**Status**: upstream bug, root cause located, preparing to report. This plugin does not intercept or patch it (doing so would overstep by changing tool-call behavior for the entire host).
+**Status**: ✅ **fixed upstream** (verified 2026-09-10). Fix commit: `deepseek-harness@a1271a4903`
+("fix(llm): keep streamed tool-call identity across empty deltas", 2026-09-01),
+first shipped in `dsh-v0.1.3-alpha.1`; current `0.1.5-alpha.2` includes it. The fix matches our
+root-cause diagnosis: a new `acceptIdentity()` treats an empty-string or `null` id/name in a
+continuation chunk as "no update", never "clear". Verified live on dsh 0.1.5-alpha.2 + the
+OpenCode Go endpoint: tool calls work end to end (`scripts/test-harness/probe-tools.mjs` passes).
+**Upgrading to ≥0.1.3-alpha.1 is sufficient; no patch needed.**
+Note that since 2026-09-06 OpenCode Go mandates an `x-opencode-session` request header (missing
+requests fail with `MissingSessionID`); dsh has no custom-header config, so the benchmark side uses
+`scripts/test-harness/zen-session-proxy.mjs` (a local loopback proxy that only injects this header
+and never rewrites payloads).
 
-**Symptom**: on affected endpoints, all tool calls (`memory_search`, `memory_remember`, as well as dsh's built-in bash/schedule etc.) arrive at the agent loop with `name`/`callId` as empty strings, and the loop reports `unknown tool ""`. The model retries repeatedly until the step limit, and that turn's final reply is empty.
+**Historical symptom**: on affected endpoints, all tool calls (`memory_search`, `memory_remember`, as well as dsh's built-in bash/schedule etc.) arrive at the agent loop with `name`/`callId` as empty strings, and the loop reports `unknown tool ""`. The model retries repeatedly until the step limit, and that turn's final reply is empty.
 
-**Affected combination**: `@deepseek-ai/dsh@0.1.2-alpha.3` + OpenAI-compatible endpoints that send **explicit** `id: null, name: null` in streaming continuation chunks (e.g. OpenCode Zen). The official DeepSeek API omits these fields (`undefined`) and is unaffected.
+**Affected combination**: `@deepseek-ai/dsh@0.1.2-alpha.x` + OpenAI-compatible endpoints that send **explicit** `id: null, name: null` in streaming continuation chunks (e.g. OpenCode Zen). The official DeepSeek API omits these fields (`undefined`) and is unaffected.
 
-**Root cause**: `dsh-llm-deepseek`'s `translate.ts` accumulates id/name with `if (call.id !== undefined) block.callId = call.id` — `null !== undefined` is true, so the real id/name from the first chunk gets overwritten by the explicit nulls of subsequent chunks; `closeBlock`'s `?? ''` then produces empty strings. The correct check should be `call.id != null`. Same for name.
+**Root cause**: `dsh-llm-deepseek`'s `translate.ts` accumulates id/name with `if (call.id !== undefined) block.callId = call.id` — `null !== undefined` is true, so the real id/name from the first chunk gets overwritten by the explicit nulls of subsequent chunks; `closeBlock`'s `?? ''` then produces empty strings. The correct check is `call.id != null`. Same for name.
 
 **Evidence chain** (collected during M4):
 1. Live SSE streaming test against the endpoint: the first `tool_calls` chunk carries the full `id` + `function.name`; continuation chunks carry explicit nulls.
@@ -19,11 +29,21 @@
 4. `tool/result` events show `ToolNotFoundError / UNKNOWN_TOOL / unknown tool ""`.
 5. **2026-09-01 re-verification (during M8 scenario testing)**: bypassing dsh and curling Zen's raw SSE directly, the hard evidence remains — first chunk `"id":"chatcmpl-tool-...","type":"function","function":{"name":"get_weather"}`, continuation chunks carry verbatim `"id":null,"type":null,"function":{"name":null,...}`. This "missing fields serialized as explicit null" pattern is typical of Go gateways (`encoding/json` without `omitempty`): the official DeepSeek API omits the fields, while Zen's gateway layer re-serializes and fills in explicit nulls.
 
-**Workarounds**:
-- Use the official DeepSeek API (which doesn't send explicit nulls) and everything works fine; or
-- Wait for the upstream dsh fix and upgrade; or
-- Temporarily set `tools: false` (disables the plugin tools) — the injection + extraction paths are unaffected, and memory still works (M4 scenario tests S1/S3/S4 all passed in this state).
-- **Testing side**: the M8 scenario tests added `scripts/test-harness/zen-nullstrip-proxy.mjs` (a test-only loopback proxy that strips explicit null keys from SSE chunks); verified to fully bypass F1, with goal/todo/schedule tools all working on the Zen endpoint. Note: it is for local testing only, not a solution for user deployments.
+## F2 — dsh 0.1.5's default maxTokens=256000 rejected by some gateways (external, mitigated on the benchmark side)
+
+**Symptom**: since 0.1.5, dsh `llm-deepseek` sends `max_tokens: 256000` on every request by default;
+the OpenCode Go gateway accepts at most 128000 for deepseek-v4-flash and returns HTTP 400
+`INVALID_REQUEST` beyond that, ending the whole turn with `reason.kind: error`. Because the plugin's
+turn_end extraction deliberately skips errored turns (nothing to extract), ingest appears to run
+normally while the memory graph stays empty — and the query phase then spins on zero memories.
+
+**Mitigation** (applied to the benchmark profiles): set `config.maxTokens: 65536` on `llm-deepseek`
+in `cordis.patch.yml`. The benchmark side also has two fail-safes (since 2026-09-10):
+- `run_benchmark.py` checks the memory graph's event count after memorize and aborts on zero
+  (fail fast, saves tokens);
+- the plugin writes a `<dataDir>/extraction-debug.jsonl` trace for every `session/event`
+  (`listener-saw` lines), so after the fact you can tell whether the listener saw turn/end and
+  what the end reason was.
 
 ## S5 — Schedule/Todo/Goal Event Bridging (implemented in M8)
 
