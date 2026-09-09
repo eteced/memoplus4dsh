@@ -8,7 +8,7 @@ import type {} from '@deepseek-ai/dsh-tools'
 import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session'
-import type { Session } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { MemoryStore } from './store.js'
 import { ExtractionPipeline, ExtractionQueue, PendingJobLog } from './extraction.js'
 import type { ExtractionJob } from './extraction.js'
@@ -138,7 +138,14 @@ function blockText(block: ContentBlock): string | undefined {
  * latter would feed memories back into extraction).
  */
 export function buildTurnText(session: Session, turn: number): string {
-  const events = session.events
+  // dsh ≥0.1.3 (Session V3) removed the public `session.events` array in favor
+  // of `snapshotEvents()`. Compiled against the 0.1.2 type package, the old
+  // property access typechecked but returned undefined at runtime under 0.1.5,
+  // silently killing turn_end extraction (2026-09-10 r2 incident). Feature-
+  // detect so the plugin keeps working on 0.1.2 runtimes.
+  const events = typeof session.snapshotEvents === 'function'
+    ? session.snapshotEvents()
+    : (session as unknown as { events: readonly SessionEvent[] }).events
   let startSeq = -1
   for (let i = events.length - 1; i >= 0; i--) {
     const event = events[i]!

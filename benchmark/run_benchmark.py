@@ -280,23 +280,36 @@ def main():
 
         with MemoplusDshAgent(REPO_ROOT, context_tag=f"{dataset_config['sub_dataset']}-{context_index}", dsh_home=dsh_home) as agent:
             construction_time = agent.memorize(formatted)
-            # Fail fast on an empty memory graph: if every ingest turn errored
-            # (e.g. the endpoint rejected requests with HTTP 400), turn_end
-            # extraction skips errored turns by design and the whole context's
-            # queries would burn budget against zero memories.
-            # (2026-09-10 r2 incident: dsh 0.1.5 default maxTokens=256000 was
-            # rejected by the opencode gateway; 13 queries ran on an empty graph.)
+            # Fail fast when extraction did not run: (a) if every ingest turn
+            # errored (e.g. HTTP 400 from the endpoint), turn_end extraction
+            # skips errored turns by design; (b) if the plugin's session-event
+            # path silently breaks against a new dsh API (2026-09-10 r2-b
+            # incident: Session V3 removed session.events, the listener threw
+            # per event, and the graph filled with orphan memory_remember tool
+            # writes only). Extraction events carry sourceTurn >= 0; tool
+            # writes are sourceTurn = -1, so count both totals.
             graph_path = os.path.join(dsh_home, "memoplus4dsh", "memory-graph.jsonl")
             graph_events = 0
+            extracted_events = 0
             if os.path.exists(graph_path):
                 with open(graph_path, encoding="utf-8") as fh:
-                    graph_events = sum(1 for _ in fh)
-            if graph_events == 0:
+                    for line in fh:
+                        try:
+                            entry = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if entry.get("op") != "event.add":
+                            continue
+                        graph_events += 1
+                        if entry.get("data", {}).get("sourceTurn", -1) >= 0:
+                            extracted_events += 1
+            if extracted_events == 0:
                 raise RuntimeError(
-                    f"memory graph is empty after memorize for context {context_index} "
-                    f"({dataset_config['sub_dataset']}); aborting instead of querying "
-                    f"with no memories")
-            print(f"[memorize] graph events: {graph_events}")
+                    f"no extraction-produced events after memorize for context "
+                    f"{context_index} ({dataset_config['sub_dataset']}): "
+                    f"graph_events={graph_events} extracted={extracted_events}; "
+                    f"aborting instead of querying a degraded memory graph")
+            print(f"[memorize] graph events: {graph_events} (extraction: {extracted_events})")
             for local_q_idx, qa in enumerate(tqdm(qa_pairs, desc="queries")):
                 if stride > 1 and local_q_idx % stride != offset:
                     continue
