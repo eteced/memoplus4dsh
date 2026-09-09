@@ -2,13 +2,21 @@
 
 > English: [known-issues.en.md](known-issues.en.md)
 
-## F1 — dsh 流式 tool_calls null 覆盖 bug（外部，影响所有工具）
+## F1 — dsh 流式 tool_calls null 覆盖 bug（外部，**上游已修复**）
 
-**状态**：上游 bug，已定位根因，准备上报。本插件不做拦截修补（那会越权改变全宿主的工具调用行为）。
+**状态**：✅ **上游已修复**（2026-09-10 验证）。修复 commit：`deepseek-harness@a1271a4903`
+（"fix(llm): keep streamed tool-call identity across empty deltas"，2026-09-01），
+首次包含于 `dsh-v0.1.3-alpha.1`，当前 `0.1.5-alpha.2` 已带。修复方式与根因诊断一致：
+新增 `acceptIdentity()`，续传 chunk 的空串/`null` id/name 一律视为"无更新"而非"清空"。
+2026-09-10 在 dsh 0.1.5-alpha.2 + OpenCode Go 端点实测：工具调用端到端正常
+（`scripts/test-harness/probe-tools.mjs` 通过）。**升级到 ≥0.1.3-alpha.1 即可，无需任何补丁**。
+另外注意 OpenCode Go 自 2026-09-06 起强制要求 `x-opencode-session` 请求头（缺失报
+`MissingSessionID` 错误）；dsh 无自定义 header 配置，评测侧用
+`scripts/test-harness/zen-session-proxy.mjs`（本地回环代理，仅注入该 header，不改写负载）。
 
-**现象**：在受影响的端点上，所有工具调用（`memory_search`、`memory_remember`、以及 dsh 自带的 bash/schedule 等）到达 agent loop 时 `name`/`callId` 为空字符串，loop 报 `unknown tool ""`。模型反复重试直到 step 上限，该轮最终回复为空。
+**历史现象**：在受影响的端点上，所有工具调用（`memory_search`、`memory_remember`、以及 dsh 自带的 bash/schedule 等）到达 agent loop 时 `name`/`callId` 为空字符串，loop 报 `unknown tool ""`。模型反复重试直到 step 上限，该轮最终回复为空。
 
-**受影响组合**：`@deepseek-ai/dsh@0.1.2-alpha.3` + 在流式续传 chunk 中发送**显式** `id: null, name: null` 的 OpenAI 兼容端点（如 OpenCode Zen）。官方 DeepSeek API 省略这些字段（`undefined`），不受影响。
+**受影响组合**：`@deepseek-ai/dsh@0.1.2-alpha.x` + 在流式续传 chunk 中发送**显式** `id: null, name: null` 的 OpenAI 兼容端点（如 OpenCode Zen）。官方 DeepSeek API 省略这些字段（`undefined`），不受影响。
 
 **根因**：`dsh-llm-deepseek` 的 `translate.ts` 用 `if (call.id !== undefined) block.callId = call.id` 累积 id/name —— `null !== undefined` 为 true，首个 chunk 的真实 id/name 被后续 chunk 的显式 null 覆盖；`closeBlock` 的 `?? ''` 随后产出空串。正确判断应为 `call.id != null`。name 同理。
 
@@ -19,11 +27,18 @@
 4. `tool/result` 事件显示 `ToolNotFoundError / UNKNOWN_TOOL / unknown tool ""`。
 5. **2026-09-01 复验（M8 场景测试期间）**：绕过 dsh 直接 curl Zen 原始 SSE，铁证仍在——首个 chunk `"id":"chatcmpl-tool-...","type":"function","function":{"name":"get_weather"}`，续传 chunk 原样携带 `"id":null,"type":null,"function":{"name":null,...}`。这种"缺失字段序列化为显式 null"是 Go 网关（`encoding/json` 无 `omitempty`）的典型特征：DeepSeek 官方 API 省略字段，Zen 的网关层重新序列化时补出了显式 null。
 
-**规避**：
-- 用官方 DeepSeek API（不发显式 null）即可完全正常；或
-- 等 dsh 上游修复后升级；或
-- 暂时把 `tools: false`（插件工具关闭）——注入 + 抽取链路不受影响，记忆功能仍工作（M4 场景测试在该状态下 S1/S3/S4 全过）。
-- **测试侧**：M8 场景测试新增 `scripts/test-harness/zen-nullstrip-proxy.mjs`（仅测试用的回环代理，删 SSE chunk 里的显式 null 键），实测可完全绕过 F1，goal/todo/schedule 工具在 Zen 端点全部打通。注意：它只用于本地测试，不是给用户部署的方案。
+## F2 — dsh 0.1.5 默认 maxTokens=256000 被部分网关拒绝（外部，评测侧已规避）
+
+**现象**：dsh `llm-deepseek` 0.1.5 起默认每个请求携带 `max_tokens: 256000`；OpenCode Go
+网关对 deepseek-v4-flash 只接受 ≤128000，超限返回 HTTP 400 `INVALID_REQUEST`，整个 turn
+以 `reason.kind: error` 结束。由于插件的 turn_end 抽取按设计跳过错误 turn（没有内容可抽），
+ingest 会"正常"跑完但记忆图为空——查询阶段在零记忆上空转。
+
+**规避**（已应用于 benchmark profile）：在 `cordis.patch.yml` 给 `llm-deepseek` 加
+`config.maxTokens: 65536`。评测侧另有双保险（2026-09-10 起）：
+- `run_benchmark.py` 在 memorize 后检查记忆图事件数，为 0 直接 abort（fail fast，省 token）；
+- 插件对 `session/event` 全量写 `<dataDir>/extraction-debug.jsonl` trace（`listener-saw` 行），
+  事后可判定 listener 是否看到 turn/end、reason 是什么。
 
 ## S5 — 日程/待办/目标事件桥接（已于 M8 实现）
 

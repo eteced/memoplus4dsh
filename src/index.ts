@@ -364,6 +364,16 @@ export function apply(ctx: Context, config: Config) {
         queue.enqueue(job)
       }
       ctx.on('session/event', (session, event) => {
+        // Diagnostic trace: one line per session event. Cheap (a dozen lines
+        // per turn) and settles "did the extraction listener even fire" after
+        // the fact — the 2026-09-10 r2 incident (empty graph after memorize)
+        // was only diagnosable at this level.
+        try {
+          appendFileSync(join(dataDir, 'extraction-debug.jsonl'),
+            JSON.stringify({ at: new Date().toISOString(), kind: 'listener-saw', eventType: event.type,
+              reason: event.type === 'turn/end' ? (event.data as { reason?: unknown }).reason : undefined,
+              session: session.id }) + '\n', 'utf8')
+        } catch { /* never break */ }
         if (event.type !== 'turn/end' || event.data.reason.kind !== 'completed') return
         const header = session.requestHeader()
         if (header !== undefined) lastRoute = { provider: header.config.provider, model: header.config.model }

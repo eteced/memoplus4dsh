@@ -280,6 +280,23 @@ def main():
 
         with MemoplusDshAgent(REPO_ROOT, context_tag=f"{dataset_config['sub_dataset']}-{context_index}", dsh_home=dsh_home) as agent:
             construction_time = agent.memorize(formatted)
+            # Fail fast on an empty memory graph: if every ingest turn errored
+            # (e.g. the endpoint rejected requests with HTTP 400), turn_end
+            # extraction skips errored turns by design and the whole context's
+            # queries would burn budget against zero memories.
+            # (2026-09-10 r2 incident: dsh 0.1.5 default maxTokens=256000 was
+            # rejected by the opencode gateway; 13 queries ran on an empty graph.)
+            graph_path = os.path.join(dsh_home, "memoplus4dsh", "memory-graph.jsonl")
+            graph_events = 0
+            if os.path.exists(graph_path):
+                with open(graph_path, encoding="utf-8") as fh:
+                    graph_events = sum(1 for _ in fh)
+            if graph_events == 0:
+                raise RuntimeError(
+                    f"memory graph is empty after memorize for context {context_index} "
+                    f"({dataset_config['sub_dataset']}); aborting instead of querying "
+                    f"with no memories")
+            print(f"[memorize] graph events: {graph_events}")
             for local_q_idx, qa in enumerate(tqdm(qa_pairs, desc="queries")):
                 if stride > 1 and local_q_idx % stride != offset:
                     continue
