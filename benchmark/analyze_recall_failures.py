@@ -120,7 +120,7 @@ def session_file(sub_dataset, query_id, archive_tag=None):
     # archive_tag=None 兼容无标签的旧归档（{sub}-ctx0）。
     mid = f"-{archive_tag}" if archive_tag else ""
     pattern = os.path.join(
-        ARCHIVE, f"{sub_dataset}{mid}-ctx*", "**", f"bench-q{query_id + 1}-*", "session.jsonl.zstd")
+        ARCHIVE, f"{sub_dataset}{mid}-ctx*", "**", f"bench-q{query_id + 1}-*", "session*.jsonl.zstd")
     hits = glob.glob(pattern, recursive=True)
     return hits[0] if hits else None
 
