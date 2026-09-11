@@ -107,6 +107,12 @@ npm test
 
 文档：[design](docs/design.md) · [M2 notes](docs/m2-notes.md)（store/extraction）· [M3 notes](docs/m3-notes.md)（retrieval/injection）· [M4 scenario tests](docs/m4-scenario-test.md) · [known issues](docs/known-issues.md)
 
+## 致谢与声明
+
+本项目与 Kimi K3 Thinking (high) 协作完成（co-author）。
+
+声明：本项目仅使用 Kimi K3 作为开发助手，与月之暗面（Moonshot AI）无任何隶属、背书或合作关系。
+
 ## 许可证
 
 修改版 MIT——见 [LICENSE.md](LICENSE.md)。
