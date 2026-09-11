@@ -345,6 +345,13 @@ The main evaluation uses **MemoryAgentBench** (arXiv:2507.05257, HUST-AI-HYZ): t
 
 ### 7.2 Results (second-round valid results, all audits PASS)
 
+> **Update (2026-09-11)**: this section reports r1 (M9 run-2), reflecting the method
+> at that iteration point. The full rerun (r2) after the M11–M17 iterations (entity
+> merge, supersede, NER-assisted extraction, harrier embeddings, multi-hop prompts)
+> scores **FC-SH 85.0 (89/78/90/83) / FC-MH 51.5 (31/66/55/54) /
+> LME(S*) judge 68.33**, all audits PASS. See [evaluation.md](evaluation.md) for the
+> complete two-round comparison and recall attribution.
+
 | Dimension | This combination | By length (6k/32k/128k/262k) | Best public baseline |
 |---|---|---|---|
 | FC-SH (single-hop forgetting) | **57.75** | 63.0 / 52.0 / 59.0 / 57.0 | GPT-4o 60.0 (full text in the window); best memory system HippoRAG-v2 54.0 |

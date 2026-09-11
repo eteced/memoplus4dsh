@@ -6,7 +6,7 @@
 
 一个连贯的、实体-时间融合的记忆图谱，用来承载 agent 需要记住的一切——来自对话的事实、偏好、计划和事件——而不是散落在按天切分的 markdown 文件里。核心算法移植自 memoplus/ETMS 研究代码库，并在 LoCoMo 上验证（mem0 协议下达 82.9%）。
 
-**状态：v0.1 已实现。** 技术报告：[docs/tech-report.md](docs/tech-report.md)。介绍（方法 + 基准结果）：[docs/intro.md](docs/intro.md)。架构：[docs/design.md](docs/design.md)。已知问题：[docs/known-issues.md](docs/known-issues.md)。
+**状态：v0.1 已实现。** 技术报告：[docs/tech-report.md](docs/tech-report.md)。介绍（方法 + 基准结果）：[docs/intro.md](docs/intro.md)。评测记录：[docs/evaluation.md](docs/evaluation.md)。修改记录：[CHANGELOG.zh.md](CHANGELOG.zh.md)。架构：[docs/design.md](docs/design.md)。已知问题：[docs/known-issues.md](docs/known-issues.md)。
 
 ## 工作原理
 
