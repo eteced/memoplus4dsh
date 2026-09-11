@@ -38,7 +38,7 @@ Each conversation turn ends (turn/end)          User sends a message (agent/pre-
 
 ## Evaluation Results (MemoryAgentBench, official repo + dataset + metrics, official DeepSeek API)
 
-> Official data loading / templates / metrics / judge reused with zero modifications; the plugin was tested in its default configuration. Full evaluation record (two-round comparison, attribution, engineering metrics): [docs/evaluation.md](docs/evaluation.md); methodology details: [docs/m9-benchmark.md](docs/m9-benchmark.md).
+> Official data loading / templates / metrics / judge reused with zero modifications; the plugin was tested in its default configuration. Full evaluation record (two-round comparison, attribution, engineering metrics): [docs/evaluation.md](evaluation.en.md); methodology details: [docs/m9-benchmark.md](m9-benchmark.en.md).
 > Numbers below are from the 2026-09-11 full rerun (r2); the previous valid round (r1) in parentheses.
 
 | Dimension | Ours (r2) | Best public baseline |
@@ -50,7 +50,7 @@ Each conversation turn ends (turn/end)          User sends a message (agent/pre-
 Two key points:
 
 - **FC-MH is a "death task" where all official agents score ≤7%**; we scored 51.5, still 54.0 at 262k — the only memory system that doesn't collapse on long-context multi-hop forgetting (o4-mini collapses to 14.0 at just 32k). Multi-hop + state updates happen to be exactly the design targets of entity-graph one-hop expansion + state dedup; the r2 multi-hop gains come mainly from system-prompt-guided iterative `memory_search` (attribution: mh_64k injection covers only 22.2%, active search lifts recall to 85.9%).
-- The entire evaluation ran under tool-whitelist isolation + per-context auditing — our first-round results were once voided and re-run because the model's "detective mode" peeked at dataset answers; the results above are the clean numbers after hardening (audit details in [docs/m9-benchmark.md](docs/m9-benchmark.md) §0).
+- The entire evaluation ran under tool-whitelist isolation + per-context auditing — our first-round results were once voided and re-run because the model's "detective mode" peeked at dataset answers; the results above are the clean numbers after hardening (audit details in [docs/m9-benchmark.md](m9-benchmark.en.md) §0).
 
 Also passed human-scenario tests (cross-session goal progress, todo evolution, SIGKILL crash recovery, etc.); 121 unit tests all green.
 
@@ -63,8 +63,8 @@ scripts/install.sh          # install into a dsh profile (default web), fully re
 scripts/uninstall.sh        # uninstall; memory data is retained in <dsh-home>/memoplus4dsh/
 ```
 
-See [README.md](README.md) and [docs/install-guide.md](docs/install-guide.md) for details.
+See [README.md](../README.md) and [docs/install-guide.md](install-guide.en.md) for details.
 
 ## License
 
-Modified MIT — see [LICENSE.md](LICENSE.md).
+Modified MIT — see [LICENSE.md](../LICENSE.md).

@@ -6,7 +6,7 @@ Unified long-term memory plugin for [DeepSeek Harness](https://github.com/deepse
 
 One coherent entity-time fused memory graph for everything an agent needs to remember — facts, preferences, plans, and events from conversations — instead of scattered per-day markdown files. The core algorithms are ported from the memoplus/ETMS research codebase, validated on LoCoMo (82.9% under the mem0 protocol).
 
-**Status: v0.1 implemented.** Tech report: [docs/tech-report.md](docs/tech-report.md). Intro (method + benchmark results): [docs/intro.md](docs/intro.md). Evaluation record: [docs/evaluation.md](docs/evaluation.md). Changelog: [CHANGELOG.md](CHANGELOG.md). Architecture: [docs/design.md](docs/design.md). Known issues: [docs/known-issues.md](docs/known-issues.md).
+**Status: v0.1 implemented.** Tech report: [docs/tech-report.md](docs/tech-report.en.md). Intro (method + benchmark results): [docs/intro.md](docs/intro.en.md). Evaluation record: [docs/evaluation.md](docs/evaluation.en.md). Changelog: [CHANGELOG.md](CHANGELOG.md). Architecture: [docs/design.md](docs/design.en.md). Known issues: [docs/known-issues.md](docs/known-issues.en.md).
 
 ## How it works
 
@@ -34,7 +34,7 @@ Three model-facing tools are also registered: `memory_search` (active recall), `
 
 - dsh `0.1.2-alpha.3` (the version this plugin is built and verified against; dsh is pre-release and may break compat)
 - Node `^22.19 || >=24` and `python3` (used by the install scripts to edit `cordis.patch.yml`)
-- Linux or macOS for the install/uninstall scripts (bash). On Windows the plugin itself runs fine — install manually: `npm install <this dir>` in the profile directory and add the plugin block to the profile's `cordis.patch.yml` as shown in [docs/install-guide.md](docs/install-guide.md)
+- Linux or macOS for the install/uninstall scripts (bash). On Windows the plugin itself runs fine — install manually: `npm install <this dir>` in the profile directory and add the plugin block to the profile's `cordis.patch.yml` as shown in [docs/install-guide.md](docs/install-guide.en.md)
 - Optional: `onnxruntime-node` (declared as an optional dependency) for local embeddings; without it retrieval degrades to keyword-only, nothing breaks
 
 ## Install
@@ -44,7 +44,7 @@ Three model-facing tools are also registered: `memory_search` (active recall), `
 scripts/install.sh [--profile <name>] [--dsh-home <path>]
 ```
 
-The script builds the plugin, links it into the profile (`npm install <this dir>`), and mounts it via a managed block in the profile's `cordis.patch.yml`. No dsh source is ever modified. See [docs/install-guide.md](docs/install-guide.md) (中文) for a full walkthrough including verification.
+The script builds the plugin, links it into the profile (`npm install <this dir>`), and mounts it via a managed block in the profile's `cordis.patch.yml`. No dsh source is ever modified. See [docs/install-guide.md](docs/install-guide.en.md) (中文) for a full walkthrough including verification.
 
 ## Uninstall
 
@@ -52,7 +52,7 @@ The script builds the plugin, links it into the profile (`npm install <this dir>
 scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 ```
 
-Fully reverses the install: the managed block and the `file:` dependency are removed, and dsh runs exactly as before. **Your memory data is kept** — the graph lives in `<dsh-home>/memoplus4dsh/`; delete that directory by hand if you want it gone. Reinstalling later picks the data up again (verified in [docs/m5-release-check.md](docs/m5-release-check.md)).
+Fully reverses the install: the managed block and the `file:` dependency are removed, and dsh runs exactly as before. **Your memory data is kept** — the graph lives in `<dsh-home>/memoplus4dsh/`; delete that directory by hand if you want it gone. Reinstalling later picks the data up again (verified in [docs/m5-release-check.md](docs/m5-release-check.en.md)).
 
 ## Configuration
 
@@ -95,7 +95,7 @@ scripts/test-harness/stop-test.sh
 scripts/test-harness/reset-test.sh   # stop + wipe the test DSH_HOME
 ```
 
-`MEMOPLUS4DSH_TEST_DIR` overrides the test directory. Real-LLM scenario tests: `node scripts/test-harness/run-scenarios.mjs` (requires `DEEPSEEK_API_KEY` in the environment; see [docs/m4-scenario-test.md](docs/m4-scenario-test.md)).
+`MEMOPLUS4DSH_TEST_DIR` overrides the test directory. Real-LLM scenario tests: `node scripts/test-harness/run-scenarios.mjs` (requires `DEEPSEEK_API_KEY` in the environment; see [docs/m4-scenario-test.md](docs/m4-scenario-test.en.md)).
 
 ## Development
 
@@ -105,7 +105,7 @@ npm run build
 npm test
 ```
 
-Docs: [design](docs/design.md) · [M2 notes](docs/m2-notes.md) (store/extraction) · [M3 notes](docs/m3-notes.md) (retrieval/injection) · [M4 scenario tests](docs/m4-scenario-test.md) · [known issues](docs/known-issues.md)
+Docs: [design](docs/design.en.md) · [M2 notes](docs/m2-notes.en.md) (store/extraction) · [M3 notes](docs/m3-notes.en.md) (retrieval/injection) · [M4 scenario tests](docs/m4-scenario-test.en.md) · [known issues](docs/known-issues.en.md)
 
 ## License
 

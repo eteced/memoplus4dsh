@@ -349,7 +349,7 @@ The main evaluation uses **MemoryAgentBench** (arXiv:2507.05257, HUST-AI-HYZ): t
 > at that iteration point. The full rerun (r2) after the M11–M17 iterations (entity
 > merge, supersede, NER-assisted extraction, harrier embeddings, multi-hop prompts)
 > scores **FC-SH 85.0 (89/78/90/83) / FC-MH 51.5 (31/66/55/54) /
-> LME(S*) judge 68.33**, all audits PASS. See [evaluation.md](evaluation.md) for the
+> LME(S*) judge 68.33**, all audits PASS. See [evaluation.md](evaluation.en.md) for the
 > complete two-round comparison and recall attribution.
 
 | Dimension | This combination | By length (6k/32k/128k/262k) | Best public baseline |

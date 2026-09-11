@@ -72,7 +72,7 @@ Contents of the data directory `<dsh-home>/memoplus4dsh/`:
 scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 ```
 
-Completely removes the mount and the dependency; dsh returns to its pre-installation state (actually tested, see [m5-release-check.md](m5-release-check.md)). **Memory data is retained** in `<dsh-home>/memoplus4dsh/`; delete that directory manually to remove it entirely. Data picks up automatically after reinstallation.
+Completely removes the mount and the dependency; dsh returns to its pre-installation state (actually tested, see [m5-release-check.md](m5-release-check.en.md)). **Memory data is retained** in `<dsh-home>/memoplus4dsh/`; delete that directory manually to remove it entirely. Data picks up automatically after reinstallation.
 
 ## Test Instance (Sandbox-Isolated)
 
@@ -84,4 +84,4 @@ scripts/test-harness/reset-test.sh   # stop and wipe the test DSH_HOME
 
 ## Known Limitations
 
-See [known-issues.md](known-issues.md) — pay special attention to F1: on some third-party OpenAI-compatible endpoints, dsh 0.1.2-alpha.3 has all tool calls broken (affects `memory_search`/`memory_remember`; injection and extraction are unaffected); the official DeepSeek API does not have this problem.
+See [known-issues.md](known-issues.en.md) — pay special attention to F1: on some third-party OpenAI-compatible endpoints, dsh 0.1.2-alpha.3 has all tool calls broken (affects `memory_search`/`memory_remember`; injection and extraction are unaffected); the official DeepSeek API does not have this problem.

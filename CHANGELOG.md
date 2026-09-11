@@ -4,7 +4,7 @@
 
 All notable changes to memoplus4dsh, grouped by development milestone. The detailed
 per-milestone reports live in [docs/](docs/) (bilingual). Evaluation numbers refer to
-MemoryAgentBench; see [docs/evaluation.md](docs/evaluation.md) for the full archived record.
+MemoryAgentBench; see [docs/evaluation.md](docs/evaluation.en.md) for the full archived record.
 
 ## r2 full rerun — 2026-09-11
 

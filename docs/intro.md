@@ -36,7 +36,7 @@
 
 ## 评测结果（MemoryAgentBench，官方仓库+数据集+指标，DeepSeek 官方 API）
 
-> 官方数据加载/模板/指标/judge 零修改复用；被测为插件默认配置。完整评测记录（两轮对照、归因、工程指标）：[docs/evaluation.md](docs/evaluation.md)；口径细节：[docs/m9-benchmark.md](docs/m9-benchmark.md)。
+> 官方数据加载/模板/指标/judge 零修改复用；被测为插件默认配置。完整评测记录（两轮对照、归因、工程指标）：[docs/evaluation.md](evaluation.md)；口径细节：[docs/m9-benchmark.md](m9-benchmark.md)。
 > 下表为 2026-09-11 全量重跑（r2）成绩；括号内为上一有效轮（r1）。
 
 | 维度 | 本组合（r2） | 最佳公开基线 |
@@ -48,7 +48,7 @@
 两个关键点：
 
 - **FC-MH 是官方全体 agent ≤7% 的"死亡任务"**，我们 51.5，且在 262k 仍有 54.0，是唯一在长上下文多跳遗忘上不失效的记忆系统（o4-mini 32k 即崩至 14.0）。多跳 + 状态更新恰好是实体图一跳扩展 + 状态去重的设计目标；r2 的多跳提升主要来自系统提示词引导的迭代 `memory_search`（召回归因：mh_64k 注入覆盖仅 22.2%，主动搜索补到 85.9%）。
-- 评测全程工具白名单隔离 + 逐 context 审计——我们的第一轮成绩曾因模型"侦探模式"偷读数据集答案而作废重跑，上述为加固后的干净成绩（审计细节见 [docs/m9-benchmark.md](docs/m9-benchmark.md) §0）。
+- 评测全程工具白名单隔离 + 逐 context 审计——我们的第一轮成绩曾因模型"侦探模式"偷读数据集答案而作废重跑，上述为加固后的干净成绩（审计细节见 [docs/m9-benchmark.md](m9-benchmark.md) §0）。
 
 另经真人场景测试（goal 跨 session 进度、todo 演进、SIGKILL 崩溃恢复等）全过；121 个单测全绿。
 
@@ -61,8 +61,8 @@ scripts/install.sh          # 装到 dsh profile（默认 web），完全可逆
 scripts/uninstall.sh        # 卸载；记忆数据保留在 <dsh-home>/memoplus4dsh/
 ```
 
-详见 [README.md](README.md) 与 [docs/install-guide.md](docs/install-guide.md)。
+详见 [README.md](../README.zh.md) 与 [docs/install-guide.md](install-guide.md)。
 
 ## License
 
-Modified MIT — see [LICENSE.md](LICENSE.md).
+Modified MIT — see [LICENSE.md](../LICENSE.md).
