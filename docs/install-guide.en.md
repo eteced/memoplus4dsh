@@ -9,10 +9,14 @@ Complete steps from zero to working. Prerequisites: dsh (`@deepseek-ai/dsh@0.1.2
 ```sh
 git clone <repo-url> memoplus4dsh
 cd memoplus4dsh
-npm install        # onnxruntime-node is an optional dependency; failure to install it doesn't block (retrieval degrades to pure keyword)
-npm run build      # produces lib/
-npm test           # optional: 119 unit tests should all pass
 ```
+
+> No manual `npm install` / `npm run build` needed — on its first run
+> `install.sh` checks for and installs the devDependencies required to build
+> (`npm ci` when the lockfile is present), then builds automatically.
+> To run the unit tests first, do `npm install && npm test` manually
+> (onnxruntime-node is an optional dependency; if it fails to install, nothing
+> breaks — retrieval just degrades to keyword-only).
 
 ## 2. Install into a dsh Profile
 
