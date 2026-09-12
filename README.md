@@ -28,7 +28,7 @@ next user message (agent/pre-step) ──► hybrid retrieval (dense cosine + ID
 top-k memories injected as a plugin-sourced user/message (logged like any model input)
 ```
 
-Three model-facing tools are also registered: `memory_search` (active recall), `memory_remember` (explicit "remember this") and `memory_visualize` (renders the memory graph as a self-contained interactive HTML page at `<dataDir>/memory-graph.html`; also available offline via `node scripts/visualize.mjs`). Extraction reuses the session's own provider/model route — no new API keys.
+Four model-facing tools are also registered: `memory_search` (active recall), `memory_remember` (explicit "remember this"), `memory_visualize` (renders the memory graph as a self-contained interactive HTML page at `<dataDir>/memory-graph.html`; also available offline via `node scripts/visualize.mjs`) and `memory_status` (live report: effective config, active embedding/NER backends, graph size, extraction queue health — ask the agent "memory status" in chat). Extraction reuses the session's own provider/model route — no new API keys.
 
 ## Requirements
 
@@ -67,7 +67,7 @@ Set under the plugin's `config:` in the profile's `cordis.patch.yml`:
 | `injectTopK` | `8` | Max memories injected per turn |
 | `injectMaxChars` | `2000` | Character cap for the injected memory block |
 | `injectMaxQueryChars` | `4000` | Skip retrieval+injection for longer user messages (document dumps, not queries) |
-| `tools` | `true` | Register `memory_search` / `memory_remember` / `memory_visualize` tools |
+| `tools` | `true` | Register `memory_search` / `memory_remember` / `memory_visualize` / `memory_status` tools |
 | `progressBridge` | `true` | Bridge goal/todo/schedule/plan progress events into the memory graph (M8) |
 | `stateDedup` | `true` | Retrieval keeps only the newest bridge state event per entity+family; history stays in the graph |
 | `embedding` | `true` | Local ONNX embeddings; failure degrades to keyword-only retrieval |

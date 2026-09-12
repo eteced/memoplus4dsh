@@ -1,4 +1,4 @@
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -256,7 +256,8 @@ export function apply(ctx: Context, config: Config) {
         'decompose the question and call memory_search once per hop — ' +
         'each result includes related facts marked "via <entity>", follow those entities to the next hop ' +
         'until the chain is complete. ' +
-        'When the user asks you to remember something, you MUST call the memory_remember tool with the fact as one self-contained sentence.',
+        'When the user asks you to remember something, you MUST call the memory_remember tool with the fact as one self-contained sentence. ' +
+        'When the user asks about the memory system itself — its status, configuration, or whether its features/backends are working — call the memory_status tool.',
     })
 
     // Progress bridge: goal/todo/schedule/plan events -> memory events (m8 P0-A).
@@ -270,14 +271,12 @@ export function apply(ctx: Context, config: Config) {
       model: EMBEDDING_MODELS[config.embeddingModel ?? 'multilingual'],
     })
     const backend = config.embeddingBackend ?? 'auto'
+    const harrier = new HarrierEmbedder({ python: config.embedPython ?? config.nerPython })
     const embedder: TextEmbedder = config.embedding === false
       ? NULL_EMBEDDER
       : backend === 'onnx'
         ? onnxEmbedder
-        : new FallbackEmbedder(
-          new HarrierEmbedder({ python: config.embedPython ?? config.nerPython }),
-          onnxEmbedder,
-        )
+        : new FallbackEmbedder(harrier, onnxEmbedder)
 
     // Query-side LLM helpers (m11 v3): keyword expansion (proven prompt) for
     // retrieval; verbatim-quote distillation for injection — used only when
@@ -318,11 +317,14 @@ export function apply(ctx: Context, config: Config) {
         // Debug logging must never break anything.
       }
     }
+    // NER detector chain (m12): PyTorch sidecar → ONNX → off; the named
+    // instance also feeds the memory_status report (which leg is live).
+    const nerDetector = config.nerAssist === false ? NULL_NER : createNerDetector({ python: config.nerPython })
     if (config.extraction === 'turn_end') {
       const pipeline = new ExtractionPipeline({
         store,
         callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, config.extractionMaxTokens ?? 8192),
-        ner: config.nerAssist === false ? NULL_NER : createNerDetector({ python: config.nerPython }),
+        ner: nerDetector,
         entityMerger: config.entityMergeLlm === false
           ? undefined
           : new LlmEntityMerger({
@@ -420,7 +422,66 @@ export function apply(ctx: Context, config: Config) {
       })
     }
 
-    const disposeTools = config.tools === false ? undefined : registerMemoryTools(ctx, { store, retriever })
+    // Live status report for the memory_status tool: effective config, which
+    // backends actually came up (not the offline-probe guess), graph size and
+    // extraction queue health.
+    const statusReport = async (): Promise<string> => {
+      const lines: string[] = ['memoplus4dsh status', '', '[config]']
+      const shown: [string, unknown][] = [
+        ['extraction', config.extraction ?? 'turn_end'],
+        ['injection', config.injection !== false],
+        ['tools', config.tools !== false],
+        ['progressBridge', config.progressBridge !== false],
+        ['injectTopK', config.injectTopK ?? 8],
+        ['injectMaxChars', config.injectMaxChars ?? 2000],
+        ['stateDedup', config.stateDedup !== false],
+        ['embedding', config.embedding !== false],
+        ['embeddingModel', config.embeddingModel ?? 'multilingual'],
+        ['embeddingBackend', backend],
+        ['queryExpansion', config.queryExpansion !== false],
+        ['entityMergeLlm', config.entityMergeLlm !== false],
+        ['supersedeLlm', config.supersedeLlm !== false],
+        ['nerAssist', config.nerAssist !== false],
+      ]
+      for (const [k, v] of shown) lines.push(`  ${k} = ${JSON.stringify(v)}`)
+      lines.push('', '[backends]')
+      if (config.embedding === false) {
+        lines.push('  embedding: OFF (keyword-only retrieval)')
+      } else if (backend === 'onnx') {
+        lines.push('  embedding: ONNX (forced via embeddingBackend)')
+      } else {
+        lines.push(`  embedding: ${await harrier.available() ? 'harrier sidecar (1024-dim multilingual)' : 'ONNX multilingual (fallback; pip install sentence-transformers for harrier)'}`)
+      }
+      const nerLegs = 'legs' in nerDetector
+        ? (nerDetector as { legs: { sidecar: { available(): Promise<boolean> }; onnx: { available(): Promise<boolean> } } }).legs
+        : undefined
+      if (config.nerAssist === false || nerLegs === undefined) {
+        lines.push('  ner: OFF')
+      } else if (await nerLegs.sidecar.available()) {
+        lines.push('  ner: PyTorch sidecar (GLiNER + stanza)')
+      } else if (await nerLegs.onnx.available()) {
+        lines.push('  ner: ONNX package (fallback; pip install torch gliner stanza for the sidecar)')
+      } else {
+        lines.push('  ner: unavailable (extraction continues without candidate hints)')
+      }
+      lines.push('', '[data]')
+      lines.push(`  graph: ${store.filePath}`)
+      lines.push(`  entities: ${store.listEntities().length}, events: ${store.listEvents().length}`)
+      const pendingFile = join(dataDir, 'extraction-pending.jsonl')
+      const backlog = existsSync(pendingFile) ? readFileSync(pendingFile, 'utf8').split('\n').filter(l => l.trim().length > 0).length : 0
+      lines.push(`  extraction queue backlog: ${backlog}${backlog > 0 ? ' (reprocessed while dsh runs; growth means extraction calls are failing)' : ''}`)
+      const debugFile = join(dataDir, 'extraction-debug.jsonl')
+      if (existsSync(debugFile)) {
+        const last = readFileSync(debugFile, 'utf8').trim().split('\n').filter(Boolean).pop()
+        try {
+          const j = JSON.parse(last ?? '{}') as { at?: string; kind?: string; error?: string }
+          lines.push(`  last extraction: ${j.at ?? '?'} ${j.kind ?? ''}${j.error !== undefined ? ` — ${j.error.slice(0, 80)}` : ''}`)
+        } catch { /* corrupt tail line — ignore */ }
+      }
+      return lines.join('\n')
+    }
+
+    const disposeTools = config.tools === false ? undefined : registerMemoryTools(ctx, { store, retriever, statusReport })
 
     logger.info(`memory plugin loaded (data: ${store.filePath}, extraction: ${config.extraction})`)
 

@@ -28,7 +28,7 @@ next user message (agent/pre-step) ──► hybrid retrieval (dense cosine + ID
 top-k memories injected as a plugin-sourced user/message (logged like any model input)
 ```
 
-同时注册了三个面向模型的工具：`memory_search`（主动 recall）、`memory_remember`（显式的"记住这个"）和 `memory_visualize`（把记忆图谱渲染成一个自包含的交互式 HTML 页面，位于 `<dataDir>/memory-graph.html`；也可以通过 `node scripts/visualize.mjs` 离线使用）。Extraction 复用会话自身的 provider/model 路由——不需要新的 API key。
+同时注册了四个面向模型的工具：`memory_search`（主动 recall）、`memory_remember`（显式的"记住这个"）、`memory_visualize`（把记忆图谱渲染成自包含的交互式 HTML 页面，位于 `<dataDir>/memory-graph.html`；也可 `node scripts/visualize.mjs` 离线使用）和 `memory_status`（运行时实况报告：生效配置、实际启用的 embedding/NER 后端、图规模、抽取队列健康度——在对话里问"记忆系统状态"即可）。Extraction 复用会话自身的 provider/model 路由——不需要新的 API key。
 
 ## 环境要求
 
@@ -67,7 +67,7 @@ scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 | `injectTopK` | `8` | 每个 turn 最多注入的记忆条数 |
 | `injectMaxChars` | `2000` | 注入记忆块的字符数上限 |
 | `injectMaxQueryChars` | `4000` | 超过该长度的用户消息跳过 retrieval+injection（视为文档粘贴而非查询） |
-| `tools` | `true` | 注册 `memory_search` / `memory_remember` / `memory_visualize` 工具 |
+| `tools` | `true` | 注册 `memory_search` / `memory_remember` / `memory_visualize` / `memory_status` 工具 |
 | `progressBridge` | `true` | 把 goal/todo/schedule/plan 进度事件桥接进记忆图谱（M8） |
 | `stateDedup` | `true` | Retrieval 时每个 entity+family 只保留最新的桥接状态事件；历史仍留在图谱中 |
 | `embedding` | `true` | 本地 ONNX embedding；失败时降级为纯关键词 retrieval |

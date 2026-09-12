@@ -50,6 +50,14 @@ const VISUALIZE_OUTPUT_SCHEMA = {
   },
 } as const
 
+const STATUS_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    report: { type: 'string', required: true },
+  },
+} as const
+
 interface SearchResultItem {
   fact: string
   time: string
@@ -66,6 +74,8 @@ function renderSearchResults(_args: { query: string }, value: SearchResultItem[]
 export interface MemoryToolsDeps {
   store: MemoryStore
   retriever: Retriever
+  /** Live status report builder (memory_status tool); falls back to basic store stats. */
+  statusReport?: () => Promise<string>
   /** Clock hook (tests). */
   now?: () => Date
 }
@@ -178,6 +188,24 @@ export function registerMemoryTools(ctx: Context, deps: MemoryToolsDeps): () => 
         const out = join(dirname(deps.store.filePath), 'memory-graph.html')
         await writeFile(out, html, 'utf8')
         return { path: out, entities: deps.store.listEntities().length, events: deps.store.listEvents().length }
+      },
+    })),
+    ctx.tools.register(defineTool({
+      name: 'memory_status',
+      description: 'Report the live status of the long-term memory system: effective configuration, '
+        + 'which embedding/NER backends are actually active, memory graph size, and extraction queue health. '
+        + 'Use when the user asks about the memory system itself — status, config, or whether its features work.',
+      parameters: {},
+      output: {
+        schema: STATUS_OUTPUT_SCHEMA,
+        render: (_args, value) => [{ type: 'text', text: value.report }],
+      },
+      isConcurrencySafe: () => true,
+      async execute() {
+        const report = deps.statusReport !== undefined
+          ? await deps.statusReport()
+          : `memory graph: ${deps.store.listEntities().length} entities, ${deps.store.listEvents().length} events (${deps.store.filePath})`
+        return { report }
       },
     })),
   ]

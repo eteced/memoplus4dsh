@@ -66,6 +66,11 @@ export class PySidecarNer implements NerDetector {
     })
   }
 
+  /** Whether the sidecar came up (checked lazily on first call). */
+  available(): Promise<boolean> {
+    return this.init()
+  }
+
   private init(): Promise<boolean> {
     this.initPromise ??= this.initInner()
     return this.initPromise

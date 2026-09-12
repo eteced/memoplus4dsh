@@ -62,7 +62,7 @@ describe('registerMemoryTools', () => {
     const store = new MemoryStore({ dir })
     const retriever = new Retriever({ store, now: () => NOW })
     const dispose = registerMemoryTools(ctx, { store, retriever, now: () => NOW })
-    expect([...registered.keys()].sort()).toEqual(['memory_remember', 'memory_search', 'memory_visualize'])
+    expect([...registered.keys()].sort()).toEqual(['memory_remember', 'memory_search', 'memory_status', 'memory_visualize'])
     dispose()
     expect(registered.size).toBe(0)
   })
@@ -178,6 +178,30 @@ describe('registerMemoryTools', () => {
     expect(event.mentionTime).toBe(NOW.toISOString())
     expect(event.sourceSession).toBe('session-tools')
     expect(event.predicate).toBe('remembered')
+  })
+})
+
+describe('memory_status', () => {
+  it('returns the statusReport text when provided, basic stats otherwise', async () => {
+    const { ctx, registered } = fakeToolsHost()
+    const store = seededStore()
+    const retriever = new Retriever({ store, now: () => NOW })
+    registerMemoryTools(ctx, {
+      store, retriever, now: () => NOW,
+      statusReport: () => Promise.resolve('memoplus4dsh status\n\n[config]\n  extraction = "turn_end"'),
+    })
+    const status = registered.get('memory_status')!
+    const value = await status.execute({}, FAKE_EXEC) as { report: string }
+    expect(value.report).toContain('[config]')
+    const blocks = status.output.render({}, value)
+    expect(blocks[0]!.type).toBe('text')
+    expect((blocks[0] as { text: string }).text).toContain('turn_end')
+
+    const { ctx: ctx2, registered: registered2 } = fakeToolsHost()
+    registerMemoryTools(ctx2, { store, retriever, now: () => NOW })
+    const fallback = await registered2.get('memory_status')!.execute({}, FAKE_EXEC) as { report: string }
+    expect(fallback.report).toContain('1 entities')
+    expect(fallback.report).toContain('1 events')
   })
 })
 

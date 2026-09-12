@@ -62,14 +62,17 @@ import { PySidecarNer } from './ner-sidecar.js'
  * ONNX 包（轻量但多语言质量弱）→ 关闭。两侧都不可用时静默降级为无提示
  * （与无 nerAssist 的历史行为一致）。
  */
-export function createNerDetector(options: { python?: string; model?: string } = {}): NerDetector {
-  const sidecar = new PySidecarNer(options)
-  const onnx = new GlinerNer()
+export function createNerDetector(options: { python?: string; model?: string } = {}): NerDetector & {
+  /** 状态探测用：链路各腿的可用性（memory_status 工具）。 */
+  legs: { sidecar: PySidecarNer; onnx: GlinerNer }
+} {
+  const legs = { sidecar: new PySidecarNer(options), onnx: new GlinerNer() }
   return {
+    legs,
     detect: async text => {
-      const viaSidecar = await sidecar.detect(text)
+      const viaSidecar = await legs.sidecar.detect(text)
       if (viaSidecar !== null) return viaSidecar
-      return onnx.detect(text)
+      return legs.onnx.detect(text)
     },
   }
 }
@@ -97,6 +100,11 @@ export class GlinerNer implements NerDetector {
   private init(): Promise<GlinerRuntime | null> {
     this.initPromise ??= this.initInner().catch(() => null)
     return this.initPromise
+  }
+
+  /** Whether the ONNX runtime loaded (checked lazily on first call). */
+  async available(): Promise<boolean> {
+    return (await this.init()) !== null
   }
 
   private async initInner(): Promise<GlinerRuntime | null> {
