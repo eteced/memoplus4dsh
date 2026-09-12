@@ -83,6 +83,8 @@ scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 | `embeddingModel` | `multilingual` | `multilingual` = distiluse-base-multilingual-cased-v2（512 维，首次下载约 135MB，支持 50+ 种语言，含中文）；`english` = all-MiniLM-L6-v2（384 维，约 23MB）。切换后已存向量会惰性重嵌入 |
 | `embeddingBackend` | `auto` | `auto` = 当其 python 环境装有 `sentence-transformers` 时使用 harrier sidecar（microsoft/harrier-oss-v1-0.6b，1024 维，多语言，CPU 约 10ms/条），否则用 ONNX encoder；也可用 `onnx` / `harrier` 强制指定。查询侧使用该模型训练时的 instruction prompt |
 | `embedPython` | （nerPython 或 python3） | harrier embedding sidecar 使用的 Python 可执行文件 |
+
+> 一键配齐完整版 python 后端：`scripts/setup-python.sh` 创建专用 venv（sentence-transformers + torch/gliner/stanza）并输出要粘贴进 `cordis.patch.yml` 的 `nerPython` / `embedPython` 配置行。推荐专用 venv：插件解析的是 **dsh 进程** PATH 上的 `python3`，和你交互 shell 里的解释器未必是同一个。
 | `hfBaseUrl` | `https://huggingface.co` | embedding 模型下载的镜像基础 URL |
 | `queryExpansion` | `true` | retrieval 期间的 LLM query expansion + 注入用的逐字引用式 query 蒸馏（调用限制为 1024 token / 30s，结果按 query 缓存在磁盘上） |
 | `entityMergeLlm` | `true` | extraction 时由 LLM 裁决的实体合并（embedding 候选 + 每个 turn 一次受限调用；只合并明确判定为 `sure` 的候选） |

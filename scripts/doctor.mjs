@@ -88,9 +88,12 @@ function readOverrides() {
   return overrides
 }
 
-function pyProbe(python, code) {
+function pyProbe(python, modules) {
+  // 用 find_spec 探测（不执行模块本体）：import sentence_transformers 会连带
+  // 加载 torch，冷启动常超 15s，会造成"装了却判缺"的误报。
+  const checks = modules.split(',').map(m => `importlib.util.find_spec('${m.trim()}') is not None`).join(' and ')
   try {
-    execFileSync(python, ['-c', code], { stdio: ['ignore', 'ignore', 'ignore'], timeout: 15000 })
+    execFileSync(python, ['-c', `import importlib.util, sys; sys.exit(0 if ${checks} else 1)`], { stdio: ['ignore', 'ignore', 'ignore'], timeout: 20000 })
     return true
   } catch {
     return false
@@ -162,7 +165,7 @@ if (eff.embedding === false) {
   console.log(warn('embedding 已关闭 —— 检索为纯关键词模式'))
 } else {
   const sidecarPy = join(PLUGIN_DIR, 'scripts', 'embed-sidecar', 'embed_sidecar.py')
-  const hasSt = pyProbe(embedPython, 'import sentence_transformers')
+  const hasSt = pyProbe(embedPython, 'sentence_transformers')
   const backend = eff.embeddingBackend
   if (backend === 'onnx') {
     console.log(info(`embeddingBackend=onnx（强制 ONNX，跳过 harrier）`))
@@ -170,7 +173,7 @@ if (eff.embedding === false) {
     console.log(ok(`harrier sidecar 可用（${embedPython} 已装 sentence-transformers）—— embedding 走 harrier 0.6B`))
   } else {
     console.log(warn(`harrier sidecar 不可用（${embedPython} 缺 sentence-transformers）—— 回退 ONNX 多语言模型`))
-    console.log(info(`完整版: ${embedPython} -m pip install sentence-transformers（模型首用自动下载 ~1.2GB）`))
+    console.log(info(`完整版: scripts/setup-python.sh（建专用 venv 一键装齐，推荐）或 ${embedPython} -m pip install sentence-transformers`))
   }
   const modelsDir = join(DATA_DIR, 'models')
   if (existsSync(modelsDir) && readdirSync(modelsDir).length > 0) {
@@ -185,13 +188,13 @@ if (eff.nerAssist === false) {
   console.log(warn('nerAssist 已关闭 —— 抽取无 NER 候选提示'))
 } else {
   const nerPy = join(PLUGIN_DIR, 'scripts', 'ner-sidecar', 'ner_sidecar.py')
-  if (pyProbe(nerPython, 'import torch, gliner, stanza') && existsSync(nerPy)) {
+  if (pyProbe(nerPython, 'torch, gliner, stanza') && existsSync(nerPy)) {
     console.log(ok(`NER PyTorch sidecar 可用（${nerPython} 已装 torch/gliner/stanza）—— 事件召回最完整`))
   } else if (existsSync(join(PLUGIN_DIR, 'node_modules', '@lmoe', 'gliner-onnx'))) {
-    console.log(warn(`NER 回退 ONNX 包（质量略降；完整版: ${nerPython} -m pip install torch gliner stanza）`))
+    console.log(warn(`NER 回退 ONNX 包（质量略降；完整版: scripts/setup-python.sh 或 ${nerPython} -m pip install torch gliner stanza）`))
   } else {
     console.log(warn(`NER 不可用（${nerPython} 缺 torch/gliner/stanza，ONNX 包也未装）—— 抽取仍工作但召回偏低`))
-    console.log(info(`完整版: ${nerPython} -m pip install torch gliner stanza（GLiNER 模型首用自动下载）`))
+    console.log(info(`完整版: scripts/setup-python.sh（推荐）或 ${nerPython} -m pip install torch gliner stanza`))
   }
 }
 
