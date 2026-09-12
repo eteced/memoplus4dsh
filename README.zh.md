@@ -52,6 +52,8 @@ scripts/install.sh [--profile <name>] [--dsh-home <path>]
 scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 ```
 
+**验证安装**：`node scripts/doctor.mjs [--profile <name>] [--dsh-home <path>]` 输出挂载状态、生效配置（默认值 vs 你的覆盖）、组件探测（harrier/ONNX 嵌入链、NER 检测链、模型缓存）和记忆数据状态（图规模、抽取队列、最近抽取活动）——并给出启用完整版后端的提示。
+
 完全逆转安装过程：受管理块和 `file:` 依赖都会被移除，dsh 的运行与安装前完全一致。**你的记忆数据会被保留**——图谱存放在 `<dsh-home>/memoplus4dsh/`；如果想彻底删除，请手动删除该目录。之后重新安装会再次读到这些数据（已在 [docs/m5-release-check.md](docs/m5-release-check.md) 中验证）。
 
 ## 配置
