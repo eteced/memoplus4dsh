@@ -62,7 +62,7 @@ import { PySidecarNer } from './ner-sidecar.js'
  * ONNX 包（轻量但多语言质量弱）→ 关闭。两侧都不可用时静默降级为无提示
  * （与无 nerAssist 的历史行为一致）。
  */
-export function createNerDetector(options: { python?: string; model?: string } = {}): NerDetector & {
+export function createNerDetector(options: { python?: string; model?: string; hfBaseUrl?: string } = {}): NerDetector & {
   /** 状态探测用：链路各腿的可用性（memory_status 工具）。 */
   legs: { sidecar: PySidecarNer; onnx: GlinerNer }
 } {

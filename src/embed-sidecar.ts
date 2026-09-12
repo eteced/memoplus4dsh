@@ -72,6 +72,8 @@ export interface HarrierEmbedderOptions {
   model?: string
   /** 单次调用超时（默认 60s；大批量分块调用）。 */
   timeoutMs?: number
+  /** HF 镜像基址（以 HF_ENDPOINT 传给 sidecar；模型首用下载走镜像）。 */
+  hfBaseUrl?: string
 }
 
 export class HarrierEmbedder implements TextEmbedder {
@@ -80,6 +82,7 @@ export class HarrierEmbedder implements TextEmbedder {
   private readonly python: string
   private readonly model?: string
   private readonly timeoutMs: number
+  private readonly hfBaseUrl?: string
   private initPromise: Promise<boolean> | undefined
   private proc: ReturnType<typeof spawn> | undefined
   private nextId = 0
@@ -92,6 +95,7 @@ export class HarrierEmbedder implements TextEmbedder {
     this.python = options.python ?? 'python3'
     this.model = options.model
     this.timeoutMs = options.timeoutMs ?? 60_000
+    this.hfBaseUrl = options.hfBaseUrl
   }
 
   /** Whether the sidecar came up (checked lazily on first embed). */
@@ -147,6 +151,7 @@ export class HarrierEmbedder implements TextEmbedder {
       }
       const env = { ...process.env }
       if (this.model !== undefined) env['EMBED_MODEL'] = this.model
+      if (this.hfBaseUrl !== undefined) env['HF_ENDPOINT'] = this.hfBaseUrl
       let settled = false
       const finish = (ok: boolean): void => {
         if (!settled) {

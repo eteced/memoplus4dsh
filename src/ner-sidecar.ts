@@ -22,12 +22,15 @@ export interface PySidecarNerOptions {
   model?: string
   /** 单次 detect 超时（默认 10s）。 */
   timeoutMs?: number
+  /** HF 镜像基址（以 HF_ENDPOINT 传给 sidecar；GLiNER 首用下载走镜像）。 */
+  hfBaseUrl?: string
 }
 
 export class PySidecarNer implements NerDetector {
   private readonly python: string
   private readonly model?: string
   private readonly timeoutMs: number
+  private readonly hfBaseUrl?: string
   private initPromise: Promise<boolean> | undefined
   private proc: ReturnType<typeof spawn> | undefined
   private nextId = 0
@@ -41,6 +44,7 @@ export class PySidecarNer implements NerDetector {
     this.python = options.python ?? 'python3'
     this.model = options.model
     this.timeoutMs = options.timeoutMs ?? 10_000
+    this.hfBaseUrl = options.hfBaseUrl
   }
 
   async detect(text: string): Promise<NerMention[] | null> {
@@ -85,6 +89,7 @@ export class PySidecarNer implements NerDetector {
       }
       const env = { ...process.env }
       if (this.model !== undefined) env['NER_MODEL'] = this.model
+      if (this.hfBaseUrl !== undefined) env['HF_ENDPOINT'] = this.hfBaseUrl
       let settled = false
       const finish = (ok: boolean): void => {
         if (!settled) {

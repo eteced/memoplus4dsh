@@ -271,7 +271,7 @@ export function apply(ctx: Context, config: Config) {
       model: EMBEDDING_MODELS[config.embeddingModel ?? 'multilingual'],
     })
     const backend = config.embeddingBackend ?? 'auto'
-    const harrier = new HarrierEmbedder({ python: config.embedPython ?? config.nerPython })
+    const harrier = new HarrierEmbedder({ python: config.embedPython ?? config.nerPython, hfBaseUrl: config.hfBaseUrl })
     const embedder: TextEmbedder = config.embedding === false
       ? NULL_EMBEDDER
       : backend === 'onnx'
@@ -319,7 +319,7 @@ export function apply(ctx: Context, config: Config) {
     }
     // NER detector chain (m12): PyTorch sidecar → ONNX → off; the named
     // instance also feeds the memory_status report (which leg is live).
-    const nerDetector = config.nerAssist === false ? NULL_NER : createNerDetector({ python: config.nerPython })
+    const nerDetector = config.nerAssist === false ? NULL_NER : createNerDetector({ python: config.nerPython, hfBaseUrl: config.hfBaseUrl })
     if (config.extraction === 'turn_end') {
       const pipeline = new ExtractionPipeline({
         store,

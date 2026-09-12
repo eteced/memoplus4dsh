@@ -51,7 +51,7 @@ Edit the `config:` on the plugin line in `<dsh-home>/profiles/<profile>/cordis.p
 - `embedding: false` disables local embedding (pure keyword retrieval);
 - `nerAssist: false` disables NER candidate hints (on by default; detector fallback chain: PyTorch sidecar → ONNX bundle → no hints);
 - `nerPython: '/path/to/python'` specifies the python for the NER sidecar (that environment needs `torch gliner stanza`; the sidecar auto-downloads GLiNER/stanza models on demand. Install: `pip install torch --index-url https://download.pytorch.org/whl/cpu && pip install gliner stanza` — optional enhancement; without it, automatic fallback, functionality unaffected);
-- `hfBaseUrl: 'https://hf-mirror.com'` model-download mirror for restricted networks;
+- `hfBaseUrl: 'https://hf-mirror.com'` — mirror for model downloads when the network is restricted (covers the ONNX embedding model as well as the GLiNER and harrier sidecar downloads — sidecars receive it as `HF_ENDPOINT`);
 - Full configuration table: see [README](../README.md#configuration).
 
 ## 4. Verify the Plugin Works
