@@ -34,7 +34,7 @@ top-k memories injected as a plugin-sourced user/message (logged like any model 
 
 - dsh `0.1.2-alpha.3`（本插件基于该版本构建和验证；dsh 处于 pre-release 阶段，可能会破坏兼容性）
 - Node `^22.19 || >=24` 和 `python3`（安装脚本用它编辑 `cordis.patch.yml`）
-- 安装/卸载脚本（bash）需要 Linux 或 macOS。在 Windows 上插件本身可以正常运行——请手动安装：在 profile 目录中执行 `npm install <this dir>`，并按照 [docs/install-guide.md](docs/install-guide.md) 所示在 profile 的 `cordis.patch.yml` 中添加 plugin 块 **首次运行会按需下载模型**（ONNX 嵌入 ~135MB；harrier ~1.2GB 和 GLiNER ~600MB 仅在对应 python 包装齐时下载）——前几轮对话会变慢，之后走本地缓存。huggingface.co 慢可配 `hfBaseUrl` 镜像。
+- 安装/卸载脚本（bash）需要 Linux 或 macOS。在 Windows 上插件本身可以正常运行——请手动安装：在 profile 目录中执行 `npm install <this dir>`，并按照 [docs/install-guide.md](docs/install-guide.md) 所示在 profile 的 `cordis.patch.yml` 中添加 plugin 块
 - 可选：`onnxruntime-node`（声明为 optional dependency），用于本地 embedding；没有它时 retrieval 会降级为纯关键词模式，但不会出错
 
 ## 安装
@@ -44,7 +44,7 @@ top-k memories injected as a plugin-sourced user/message (logged like any model 
 scripts/install.sh [--profile <name>] [--dsh-home <path>]
 ```
 
-该脚本会构建插件、把它链接进 profile（`npm install <this dir>`），并通过 profile 的 `cordis.patch.yml` 中的一个受管理块挂载插件。不会修改任何 dsh 源码。完整的安装演练（含验证步骤）见 [docs/install-guide.md](docs/install-guide.md)（中文）。
+该脚本会构建插件、把它链接进 profile（`npm install <this dir>`），并通过 profile 的 `cordis.patch.yml` 中的一个受管理块挂载插件。 **首次运行会按需下载模型**（ONNX 嵌入 ~135MB；harrier ~1.2GB 和 GLiNER ~600MB 仅在对应 python 包装齐时下载）——前几轮对话会变慢，之后走本地缓存。huggingface.co 慢可配 `hfBaseUrl` 镜像。不会修改任何 dsh 源码。完整的安装演练（含验证步骤）见 [docs/install-guide.md](docs/install-guide.md)（中文）。
 
 ## 更新
 
