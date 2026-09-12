@@ -46,13 +46,22 @@ scripts/install.sh [--profile <name>] [--dsh-home <path>]
 
 The script builds the plugin, links it into the profile (`npm install <this dir>`), and mounts it via a managed block in the profile's `cordis.patch.yml`. No dsh source is ever modified. See [docs/install-guide.md](docs/install-guide.en.md) (中文) for a full walkthrough including verification.
 
+## Update
+
+```sh
+git pull && npm run build
+```
+
+No reinstall needed: the profile links this checkout via a `file:` dependency, so rebuilding `lib/` is the whole update (a dsh restart — or the web profile's live reload — picks it up). Rerun `scripts/install.sh` (idempotent, also builds) only when the mount block or the install script itself changed. Memory data under `<dsh-home>/memoplus4dsh/` is untouched either way.
+
+**Verify the install**: `node scripts/doctor.mjs [--profile <name>] [--dsh-home <path>]` prints the mount status, the effective config (defaults vs your overrides), component probes (harrier/ONNX embedding chain, NER chain, model caches), and memory-data status (graph size, extraction queue, last extraction activity) — including hints for enabling the full-featured backends.
+
+
 ## Uninstall
 
 ```sh
 scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 ```
-
-**Verify the install**: `node scripts/doctor.mjs [--profile <name>] [--dsh-home <path>]` prints the mount status, the effective config (defaults vs your overrides), component probes (harrier/ONNX embedding chain, NER chain, model caches), and memory-data status (graph size, extraction queue, last extraction activity) — including hints for enabling the full-featured backends.
 
 Fully reverses the install: the managed block and the `file:` dependency are removed, and dsh runs exactly as before. **Your memory data is kept** — the graph lives in `<dsh-home>/memoplus4dsh/`; delete that directory by hand if you want it gone. Reinstalling later picks the data up again (verified in [docs/m5-release-check.md](docs/m5-release-check.en.md)).
 

@@ -46,13 +46,22 @@ scripts/install.sh [--profile <name>] [--dsh-home <path>]
 
 该脚本会构建插件、把它链接进 profile（`npm install <this dir>`），并通过 profile 的 `cordis.patch.yml` 中的一个受管理块挂载插件。不会修改任何 dsh 源码。完整的安装演练（含验证步骤）见 [docs/install-guide.md](docs/install-guide.md)（中文）。
 
+## 更新
+
+```sh
+git pull && npm run build
+```
+
+不需要重装：profile 通过 `file:` 依赖符号链接到这个 checkout，重新构建 `lib/` 就是更新的全部（dsh 重启——或 web profile 的 live reload——后生效）。只有挂载块或安装脚本本身发生变化时才需要重跑 `scripts/install.sh`（幂等，会顺便构建）。`<dsh-home>/memoplus4dsh/` 下的记忆数据不受影响。
+
+**验证安装**：`node scripts/doctor.mjs [--profile <name>] [--dsh-home <path>]` 输出挂载状态、生效配置（默认值 vs 你的覆盖）、组件探测（harrier/ONNX 嵌入链、NER 检测链、模型缓存）和记忆数据状态（图规模、抽取队列、最近抽取活动）——并给出启用完整版后端的提示。
+
+
 ## 卸载
 
 ```sh
 scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 ```
-
-**验证安装**：`node scripts/doctor.mjs [--profile <name>] [--dsh-home <path>]` 输出挂载状态、生效配置（默认值 vs 你的覆盖）、组件探测（harrier/ONNX 嵌入链、NER 检测链、模型缓存）和记忆数据状态（图规模、抽取队列、最近抽取活动）——并给出启用完整版后端的提示。
 
 完全逆转安装过程：受管理块和 `file:` 依赖都会被移除，dsh 的运行与安装前完全一致。**你的记忆数据会被保留**——图谱存放在 `<dsh-home>/memoplus4dsh/`；如果想彻底删除，请手动删除该目录。之后重新安装会再次读到这些数据（已在 [docs/m5-release-check.md](docs/m5-release-check.md) 中验证）。
 
