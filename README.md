@@ -32,10 +32,11 @@ Four model-facing tools are also registered: `memory_search` (active recall), `m
 
 ## Requirements
 
-- dsh `0.1.2-alpha.3` (the version this plugin is built and verified against; dsh is pre-release and may break compat)
+- dsh `≥ 0.1.2-alpha.3` (verified up to 0.1.5-alpha.2; dsh is pre-release and may break compat)
 - Node `^22.19 || >=24` and `python3` (used by the install scripts to edit `cordis.patch.yml`)
 - Linux or macOS for the install/uninstall scripts (bash). On Windows the plugin itself runs fine — install manually: `npm install <this dir>` in the profile directory and add the plugin block to the profile's `cordis.patch.yml` as shown in [docs/install-guide.md](docs/install-guide.en.md)
 - Optional: `onnxruntime-node` (declared as an optional dependency) for local embeddings; without it retrieval degrades to keyword-only, nothing breaks
+- Optional boost (recommended — this is the full-featured setup): `sentence-transformers` (harrier embedding backend, better retrieval) and `torch gliner stanza` (NER candidate hints, better extraction recall) in the `python3` environment. Everything still works without them — it just degrades to ONNX embeddings + no NER hints; one-command install: `scripts/setup-python.sh`
 
 ## Install
 
