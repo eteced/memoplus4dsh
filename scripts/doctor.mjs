@@ -111,6 +111,33 @@ function countLines(file) {
   }
 }
 
+// Settle tombstones stay in extraction-pending.jsonl, so the backlog is the
+// number of `pending` records without a matching `settled` record — not the
+// line count, which stays >= 2 forever on a perfectly healthy queue.
+function countUnsettledJobs(file) {
+  let text
+  try {
+    text = readFileSync(file, 'utf8')
+  } catch {
+    return 0
+  }
+  const open = new Set()
+  for (const line of text.split('\n')) {
+    if (line.trim().length === 0) continue
+    try {
+      const entry = JSON.parse(line)
+      const key = entry.kind === 'pending'
+        ? `${entry.job.sessionId}:${entry.job.turn}`
+        : `${entry.sessionId}:${entry.turn}`
+      if (entry.kind === 'pending') open.add(key)
+      else open.delete(key)
+    } catch {
+      // Half-written tail line after a crash — ignore.
+    }
+  }
+  return open.size
+}
+
 console.log(`memoplus4dsh doctor — profile '${PROFILE}' @ ${DSH_HOME}\n`)
 
 // ---------- 1. 安装状态 ----------
@@ -217,7 +244,7 @@ if (existsSync(graph)) {
   console.log(info(`记忆图尚未创建（还没有任何对话被抽取过）: ${graph}`))
 }
 const pending = join(DATA_DIR, 'extraction-pending.jsonl')
-const pn = countLines(pending)
+const pn = countUnsettledJobs(pending)
 if (pn > 0) console.log(warn(`抽取队列积压 ${pn} 条（dsh 运行后会自动补抽；持续增长说明抽取调用在失败）`))
 else console.log(ok('抽取队列无积压'))
 const debug = join(DATA_DIR, 'extraction-debug.jsonl')

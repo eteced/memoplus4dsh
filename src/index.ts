@@ -467,8 +467,9 @@ export function apply(ctx: Context, config: Config) {
       lines.push('', '[data]')
       lines.push(`  graph: ${store.filePath}`)
       lines.push(`  entities: ${store.listEntities().length}, events: ${store.listEvents().length}`)
-      const pendingFile = join(dataDir, 'extraction-pending.jsonl')
-      const backlog = existsSync(pendingFile) ? readFileSync(pendingFile, 'utf8').split('\n').filter(l => l.trim().length > 0).length : 0
+      // Settle tombstones stay in the log, so count unsettled jobs rather than
+      // lines — a drained queue must report 0 backlog.
+      const backlog = new PendingJobLog(join(dataDir, 'extraction-pending.jsonl')).countUnsettled()
       lines.push(`  extraction queue backlog: ${backlog}${backlog > 0 ? ' (reprocessed while dsh runs; growth means extraction calls are failing)' : ''}`)
       const debugFile = join(dataDir, 'extraction-debug.jsonl')
       if (existsSync(debugFile)) {

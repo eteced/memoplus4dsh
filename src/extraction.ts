@@ -582,9 +582,31 @@ export class ExtractionQueue {
 export class PendingJobLog {
   constructor(private readonly filePath: string) {}
 
+  /**
+   * Enqueued jobs without a settle tombstone — the outstanding backlog.
+   * Read-only, so a live process can report queue health without consuming
+   * the log the way {@link loadPending} does.
+   *
+   * @returns Number of jobs still awaiting a terminal outcome.
+   */
+  countUnsettled(): number {
+    return this.readUnsettled().size
+  }
+
   /** Jobs enqueued but never settled; truncates the file for a fresh start. */
   loadPending(): ExtractionJob[] {
-    if (!existsSync(this.filePath)) return []
+    const pending = this.readUnsettled()
+    try {
+      writeFileSync(this.filePath, '', 'utf8')
+    } catch {
+      // Truncation failure only means the next restart re-reads old lines.
+    }
+    return [...pending.values()]
+  }
+
+  /** Replay the log into the set of jobs that never settled. */
+  private readUnsettled(): Map<string, ExtractionJob> {
+    if (!existsSync(this.filePath)) return new Map()
     const pending = new Map<string, ExtractionJob>()
     try {
       for (const line of readFileSync(this.filePath, 'utf8').split('\n')) {
@@ -601,14 +623,9 @@ export class PendingJobLog {
         }
       }
     } catch {
-      return []
+      return new Map()
     }
-    try {
-      writeFileSync(this.filePath, '', 'utf8')
-    } catch {
-      // Truncation failure only means the next restart re-reads old lines.
-    }
-    return [...pending.values()]
+    return pending
   }
 
   /** Append one enqueue record. */
