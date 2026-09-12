@@ -42,6 +42,16 @@ command -v npm >/dev/null || { echo "install.sh: npm not found on PATH (or set N
 command -v python3 >/dev/null || { echo "install.sh: python3 not found on PATH (needed to patch cordis.patch.yml)" >&2; exit 1; }
 
 echo "==> building plugin in $PLUGIN_DIR"
+# Fresh clones have no node_modules: npm run build needs the devDependency
+# typescript. Install dev deps once (npm ci when the lockfile is present).
+if [[ ! -x "$PLUGIN_DIR/node_modules/.bin/tsc" ]]; then
+  echo "==> installing plugin dev dependencies (first run only)"
+  if [[ -f "$PLUGIN_DIR/package-lock.json" ]]; then
+    (cd "$PLUGIN_DIR" && npm ci --no-audit --no-fund)
+  else
+    (cd "$PLUGIN_DIR" && npm install --no-audit --no-fund)
+  fi
+fi
 (cd "$PLUGIN_DIR" && npm run build)
 
 # Mirror of dsh's initProfile (packages/boot/app-boot/src/profile.ts): known
