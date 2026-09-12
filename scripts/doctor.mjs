@@ -156,7 +156,15 @@ for (const k of Object.keys(eff)) {
 }
 
 // ---------- 3. 组件探测 ----------
+const nerPython0 = 'python3'
 console.log('\n== 组件探测 ==')
+// python3 解析路径：doctor 看到的是本进程 PATH；dsh 从当前 shell 启动时会
+// 继承同一 PATH —— 此时这里的探测结果就是插件运行时的真实结果（运行时
+// 真相以对话里 memory_status 工具的报告为准）。
+try {
+  const which = execFileSync('which', [nerPython0], { timeout: 5000 }).toString().trim()
+  console.log(info(`python3 解析为: ${which}（dsh 从本 shell 启动时插件也用同一个）`))
+} catch { /* which 不可用（Windows）时跳过 */ }
 const nerPython = String(eff.nerPython)
 const embedPython = eff.embedPython === '(= nerPython)' ? nerPython : String(eff.embedPython)
 

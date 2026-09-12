@@ -90,7 +90,7 @@ Set under the plugin's `config:` in the profile's `cordis.patch.yml`:
 | `nerAssist` | `true` | NER candidate hints for extraction (detector chain: PyTorch sidecar → ONNX package → off) |
 | `nerPython` | `python3` | Python executable for the NER sidecar (needs `torch gliner stanza` in that env; models auto-download on first use) |
 
-> One-command setup for the full-featured python backends: `scripts/setup-python.sh` creates a dedicated venv (sentence-transformers + torch/gliner/stanza) and prints the exact `nerPython` / `embedPython` lines to paste into `cordis.patch.yml`. A dedicated venv is recommended: the plugin resolves `python3` from the **dsh process** PATH, which is not necessarily the same interpreter as your interactive shell's.
+> The plugin resolves `python3` from the **dsh process** PATH — when dsh is launched from your shell it inherits that environment, so an interpreter that already has the packages works with zero configuration. If yours does not, `scripts/setup-python.sh` creates a dedicated venv (sentence-transformers + torch/gliner/stanza) and prints the exact `nerPython` / `embedPython` lines to paste into `cordis.patch.yml`.
 | `dataDir` | `<dsh-home>/memoplus4dsh` | Plugin data directory (journal, snapshots, model cache, expansion cache) |
 | `extractionProvider` / `extractionModel` | session's own route | Override the model route used for extraction/expansion calls |
 | `extractionMaxTokens` | `8192` | Output cap for extraction calls (reasoning models need the headroom) |
