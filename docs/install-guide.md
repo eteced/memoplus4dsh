@@ -31,6 +31,16 @@ scripts/install.sh --profile sdk      # 装进别的 profile
 
 不改 dsh 本体任何文件。
 
+## 首次运行：模型下载（一次性，之后走本地缓存）
+
+插件的模型按需懒下载——**前几轮对话的抽取/检索会变慢**（后台在下载），完成后恢复正常：
+
+- ONNX 多语言嵌入模型：~135MB（默认启用；harrier 可用时它是兜底）
+- harrier 0.6B 嵌入模型：~1.2GB（`python3` 装了 sentence-transformers 才启用）
+- GLiNER / stanza NER 模型：~600MB（装了 torch/gliner/stanza 才启用）
+
+下载源默认 huggingface.co；国内慢或受限时在 config 里加 `hfBaseUrl: 'https://hf-mirror.com'`。
+
 ## 3. 配置（可选）
 
 编辑 `<dsh-home>/profiles/<profile>/cordis.patch.yml` 里插件行的 `config:`。常用项：

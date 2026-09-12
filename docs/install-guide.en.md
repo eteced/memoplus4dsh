@@ -33,6 +33,16 @@ The script does three things (all idempotent, fully reversible by `uninstall.sh`
 
 No dsh core files are modified.
 
+## First run: model downloads (one-time, then served from local cache)
+
+Models are downloaded lazily on demand — **the first few conversations' extraction/retrieval will be slower** (downloads run in the background), then everything returns to normal:
+
+- ONNX multilingual embedding model: ~135MB (on by default; acts as the fallback when harrier is active)
+- harrier 0.6B embedding model: ~1.2GB (only when `python3` has sentence-transformers)
+- GLiNER / stanza NER models: ~600MB (only when torch/gliner/stanza are installed)
+
+Downloads default to huggingface.co; if that is slow or blocked, set `hfBaseUrl: 'https://hf-mirror.com'` in the config.
+
 ## 3. Configuration (Optional)
 
 Edit the `config:` on the plugin line in `<dsh-home>/profiles/<profile>/cordis.patch.yml`. Common options:

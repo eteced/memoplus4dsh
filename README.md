@@ -44,7 +44,7 @@ Four model-facing tools are also registered: `memory_search` (active recall), `m
 scripts/install.sh [--profile <name>] [--dsh-home <path>]
 ```
 
-The script builds the plugin, links it into the profile (`npm install <this dir>`), and mounts it via a managed block in the profile's `cordis.patch.yml`. No dsh source is ever modified. See [docs/install-guide.md](docs/install-guide.en.md) (中文) for a full walkthrough including verification.
+The script builds the plugin, links it into the profile (`npm install <this dir>`), and mounts it via a managed block in the profile's `cordis.patch.yml`. **First run downloads models lazily** (ONNX embedding ~135MB; harrier ~1.2GB and GLiNER ~600MB only when their python packages are present) — the first few conversations are slower, then everything is served from local cache. Set `hfBaseUrl` to a mirror if huggingface.co is slow. No dsh source is ever modified. See [docs/install-guide.md](docs/install-guide.en.md) (中文) for a full walkthrough including verification.
 
 ## Update
 
