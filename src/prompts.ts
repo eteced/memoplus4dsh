@@ -311,12 +311,6 @@ export class PromptRegistry {
     }
   }
 
-  /** Per-stage profile names for one route, for `memory_status`. */
-  summary(route?: PromptRoute): Record<PromptStage, string> {
-    const profile = this.profileFor(route)
-    return Object.fromEntries(PROMPT_STAGES.map(stage => [stage, profile.name])) as Record<PromptStage, string>
-  }
-
   /** Configured profile names, default first, for diagnostics. */
   names(): string[] {
     return [DEFAULT_PROFILE_NAME, ...this.profiles.map(profile => profile.name)]

@@ -22,7 +22,7 @@ import type { EmbeddingModelSpec, TextEmbedder } from './embedding.js'
 import { Retriever, createQueryDistiller, createQueryExpander } from './retrieval.js'
 import { createPreStepHandler } from './inject.js'
 import type { PromptProfile, PromptStage, StageSettings } from './prompts.js'
-import { PromptRegistry } from './prompts.js'
+import { PROMPT_STAGES, PromptRegistry } from './prompts.js'
 import { registerMemoryTools } from './tools.js'
 
 export const name = 'memoplus4dsh'
@@ -564,8 +564,12 @@ export function apply(ctx: Context, config: Config) {
       lines.push('', '[prompts]')
       lines.push(`  configured: ${prompts.names().join(', ')}`)
       lines.push(`  route: ${lastRoute === undefined ? '(none observed yet — stages report the fallback)' : `${lastRoute.provider}/${lastRoute.model}`}`)
-      for (const [stage, profile] of Object.entries(prompts.summary(lastRoute))) {
-        lines.push(`  ${stage}: ${profile}`)
+      // Resolve rather than summarize: the numbers are the point of a profile,
+      // and an operator debugging output length needs the effective budget.
+      for (const stage of PROMPT_STAGES) {
+        const resolved = prompts.resolve(stage, lastRoute)
+        const timeout = resolved.timeoutMs === undefined ? '' : `, timeoutMs ${resolved.timeoutMs}`
+        lines.push(`  ${stage}: profile ${resolved.profile}, maxTokens ${resolved.maxTokens}, effort ${resolved.reasoningEffort}${timeout}`)
       }
       lines.push('', '[data]')
       lines.push(`  graph: ${store.filePath}`)

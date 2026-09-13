@@ -122,12 +122,11 @@ describe('PromptRegistry resolution', () => {
     expect(seen).toEqual(['extraction:default'])
   })
 
-  it('summarizes every stage and lists configured names', () => {
+  it('resolves every stage for a route and lists configured names', () => {
     const registry = new PromptRegistry({ profiles: [{ name: 'extra', match: { model: 'x' } }] })
     expect(registry.names()).toEqual(['default', 'extra'])
-    const summary = registry.summary({ provider: 'p', model: 'x' })
-    expect(Object.keys(summary)).toEqual([...PROMPT_STAGES])
-    expect(new Set(Object.values(summary))).toEqual(new Set(['extra']))
+    const route = { provider: 'p', model: 'x' }
+    for (const stage of PROMPT_STAGES) expect(registry.resolve(stage, route).profile).toBe('extra')
   })
 
   it('resolves without a route to the fallback profile', () => {
