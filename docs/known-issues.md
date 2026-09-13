@@ -72,6 +72,26 @@ ingest 会"正常"跑完但记忆图为空——查询阶段在零记忆上空�
 
 **需要补的验证**：真实 A/B —— 同一批 turn 在两个 profile 下各跑一遍，对比错并数。建议先把本条记录里的既有污染清干净再跑（journal 支持 `entity.delete` / `entity.upsert` / `event.delete` / `event.add`，但必须在 dsh 停止时改，否则会被内存快照覆盖）。
 
+**2026-09-13 复现尝试：未复现，且复现条件不足（重要）**
+
+新增 `scripts/ab-merge-prompts.mjs`（把本条的两条错并固化为 ground truth，直接驱动真实的 `LlmEntityMerger`），在 deepseek-v4.1-flash 上实测 6 个组合：
+
+| prompt | thinking | 两条"不该合并"断言 |
+|---|---|---|
+| default（= 内置 profile） | 不发该字段 | ✅ 全部正确 |
+| improved（追加"部分-整体/后缀命名"+"列表≠项"两条规则） | 不发该字段 | ✅ 全部正确 |
+| default | `off`（**与线上插件一致**） | ✅ 全部正确 |
+| default | `high` | ✅ 全部正确 |
+| default（加噪声：5 个候选 / 8 条提及） | `off` | ✅ 全部正确 |
+
+即：**当前条件下复现不出那次错并，因此也无法证明"改 prompt 就能修好"**（improved 没有变差，但也没有可证明的改善）。原假设「错并源于裁决阶段关掉了 thinking」同样未被支持 —— `off` 与 `high` 结果相同。
+
+**为什么复现不了**（已确认的两个缺口）：
+1. `extraction-debug.jsonl` 只记录**已确认的合并**（mention / into / reason），**不记录该次调用的完整输入** —— 整批 mention、每条的候选列表、别名与 known fact 文本都没有。因此线上那次调用的输入无法逐字重建，只能近似（本脚本就是近似构造）。
+2. 每个组合只跑一次（n=1），无法排除当时的判定只是低概率采样；要下结论需要多次重复与更大样本。
+
+**结论性建议（v0.2 之后的第一件事）**：**要让"按模型调 prompt"这条路真正可迭代，必须先把裁决输入落进 debug 日志**（整批 mention + 候选 + 别名 + known fact，可截断），否则每次改进都只能靠"线上跑一阵看看"。这是把 `ab-merge-prompts.mjs` 从"烟雾测试"升级为"回归测试"的前置条件，也是本条 E1 从"未修复"走向可验证修复的前提。
+
 **可观测**：每条确认合并都带 `reason` 记入 `<dataDir>/extraction-debug.jsonl`（`kind: entity-merge`），错并可事后审计。
 
 ## 其他

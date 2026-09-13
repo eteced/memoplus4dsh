@@ -78,6 +78,26 @@ The stated reason itself says "for" — a distinct referent — yet the pair was
 
 **Verification still owed**: a real A/B — replay the same turns under two profiles and compare the wrong-merge count. Clean the existing pollution recorded above first (the journal supports `entity.delete` / `entity.upsert` / `event.delete` / `event.add`, but only while dsh is stopped — otherwise the in-memory snapshot overwrites the edit).
 
+**Reproduction attempt, 2026-09-13: not reproduced, and the conditions cannot be reconstructed (important)**
+
+A new `scripts/ab-merge-prompts.mjs` freezes this entry's two over-merges as ground truth and drives the real `LlmEntityMerger`. Six combinations were run against deepseek-v4.1-flash:
+
+| prompt | thinking | both "must not merge" assertions |
+|---|---|---|
+| default (the built-in profile) | field not sent | ✅ all correct |
+| improved (adds part-whole/suffix and list-vs-item rules) | field not sent | ✅ all correct |
+| default | `off` (**what the live plugin sends**) | ✅ all correct |
+| default | `high` | ✅ all correct |
+| default (noisier: 5 candidates / 8 mentions) | `off` | ✅ all correct |
+
+So the over-merge **does not reproduce under these conditions**, and therefore nothing here demonstrates that changing the prompt fixes it (the improved prompt is no worse, but shows no provable gain). The hypothesis that over-merging came from disabling thinking on the adjudication stage is likewise unsupported — `off` and `high` agreed.
+
+**Why it cannot be reproduced** (two confirmed gaps):
+1. `extraction-debug.jsonl` records only **confirmed merges** (mention / into / reason), never the **full input of the call** — the whole batch of mentions, each one's candidate list, aliases, and known-fact text. The live call's input therefore cannot be reconstructed verbatim; the script's fixture is an approximation.
+2. Each combination ran once (n=1), so a low-probability sample cannot be ruled out; a conclusion needs repeats and a larger sample.
+
+**Concluding recommendation (the first thing to do after v0.2)**: **to make per-model prompt tuning actually iterable, log the adjudication input first** (the mention batch, candidates, aliases, known facts — truncation is fine). Otherwise every improvement is guesswork validated only by "run it in production for a while". That is the prerequisite for turning `ab-merge-prompts.mjs` from a smoke test into a regression test, and for moving E1 from "unfixed" to verifiably fixed.
+
 **Observability**: every confirmed merge records its `reason` in `<dataDir>/extraction-debug.jsonl` (`kind: entity-merge`), so over-merges are auditable after the fact.
 
 ## Others
