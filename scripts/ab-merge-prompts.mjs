@@ -8,12 +8,19 @@
 //
 // ⚠️ 现状（2026-09-13 实测）：**本 fixture 未能复现那次事故**。
 //   在 deepseek-v4.1-flash 上，default 与 improved 两个 prompt × thinking {off, default, high}
-//   的组合里，"不该合并"的两条断言全部通过（详见 docs/known-issues.md E1 的复验记录）。
-//   因此：本脚本目前**只证明"没有回归"**，不构成"改进 prompt 能修好错并"的证据。
-//   已知的复现缺口（当时条件是行数更多、候选更多的整批裁决）：
-//     - extraction-debug.jsonl 只记录**已确认的合并**（mention/into/reason），
-//       不记录该次调用的完整输入（{lines} 的全量 mention 与候选、别名、known fact 文本），
-//       所以无法逐字重建线上那次调用的输入；
+//   × {带嵌入桩, 不带} 的组合里，"不该合并"的两条断言全部通过（详见 docs/known-issues.md
+//   E1 的复验记录）。因此：本脚本目前**只证明"没有回归"**，不构成"改进 prompt 能修好错并"
+//   的证据。
+//
+//   已**排除**的假设（都是实测，不是推断）：
+//     - "裁决阶段关掉了 thinking 导致错并"：off 与 high 结果相同；
+//     - "候选集合比线上窄导致判定更容易"：用 --candidates-only 对比，带/不带嵌入桩
+//       （即线上会走的余弦候选路径）得到的候选集合**基本一致**（本例只有 1 条 mention
+//       多出 1 个候选），所以候选机制不是原因。
+//   仍然成立的复现缺口：
+//     - extraction-debug.jsonl 只记录**已确认的合并**（mention/into/reason），不记录该次
+//       调用的完整输入（整批 mention、候选、别名、known fact 文本），线上那次调用的输入
+//       无法逐字重建；
 //     - 每次组合只跑一次（n=1），无法排除当时的判定只是低概率采样。
 //   结论性建议见 docs/known-issues.md E1：「要让 prompt A/B 真正可行，先把裁决输入落进
 //   debug 日志」——这是把本脚本从"烟雾测试"升级成"回归测试"的前置条件。
@@ -33,8 +40,11 @@
 //
 // 用法：
 //   node scripts/ab-merge-prompts.mjs --dry-run                   # 不联网，验证管线（零成本）
+//   node scripts/ab-merge-prompts.mjs --candidates-only           # 只审计候选集合，不调用模型
 //   node scripts/ab-merge-prompts.mjs                             # 真实对照（每个组合一次调用）
 //   node scripts/ab-merge-prompts.mjs --profiles default --thinking off
+//
+// 默认带一个确定性的字符三元组嵌入桩（--no-embedder 可关），用来复现线上"余弦候选"这一环。
 //
 // 端点与凭据（真实运行时需要）：
 //   AB_BASE_URL  默认 https://opencode.ai/zen/go/v1（OpenAI 兼容）
@@ -122,6 +132,47 @@ const PROFILES = {
   improved: { prompt: IMPROVED_PROMPT, note: '追加"部分-整体/后缀命名"与"列表≠项"两条规则的候选 profile' },
 }
 
+/**
+ * 打印每条 mention 实际会拿到哪些候选，用来审计 fixture 的保真度。
+ *
+ * 说明：`candidatesFor` 在 TS 里是 private，但那只是编译期约束 —— lib/ 里它就是普通
+ * 方法，诊断脚本可以直接调。零成本（不调用模型），因此适合在花额度之前先看一眼
+ * "候选集合与线上是否同向"。
+ */
+async function showCandidates(useEmbedder) {
+  const dir = mkdtempSync(join(tmpdir(), 'memoplus4dsh-cand-'))
+  try {
+    const store = new MemoryStore({ dir })
+    for (const seed of SEED) {
+      const { entity } = store.createOrResolve(seed.name, seed.type)
+      store.addEvent({
+        subjectEntityIds: [entity.id],
+        objectEntityIds: [],
+        predicate: 'is',
+        normalizedText: seed.fact,
+        details: '',
+        timeExpr: '',
+        eventTime: null,
+        eventTimePrecision: 'unknown',
+        mentionTime: new Date('2026-09-12T16:00:00Z').toISOString(),
+      })
+    }
+    const merger = new LlmEntityMerger({
+      store,
+      ...useEmbedder ? { embedder: trigramEmbedder() } : {},
+      callLlm: async () => '',
+    })
+    console.log(`候选集合（embedder: ${useEmbedder ? '字符三元组桩' : '无（仅子串/token 重叠）'}）`)
+    for (const m of MENTIONS) {
+      const candidates = await merger.candidatesFor(m.name, store.listEntities())
+      console.log(`  ${m.name.slice(0, 44)}${m.name.length > 44 ? '…' : ''}`)
+      console.log(`    → ${candidates.map(c => c.canonicalName.slice(0, 30)).join(' | ') || '(无候选)'}`)
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
 // ── LLM 调用 ─────────────────────────────────────────────────────────────────
 function realCallLlm() {
   const baseUrl = process.env.AB_BASE_URL ?? 'https://opencode.ai/zen/go/v1'
@@ -177,6 +228,35 @@ function stubCallLlm() {
   return async () => MENTIONS.map((_, i) => `${i + 1}: 1: sure: stub answer for dry run`).join('\n')
 }
 
+/**
+ * 确定性的字符三元组嵌入桩，用来补上**候选选择**这一环的保真度。
+ *
+ * 为什么需要：`candidatesFor()`（src/entity-merge.ts:144）先做子串包含与 token 重叠，
+ * **再在存在 embedder 时追加 embedding 余弦 ≥ candidateThreshold(0.6) 的候选**。
+ * 线上有 harrier（1024 维），我最初的版本没传 embedder，于是候选集合比线上窄 ——
+ * 这也是"复现不出来"的可能原因之一。这个桩不下载模型、不联网，但复现了"名字相近的
+ * 实体一起进候选"这一效果：向量按字符三元组分桶，共享 "opencode" 这类片段的实体
+ * 余弦会明显偏高，与真实多语言模型的**名字相似度排序**同向。
+ */
+function trigramEmbedder(buckets = 64) {
+  const vector = text => {
+    const vec = new Float32Array(buckets)
+    const t = text.toLowerCase().replace(/\s+/g, ' ').trim()
+    for (let i = 0; i + 3 <= t.length; i++) {
+      const gram = t.slice(i, i + 3)
+      let h = 0
+      for (const ch of gram) h = (h * 31 + ch.codePointAt(0)) >>> 0
+      vec[h % buckets] += 1
+    }
+    let norm = 0
+    for (const v of vec) norm += v * v
+    norm = Math.sqrt(norm)
+    if (norm > 0) for (let i = 0; i < vec.length; i++) vec[i] /= norm
+    return vec
+  }
+  return { dim: buckets, embed: async texts => texts.map(vector) }
+}
+
 // ── 一次裁决 ─────────────────────────────────────────────────────────────────
 async function runProfile(name, callLlm) {
   const dir = mkdtempSync(join(tmpdir(), 'memoplus4dsh-ab-'))
@@ -205,6 +285,8 @@ async function runProfile(name, callLlm) {
     const calls = []
     const merger = new LlmEntityMerger({
       store,
+      // 默认带上嵌入桩，复现线上"余弦候选"这一环（--no-embedder 可关掉做对照）。
+      ...has('--no-embedder') ? {} : { embedder: trigramEmbedder() },
       prompt: PROFILES[name].prompt,
       callLlm: async prompt => {
         calls.push(prompt)
@@ -228,6 +310,15 @@ async function runProfile(name, callLlm) {
 
 // ── main ─────────────────────────────────────────────────────────────────────
 const dryRun = has('--dry-run')
+
+// 只审计候选集合，不调用模型（零成本）；embedder 开/关各看一遍。
+if (has('--candidates-only')) {
+  await showCandidates(true)
+  console.log()
+  await showCandidates(false)
+  process.exit(0)
+}
+
 const selected = (flag('--profiles') ?? 'default,improved').split(',').map(s => s.trim()).filter(Boolean)
 for (const name of selected) {
   if (PROFILES[name] === undefined) {

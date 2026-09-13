@@ -92,7 +92,11 @@ A new `scripts/ab-merge-prompts.mjs` freezes this entry's two over-merges as gro
 
 So the over-merge **does not reproduce under these conditions**, and therefore nothing here demonstrates that changing the prompt fixes it (the improved prompt is no worse, but shows no provable gain). The hypothesis that over-merging came from disabling thinking on the adjudication stage is likewise unsupported — `off` and `high` agreed.
 
-**Why it cannot be reproduced** (two confirmed gaps):
+**Hypotheses eliminated by measurement** (not by argument):
+1. ~~"over-merging came from disabling thinking on the adjudication stage"~~ — `off` and `high` agreed, so no;
+2. ~~"this script's candidate set is narrower than production's, which makes the verdict easier"~~ — `candidatesFor()` computes substring/token overlap first and **then adds cosine candidates when an embedder is present** (`src/entity-merge.ts:144`). With a deterministic embedder stub built to rank like the real one, `--candidates-only` shows the candidate sets are **essentially identical** (only 1 of 8 mentions gains 1 extra candidate). Candidate selection is not the reason. I had guessed this one first; it did not survive measurement.
+
+**Gaps that still hold**:
 1. `extraction-debug.jsonl` records only **confirmed merges** (mention / into / reason), never the **full input of the call** — the whole batch of mentions, each one's candidate list, aliases, and known-fact text. The live call's input therefore cannot be reconstructed verbatim; the script's fixture is an approximation.
 2. Each combination ran once (n=1), so a low-probability sample cannot be ruled out; a conclusion needs repeats and a larger sample.
 
