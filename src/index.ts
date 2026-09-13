@@ -10,7 +10,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { MemoryStore } from './store.js'
-import { EMPTY_EXTRACTION_ERROR, ExtractionPipeline, ExtractionQueue, PendingJobLog, DEFAULT_EXTRACTION_JOB_INTERVAL_MS, DEFAULT_EXTRACTION_RETRY_DELAY_MS } from './extraction.js'
+import { EMPTY_EXTRACTION_ERROR, ExtractionPipeline, ExtractionQueue, PendingJobLog, DEFAULT_EXTRACTION_CONCURRENCY, DEFAULT_EXTRACTION_JOB_INTERVAL_MS, DEFAULT_EXTRACTION_MAX_RETRIES, DEFAULT_EXTRACTION_RETRY_DELAY_MS } from './extraction.js'
 import type { ExtractionJob, OutstandingJob } from './extraction.js'
 import { LlmEntityMerger } from './entity-merge.js'
 import { LlmSupersedeResolver } from './supersede.js'
@@ -26,7 +26,7 @@ import { PROMPT_STAGES, PromptRegistry, DEFAULT_PROFILE_NAME } from './prompts.j
 import { readProfileDir, resolvePromptsDir } from './prompts-file.js'
 import type { LoadedProfiles } from './prompts-file.js'
 import { registerMemoryTools } from './tools.js'
-import { installMemorySettings } from './settings.js'
+import { installMemorySettings, MEMORY_SETTING_FIELDS, pickMemorySettings } from './settings.js'
 import type { MemorySettingsSection } from './settings.js'
 import { ReasoningEffortResolver } from './reasoning.js'
 import { DEFAULT_THINKING_TOKEN_HEADROOM, effectiveMaxTokens } from './reasoning.js'
@@ -35,7 +35,7 @@ import type { EffortRoute, ReasoningEffortPolicy } from './reasoning.js'
 export const name = 'memoplus4dsh'
 
 /** Failure rounds before a turn's extraction is abandoned; see `extractionMaxFailureRounds`. */
-const DEFAULT_MAX_FAILURE_ROUNDS = 10
+export const DEFAULT_MAX_FAILURE_ROUNDS = 10
 
 /** Minimum gap between in-run retry passes over outstanding extraction failures. */
 const RETRY_PASS_COOLDOWN_MS = 10 * 60 * 1000
@@ -88,9 +88,12 @@ export interface Config {
    */
   extractionMaxFailureRounds?: number
   /**
-   * Extraction worker pool size (default 1 = strict serial). >1 overlaps
-   * extraction LLM calls — the main lever against write-heavy ingest wall
-   * clock. Raise only when the endpoint tolerates it.
+   * Extraction worker pool size (default 3). >1 overlaps extraction LLM calls
+   * — the main lever against write-heavy ingest wall clock. The default is 3,
+   * not 1, because the request *rate* is set by `extractionJobIntervalMs`
+   * (starts are spaced, so extra slots do not raise the burst rate) while a
+   * single slot would sit idle-but-busy for a whole retry backoff, starving
+   * the turns behind it. Raise only when the endpoint tolerates it.
    */
   extractionConcurrency?: number
   /** Output token cap for extraction calls (reasoning models need a large budget). */
@@ -247,6 +250,22 @@ function defaultDataDir(env: Record<string, string | undefined> = process.env): 
 /** Text of one content block, when it is a plain text block. */
 function blockText(block: ContentBlock): string | undefined {
   return block.type === 'text' ? block.text : undefined
+}
+
+/**
+ * 两个设置值是否相等，用于判断一次 settings 变更到底动了哪些键。
+ *
+ * 数组（`extractionRetryDelayMs`）按内容比：settings 服务每次提交都给一个全新的
+ * 深冻结对象，按引用比会把"改了 injectTopK"也报成"队列设置变了"，于是每次保存
+ * 都误报一句"需要重启"。
+ *
+ * @param left - 变更前的值。
+ * @param right - 变更后的值。
+ * @returns 标量按 `===`，数组按 JSON 内容比较。
+ */
+function sameSettingValue(left: unknown, right: unknown): boolean {
+  if (Array.isArray(left) || Array.isArray(right)) return JSON.stringify(left) === JSON.stringify(right)
+  return left === right
 }
 
 /**
@@ -555,6 +574,11 @@ export function apply(ctx: Context, config: Config) {
     // their own, this cell serves query expansion at injection time.
     let lastRoute: Route | undefined
 
+    // 运行期生效配置：组装层（cordis.yml entry）的值 + 设置卡片保存的同名覆盖。
+    // 就地更新（`Object.assign`，只覆盖本命名空间拥有的键），所以即时类字段每次
+    // 使用都读到最新值；完整说明见下面挂 settings 分区的地方。
+    const live: Config = { ...config }
+
     // Minimal durable trace in the data dir for field debugging (extraction,
     // query-side calls, and prompt-profile selection); must never break the
     // plugin, so it is defined before anything that reports through it.
@@ -630,11 +654,97 @@ export function apply(ctx: Context, config: Config) {
       }
     }
     /** One per fiber: capability lookups and "already warned" are per-route state. */
-    const effortResolver = new ReasoningEffortResolver({
-      policy: config.reasoningEffortPolicy ?? 'adapt',
+    let effortResolver = new ReasoningEffortResolver({
+      policy: live.reasoningEffortPolicy ?? 'adapt',
       lookup: routeReasoningEfforts,
       onWarning: message => logger.warn(message),
     })
+
+    // ---- 设置驱动（settings 卡片 / 导入导出）--------------------------------
+    // 即时类字段（debug / thinkingTokenHeadroom / injectTopK /
+    // reasoningEffortPolicy / extractionMaxFailureRounds）每次使用都从 `live` 读，
+    // 所以保存即生效；队列类字段（extractionConcurrency / extractionJobIntervalMs /
+    // extractionRetryDelayMs / extractionMaxRetries）由 `ExtractionQueue` 在构造时
+    // 固定，因此设置必须**在建队列之前**挂上——这样"重启后生效"是真的（下次启动
+    // 构造队列时读到的就是设置层的值），卡片上也如实逐项标注。
+    // 失败轮次上限是即时类：它在每次失败判定点被重读（`retryOutstanding` /
+    // `onSkip`），所以设置里的改动下一轮判定就用新值，不需要重启。
+    let maxFailureRounds = Math.max(1, live.extractionMaxFailureRounds ?? DEFAULT_MAX_FAILURE_ROUNDS)
+    // 队列建好之前，设置层的队列类值不算"需要重启"——它马上就会被构造时读到。
+    // 挂载时 onChange 正好在这个窗口里被调用一次，所以这道闸门是必须的。
+    let queueBuilt = false
+
+    installMemorySettings(
+      ctx,
+      pickMemorySettings(config),
+      {
+        onChange: next => {
+          const before: MemorySettingsSection = pickMemorySettings(live)
+          const after: MemorySettingsSection = pickMemorySettings(next)
+          Object.assign(live, after)
+          // 提示词：重建 profile 注册表（原有的"保存即生效"路径）。
+          if (!sameSettingValue(after.promptProfile, promptState.settings.promptProfile)
+            || !sameSettingValue(after.promptProfilesDir, promptState.settings.promptProfilesDir)) {
+            try {
+              promptState = buildPrompts(after)
+              logger.info(`prompt settings applied: dir ${promptState.dir}, forced profile ${after.promptProfile ?? '(auto by route)'}`)
+            } catch (error) {
+              // A refused write never reaches here (validate rejects it first); this
+              // covers a profile file that changed out of band, and keeps the last
+              // good set serving instead of taking the plugin down.
+              logger.warn(`prompt settings change ignored: ${error instanceof Error ? error.message : String(error)}`)
+            }
+          }
+          // 档位策略在解析器构造时固定，所以换策略就重建解析器：代价只是丢掉按
+          // 路由的能力缓存与"已告警"集合，下一次调用即用新策略。
+          if (!sameSettingValue(after.reasoningEffortPolicy, before.reasoningEffortPolicy)) {
+            effortResolver = new ReasoningEffortResolver({
+              policy: live.reasoningEffortPolicy ?? 'adapt',
+              lookup: routeReasoningEfforts,
+              onWarning: message => logger.warn(message),
+            })
+            logger.info(`reasoning effort policy applied: ${live.reasoningEffortPolicy ?? 'adapt'} (下一次调用即生效)`)
+          }
+          maxFailureRounds = Math.max(1, live.extractionMaxFailureRounds ?? DEFAULT_MAX_FAILURE_ROUNDS)
+          // 队列类字段本次运行已经固定：如实说"要重启"，不假装生效。（建队列之前
+          // 的那次 onChange 不算——值马上会被构造时读到。）
+          const pending = MEMORY_SETTING_FIELDS
+            .filter(field => field.applies === 'restart' && !sameSettingValue(before[field.key], after[field.key]))
+            .map(field => field.key)
+          if (queueBuilt && pending.length > 0) {
+            logger.warn(`settings: ${pending.join(', ')} 需要重启 dsh 才生效（本次运行仍用启动时的值）`)
+          }
+        },
+        validate: value => {
+          const selected = value.promptProfile
+          if (selected !== undefined && selected.trim().length > 0 && selected !== DEFAULT_PROFILE_NAME) {
+            // Refuse the write rather than let the next call fall back silently:
+            // a mistyped profile name is the mistake this field invites.
+            const known = new Set([
+              ...(config.promptProfiles ?? []).map(profile => profile.name),
+              ...readProfileDir(resolvePromptsDir(dataDir, value.promptProfilesDir)).profiles.map(profile => profile.name),
+            ])
+            if (!known.has(selected)) {
+              throw new Error(`prompt profile "${selected}" is not defined (known: ${[DEFAULT_PROFILE_NAME, ...known].join(', ')})`)
+            }
+          }
+          // schema 只管类型；负数 / NaN 这类"能存但不能用"的值在这里拒绝，卡片会
+          // 把这条原因显示出来（而不是存进去之后由插件悄悄钳到别的值）。
+          for (const field of MEMORY_SETTING_FIELDS) {
+            const raw = value[field.key]
+            if (field.kind === 'number' && raw !== undefined) {
+              if (typeof raw !== 'number' || !Number.isFinite(raw) || raw < 0) {
+                throw new Error(`${field.key} must be a non-negative finite number (got ${JSON.stringify(raw)})`)
+              }
+            } else if (field.kind === 'numberList' && raw !== undefined) {
+              if (!Array.isArray(raw) || raw.some(entry => typeof entry !== 'number' || !Number.isFinite(entry) || entry < 0)) {
+                throw new Error(`${field.key} must be an array of non-negative finite numbers (got ${JSON.stringify(raw)})`)
+              }
+            }
+          }
+        },
+      },
+    )
 
     // Only past validation: a refused profile must not leave a half-created
     // memory directory behind, so nothing touches the data dir before here.
@@ -704,7 +814,7 @@ export function apply(ctx: Context, config: Config) {
           // expansion). A profile may raise either bound.
           callLlm: prompt => {
             const stage = stageFor('queryExpansion', lastRoute)
-            return callPluginLlm(ctx, config, effortResolver, lastRoute, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort, stage.reasoningEffortExplicit)
+            return callPluginLlm(ctx, live, effortResolver, lastRoute, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort, stage.reasoningEffortExplicit)
           },
         })
     const distillQueryLlm = config.queryExpansion === false
@@ -714,7 +824,7 @@ export function apply(ctx: Context, config: Config) {
           prompt: () => stageFor('queryDistill', lastRoute).prompt,
           callLlm: prompt => {
             const stage = stageFor('queryDistill', lastRoute)
-            return callPluginLlm(ctx, config, effortResolver, lastRoute, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort, stage.reasoningEffortExplicit)
+            return callPluginLlm(ctx, live, effortResolver, lastRoute, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort, stage.reasoningEffortExplicit)
           },
         })
 
@@ -741,7 +851,7 @@ export function apply(ctx: Context, config: Config) {
           // 唯一能看到流全部 chunk 的位置：空内容时把 finish/chunks/chars 无条件
           // 拼进错误消息（失败路径本来就要抛错），debug 打开时另落一条
           // llm-empty 现场记录。查询侧不传 emptyMessage，空内容仍按原语义降级。
-          return callPluginLlm(ctx, config, effortResolver, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort, stage.reasoningEffortExplicit, {
+          return callPluginLlm(ctx, live, effortResolver, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort, stage.reasoningEffortExplicit, {
             emptyMessage: EMPTY_EXTRACTION_ERROR,
             job,
             log: debugLog,
@@ -758,7 +868,7 @@ export function apply(ctx: Context, config: Config) {
             prompt: job => stageFor('entityMerge', job.route).prompt,
             callLlm: (prompt, job) => {
               const stage = stageFor('entityMerge', job.route)
-              return callPluginLlm(ctx, config, effortResolver, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort, stage.reasoningEffortExplicit)
+              return callPluginLlm(ctx, live, effortResolver, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort, stage.reasoningEffortExplicit)
             },
             onLog: debugLog,
           }),
@@ -769,7 +879,7 @@ export function apply(ctx: Context, config: Config) {
             prompt: job => stageFor('supersede', job.route).prompt,
             callLlm: (prompt, job) => {
               const stage = stageFor('supersede', job.route)
-              return callPluginLlm(ctx, config, effortResolver, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort, stage.reasoningEffortExplicit)
+              return callPluginLlm(ctx, live, effortResolver, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort, stage.reasoningEffortExplicit)
             },
             onLog: debugLog,
           }),
@@ -777,7 +887,8 @@ export function apply(ctx: Context, config: Config) {
       // Durable job log: interrupted jobs, and jobs whose retry rounds failed,
       // are requeued on restart (m8 P2).
       const pendingLog = new PendingJobLog(join(dataDir, 'extraction-pending.jsonl'))
-      const maxFailureRounds = Math.max(1, config.extractionMaxFailureRounds ?? DEFAULT_MAX_FAILURE_ROUNDS)
+      // `maxFailureRounds` 由设置驱动（即时类），见上面的 `live` 段：失败判定每次
+      // 重读它，所以设置页改上限下一轮就用新值。
       /**
        * Requeue every outstanding job that still has failure rounds left, and
        * record the terminal `abandoned` outcome for those that do not. Runs at
@@ -812,10 +923,12 @@ export function apply(ctx: Context, config: Config) {
         pendingLog.recordSettled(job.sessionId, job.turn)
         debugLog({ kind: 'extracted', session: job.sessionId, turn: job.turn, ...result })
       }), {
-        maxRetries: config.extractionMaxRetries,
-        retryDelayMs: config.extractionRetryDelayMs ?? DEFAULT_EXTRACTION_RETRY_DELAY_MS,
-        jobIntervalMs: config.extractionJobIntervalMs ?? DEFAULT_EXTRACTION_JOB_INTERVAL_MS,
-        concurrency: config.extractionConcurrency,
+        // 队列类设置：`ExtractionQueue` 在构造时固定这些值，所以设置挂载（见上）
+        // 必须在建队列之前，否则"重启后生效"就是假的——重启也不会读到设置层。
+        maxRetries: live.extractionMaxRetries,
+        retryDelayMs: live.extractionRetryDelayMs ?? DEFAULT_EXTRACTION_RETRY_DELAY_MS,
+        jobIntervalMs: live.extractionJobIntervalMs ?? DEFAULT_EXTRACTION_JOB_INTERVAL_MS,
+        concurrency: live.extractionConcurrency,
         onAttemptFailed: (job, attempt, error) => debugLog({
           kind: 'attempt-failed', session: job.sessionId, turn: job.turn, attempt,
           error: error instanceof Error ? error.message : String(error),
@@ -840,6 +953,9 @@ export function apply(ctx: Context, config: Config) {
           )
         },
       })
+      // 队列已按上面（设置层参与过的）`live` 固定：此后队列类设置的改动就只能
+      // 靠重启生效，onChange 会如实告警。
+      queueBuilt = true
       // Snapshot before loadPending() truncates the log for a fresh start.
       const outstandingAtStart = pendingLog.outstanding()
       pendingLog.loadPending()
@@ -850,7 +966,7 @@ export function apply(ctx: Context, config: Config) {
         // 图是空的）当时只有这一层能回答"监听器到底有没有被触发"，所以留着；
         // 但它无条件写时一天近千行，信噪比太低——默认关（debug: false），
         // 排查事件流时再开。
-        if (config.debug === true) {
+        if (live.debug === true) {
           debugLog({
             kind: 'listener-saw',
             eventType: event.type,
@@ -889,7 +1005,7 @@ export function apply(ctx: Context, config: Config) {
         store,
         maxChars: config.injectMaxChars,
         maxQueryChars: config.injectMaxQueryChars,
-        retrieve: query => retriever.retrieve(query, { topK: config.injectTopK ?? 8 }),
+        retrieve: query => retriever.retrieve(query, { topK: live.injectTopK ?? 8 }),
         distill: distillQueryLlm === undefined
           ? undefined
           : async query => {
@@ -914,11 +1030,11 @@ export function apply(ctx: Context, config: Config) {
         ['extraction', config.extraction ?? 'turn_end'],
         // 诊断开关默认 false：只有显式 `debug: true` 才算打开，其余值（未配、
         // false、别的东西）都按关闭处理。
-        ['debug', config.debug === true],
+        ['debug', live.debug === true],
         ['injection', config.injection !== false],
         ['tools', config.tools !== false],
         ['progressBridge', config.progressBridge !== false],
-        ['injectTopK', config.injectTopK ?? 8],
+        ['injectTopK', live.injectTopK ?? 8],
         ['injectMaxChars', config.injectMaxChars ?? 2000],
         ['stateDedup', config.stateDedup !== false],
         ['embedding', config.embedding !== false],
@@ -930,6 +1046,23 @@ export function apply(ctx: Context, config: Config) {
         ['nerAssist', config.nerAssist !== false],
       ]
       for (const [k, v] of shown) lines.push(`  ${k} = ${JSON.stringify(v)}`)
+      // 抽取队列的生效值单列一段：四个队列类键由队列构造时读取（设置页改动要
+      // 重启），`extractionMaxFailureRounds` 每次失败判定重读（保存即生效）。这段
+      // 回答"现在到底用的是什么"，比对着设置文档猜要可靠。
+      lines.push('', '[extraction queue]')
+      if (!queueBuilt) {
+        lines.push('  (extraction is off: no queue runs; these are the values a restart with extraction: turn_end would use)')
+      }
+      const queueShown: [string, unknown, string][] = [
+        ['extractionConcurrency', live.extractionConcurrency ?? DEFAULT_EXTRACTION_CONCURRENCY, 'restart'],
+        ['extractionJobIntervalMs', live.extractionJobIntervalMs ?? DEFAULT_EXTRACTION_JOB_INTERVAL_MS, 'restart'],
+        ['extractionRetryDelayMs', live.extractionRetryDelayMs ?? DEFAULT_EXTRACTION_RETRY_DELAY_MS, 'restart'],
+        ['extractionMaxRetries', live.extractionMaxRetries ?? DEFAULT_EXTRACTION_MAX_RETRIES, 'restart'],
+        ['extractionMaxFailureRounds', maxFailureRounds, 'live'],
+      ]
+      for (const [k, v, applies] of queueShown) {
+        lines.push(`  ${k} = ${JSON.stringify(v)}  (${applies === 'restart' ? 'fixed at construction — a settings change needs a restart' : 're-read at every failure round — a settings change applies at once'})`)
+      }
       lines.push('', '[backends]')
       if (config.embedding === false) {
         lines.push('  embedding: OFF (keyword-only retrieval)')
@@ -956,10 +1089,10 @@ export function apply(ctx: Context, config: Config) {
       lines.push(`  configured: ${promptState.registry.names().join(', ')}`)
       // 这一段回答"这一枪实际会发什么档位"：内置 off 会按路由适配，所以配置里的
       // `effort off` 不等于线缆上的 off。策略值摆在最前面，省得对着 profile 猜。
-      lines.push(`  reasoningEffortPolicy: ${config.reasoningEffortPolicy ?? 'adapt'}`
-        + `${config.reasoningEffortPolicy === 'strict' ? ' (configured effort is sent as-is; dsh refuses what the route cannot dispatch)' : ' (built-in "off" adapts to the route; a user-set effort degrades with one warning per route)'}`)
+      lines.push(`  reasoningEffortPolicy: ${live.reasoningEffortPolicy ?? 'adapt'}`
+        + `${live.reasoningEffortPolicy === 'strict' ? ' (configured effort is sent as-is; dsh refuses what the route cannot dispatch)' : ' (built-in "off" adapts to the route; a user-set effort degrades with one warning per route)'}`)
       // 预算余量策略。下面各阶段报的是**实际发出值**，与配置值的关系由这一行决定。
-      const headroom = config.thinkingTokenHeadroom ?? DEFAULT_THINKING_TOKEN_HEADROOM
+      const headroom = live.thinkingTokenHeadroom ?? DEFAULT_THINKING_TOKEN_HEADROOM
       lines.push(headroom > 1
         ? `  thinking headroom: ${headroom}x when thinking is on (stage maxTokens below is the value actually sent; off effort is never multiplied)`
         : '  thinking headroom: off (1x — every stage sends its configured maxTokens as-is)')
@@ -1022,43 +1155,6 @@ export function apply(ctx: Context, config: Config) {
     }
 
     const disposeTools = config.tools === false ? undefined : registerMemoryTools(ctx, { store, retriever, statusReport })
-
-    // Settings page (Host half): the namespace behind the browser card. Saving in
-    // the card reaches the plugin through these hooks, and the derived prompt
-    // state is rebuilt, so an edit takes effect on the next call instead of
-    // waiting for a restart.
-    installMemorySettings(
-      ctx,
-      { promptProfile: config.promptProfile, promptProfilesDir: config.promptProfilesDir },
-      {
-        onChange: next => {
-          const current = promptState.settings
-          if (next.promptProfile === current.promptProfile && next.promptProfilesDir === current.promptProfilesDir) return
-          try {
-            promptState = buildPrompts(next)
-            logger.info(`prompt settings applied: dir ${promptState.dir}, forced profile ${next.promptProfile ?? '(auto by route)'}`)
-          } catch (error) {
-            // A refused write never reaches here (validate rejects it first); this
-            // covers a profile file that changed out of band, and keeps the last
-            // good set serving instead of taking the plugin down.
-            logger.warn(`prompt settings change ignored: ${error instanceof Error ? error.message : String(error)}`)
-          }
-        },
-        validate: value => {
-          const selected = value.promptProfile
-          if (selected === undefined || selected.trim().length === 0 || selected === DEFAULT_PROFILE_NAME) return
-          // Refuse the write rather than let the next call fall back silently:
-          // a mistyped profile name is the mistake this field invites.
-          const known = new Set([
-            ...(config.promptProfiles ?? []).map(profile => profile.name),
-            ...readProfileDir(resolvePromptsDir(dataDir, value.promptProfilesDir)).profiles.map(profile => profile.name),
-          ])
-          if (!known.has(selected)) {
-            throw new Error(`prompt profile "${selected}" is not defined (known: ${[DEFAULT_PROFILE_NAME, ...known].join(', ')})`)
-          }
-        },
-      },
-    )
 
     logger.info(`memory plugin loaded (data: ${store.filePath}, extraction: ${config.extraction})`)
 

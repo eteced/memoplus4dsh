@@ -5,8 +5,8 @@
  * with its validated rules (pronoun/back-reference resolution, one row per
  * list item, `is` for static attributes, DETAILS column, verbatim time
  * expressions), the fault-tolerant pipe parser, the relevance-filtered
- * known-entities hint, and a serial extraction queue with paced starts and
- * bounded, jittered retries.
+ * known-entities hint, and a paced extraction queue with bounded, jittered
+ * retries whose backoff waits outside the worker slots.
  */
 
 import type { Entity, EntityType, MemoryEvent, MemoryStore, NewEvent, TimePrecision } from './store.js'
@@ -511,6 +511,20 @@ export const DEFAULT_EXTRACTION_JOB_INTERVAL_MS = 3_000
 export const RETRY_JITTER_RATIO = 0.2
 
 /**
+ * Default extraction worker pool size (3).
+ *
+ * The pool size is *not* the burst-rate lever: {@link
+ * DEFAULT_EXTRACTION_JOB_INTERVAL_MS} (3s) is measured between adjacent job
+ * *starts*, so three in-flight jobs still start 3s apart and the request rate
+ * at the gateway is unchanged. What 3 buys is that a job waiting out a retry
+ * backoff (up to 10 minutes) no longer owns the only slot: with concurrency=1
+ * the pool would be idle-but-busy for the whole wait while other turns sat in
+ * the queue. Retries are unchanged per job; each job's attempts stay serial and
+ * bounded by the same retry rules.
+ */
+export const DEFAULT_EXTRACTION_CONCURRENCY = 3
+
+/**
  * Apply ±{@link RETRY_JITTER_RATIO} jitter to one retry delay, so jobs that
  * failed together do not retry in lockstep and re-create the burst.
  *
@@ -537,10 +551,11 @@ export interface ExtractionQueueOptions {
    */
   retryDelayMs?: readonly number[]
   /**
-   * Minimum delay between two job starts, in ms; 0 disables. Default
+   * Minimum delay between two fresh job starts, in ms; 0 disables. Default
    * {@link DEFAULT_EXTRACTION_JOB_INTERVAL_MS}. Applies to start-up requeues,
-   * in-run requeues, and fresh enqueues alike — one spacing rule for every
-   * path into the queue.
+   * in-run requeues, and fresh enqueues alike — one spacing rule for every path
+   * into the queue. A re-queued retry is not paced again: its jittered backoff
+   * is already the spacing.
    */
   jobIntervalMs?: number
   /**
@@ -549,11 +564,13 @@ export interface ExtractionQueueOptions {
    */
   random?: () => number
   /**
-   * Worker pool size (default 1 = strict serial). >1 overlaps extraction
-   * calls and shortens the wall clock only when the start interval allows it:
-   * the interval is measured between starts, so it paces the pool rather than
-   * being bypassed by it. Raise only when the endpoint's rate limit tolerates
-   * it; retries/backoff are unchanged per job.
+   * Worker pool size (default {@link DEFAULT_EXTRACTION_CONCURRENCY} = 3). >1
+   * overlaps extraction calls and shortens the wall clock only when the start
+   * interval allows it: the interval is measured between starts, so it paces
+   * the pool rather than being bypassed by it. The default is 3 rather than 1
+   * because starts — not slots — set the request rate, and a slot that would
+   * otherwise be held by a job waiting out a minutes-long retry can serve the
+   * next turn instead. Retries/backoff are unchanged per job.
    */
   concurrency?: number
   /** Called when a job is skipped after exhausting retries. */
@@ -563,12 +580,29 @@ export interface ExtractionQueueOptions {
 }
 
 /**
+ * One queued job plus the attempt number its next worker slot must run.
+ *
+ * `attempt` is 1 for a fresh enqueue and N+1 for a job re-queued after attempt
+ * N failed: the retry chain's bookkeeping travels with the job, so parking it
+ * outside a worker slot loses nothing.
+ */
+interface QueuedJob {
+  job: ExtractionJob
+  attempt: number
+}
+
+/**
  * Extraction queue: keyed dedupe, paced starts, bounded retries, then
  * skip-and-record. The queue never rejects — one failing job must not stall the
- * conversation's memory writes. concurrency=1 keeps the historical strict
- * serial behavior; N>1 runs a small worker pool over the same guarantees, and
- * `jobIntervalMs` keeps adjacent starts apart so a backlog is spread instead of
- * fired as one burst at a flaky endpoint.
+ * conversation's memory writes. N>1 runs a small worker pool over the same
+ * guarantees, and `jobIntervalMs` keeps adjacent starts apart so a backlog is
+ * spread instead of fired as one burst at a flaky endpoint.
+ *
+ * A retry backoff is *not* slept inside a worker slot: a failed job with
+ * attempts left is parked on a timer ({@link scheduleRetry}) and its slot is
+ * released immediately, so a 10-minute wait cannot starve the queue even at
+ * concurrency=1. When the timer fires the job re-enters at the *tail*, so a
+ * failing job also cannot jump ahead of the jobs queued behind it.
  */
 export class ExtractionQueue {
   private readonly run: (job: ExtractionJob) => Promise<unknown>
@@ -579,7 +613,7 @@ export class ExtractionQueue {
   private readonly concurrency: number
   private readonly onSkip?: (job: ExtractionJob, error: unknown) => void
   private readonly onAttemptFailed?: (job: ExtractionJob, attempt: number, error: unknown) => void
-  private queue: ExtractionJob[] = []
+  private queue: QueuedJob[] = []
   private activeWorkers = 0
   private readonly idleResolvers: (() => void)[] = []
   private pendingKeys = new Set<string>()
@@ -588,8 +622,13 @@ export class ExtractionQueue {
   private nextStartAt = 0
   /** Pending re-pump scheduled for {@link nextStartAt}; never left dangling. */
   private pumpTimer: ReturnType<typeof setTimeout> | undefined
-  /** Backoff sleeps in flight, so {@link close} can interrupt them. */
-  private readonly retrySleeps = new Map<ReturnType<typeof setTimeout>, () => void>()
+  /**
+   * Delayed retries parked outside any worker slot, keyed by their timer so
+   * {@link close} can clear them all. A non-empty set means the queue is *not*
+   * idle: those jobs are still in flight (their keys stay in
+   * {@link pendingKeys}) and are only waiting for their timer.
+   */
+  private readonly retryTimers = new Set<ReturnType<typeof setTimeout>>()
   private closed = false
 
   constructor(run: (job: ExtractionJob) => Promise<unknown>, options: ExtractionQueueOptions = {}) {
@@ -598,7 +637,7 @@ export class ExtractionQueue {
     this.retryDelayMs = options.retryDelayMs ?? DEFAULT_EXTRACTION_RETRY_DELAY_MS
     this.jobIntervalMs = Math.max(0, options.jobIntervalMs ?? DEFAULT_EXTRACTION_JOB_INTERVAL_MS)
     this.random = options.random ?? Math.random
-    this.concurrency = Math.max(1, options.concurrency ?? 1)
+    this.concurrency = Math.max(1, options.concurrency ?? DEFAULT_EXTRACTION_CONCURRENCY)
     this.onSkip = options.onSkip
     this.onAttemptFailed = options.onAttemptFailed
   }
@@ -608,48 +647,68 @@ export class ExtractionQueue {
     return this.skippedCount
   }
 
-  /** Enqueue one turn; a duplicate (sessionId, turn) already queued is dropped. */
+  /**
+   * Enqueue one turn; a duplicate (sessionId, turn) already queued is dropped.
+   * A job parked in a delayed retry still owns its key, so re-enqueuing it
+   * during the wait returns false.
+   */
   enqueue(job: ExtractionJob): boolean {
     if (this.closed) return false
     const key = `${job.sessionId}:${job.turn}`
     if (this.pendingKeys.has(key)) return false
     this.pendingKeys.add(key)
-    this.queue.push(job)
+    this.queue.push({ job, attempt: 1 })
     this.pump()
     return true
   }
 
-  /** Resolves when every job enqueued so far has settled. */
+  /**
+   * Resolves when every job enqueued so far has settled. A job waiting out the
+   * start interval, and equally a job parked in a delayed retry, keeps the
+   * queue from being idle, so this waits for its timer to fire and for it to
+   * settle — it never returns early into a gap between attempts.
+   */
   async whenIdle(): Promise<void> {
-    // A queued job waiting out the start interval keeps the queue from being
-    // idle, so this still waits for its timer to fire (and for it to settle).
-    if (this.queue.length === 0 && this.activeWorkers === 0) return
+    if (this.isIdle()) return
     await new Promise<void>(resolve => this.idleResolvers.push(resolve))
   }
 
+  /** True when nothing is queued, running, or waiting out a retry backoff. */
+  private isIdle(): boolean {
+    return this.queue.length === 0 && this.activeWorkers === 0 && this.retryTimers.size === 0
+  }
+
+  /** Resolve {@link whenIdle} waiters once the last in-flight job is gone. */
+  private maybeResolveIdle(): void {
+    if (!this.isIdle()) return
+    for (const resolve of this.idleResolvers.splice(0)) resolve()
+  }
+
   /**
-   * Stop accepting jobs, cancel any pending start timer, drain what is
-   * already queued without further spacing, and cut short any backoff sleep.
+   * Stop accepting jobs, cancel any pending start timer, drop every parked
+   * retry, drain what is already queued without further spacing, and release
+   * the idle waiters.
    *
    * Shutdown (`dispose`) awaits {@link whenIdle}; draining immediately keeps
    * that wait bounded by the jobs' own call timeouts instead of also paying the
-   * start interval per backlogged job, and interrupting a backoff keeps it from
-   * waiting out a minutes-long retry delay. A job cut short mid-round books
-   * nothing: its durable enqueue line is still in the log, so the next start
-   * retries it with the failure count it already had, and clearing every timer
-   * guarantees a closed and drained queue leaves nothing on the event loop.
+   * start interval per backlogged job, and clearing the retry timers keeps it
+   * from waiting out a minutes-long retry delay. A job cut short mid-round
+   * books nothing: its durable enqueue line is still in the log, so the next
+   * start retries it with the failure count it already had, and clearing every
+   * timer guarantees a closed and drained queue leaves nothing on the event
+   * loop.
    */
   close(): void {
     if (this.closed) return
     this.closed = true
     this.clearPumpTimer()
-    for (const [timer, interrupt] of [...this.retrySleeps]) {
-      clearTimeout(timer)
-      interrupt()
-    }
-    this.retrySleeps.clear()
+    for (const timer of [...this.retryTimers]) clearTimeout(timer)
+    this.retryTimers.clear()
     this.nextStartAt = 0
     this.pump()
+    // A queue whose only remaining work was a parked retry is idle now, and no
+    // worker completion will fire to notice it.
+    this.maybeResolveIdle()
   }
 
   private clearPumpTimer(): void {
@@ -658,26 +717,14 @@ export class ExtractionQueue {
     this.pumpTimer = undefined
   }
 
-  /**
-   * Wait out one retry backoff.
-   * @param delayMs - Jittered delay in ms.
-   * @returns `true` when the delay elapsed, `false` when {@link close} cut it short.
-   */
-  private sleepForRetry(delayMs: number): Promise<boolean> {
-    if (this.closed) return Promise.resolve(false)
-    return new Promise<boolean>(resolve => {
-      const timer = setTimeout(() => {
-        this.retrySleeps.delete(timer)
-        resolve(true)
-      }, delayMs)
-      this.retrySleeps.set(timer, () => resolve(false))
-    })
-  }
-
   private pump(): void {
     while (this.activeWorkers < this.concurrency && this.queue.length > 0) {
-      // Pace starts while running; a closed queue drains unthrottled.
-      if (!this.closed && this.jobIntervalMs > 0) {
+      const entry = this.queue[0]!
+      // Pace fresh starts while running; a closed queue drains unthrottled.
+      // A re-queued retry (attempt > 1) is *not* interval-paced: its own
+      // jittered backoff already spaces it, and that is what the delay tests
+      // pin — the interval exists to stop a backlog of *new* jobs bursting.
+      if (!this.closed && this.jobIntervalMs > 0 && entry.attempt === 1) {
         const now = Date.now()
         if (now < this.nextStartAt) {
           this.schedulePump(this.nextStartAt - now)
@@ -685,18 +732,29 @@ export class ExtractionQueue {
         }
         this.nextStartAt = now + this.jobIntervalMs
       }
-      const job = this.queue.shift()!
-      const key = `${job.sessionId}:${job.turn}`
+      this.queue.shift()
       this.activeWorkers++
-      void this.runWithRetries(job).finally(() => {
-        this.activeWorkers--
-        this.pendingKeys.delete(key)
-        this.pump()
-        if (this.activeWorkers === 0 && this.queue.length === 0) {
-          for (const resolve of this.idleResolvers.splice(0)) resolve()
-        }
-      })
+      // The worker's own promise settles when the job settles *or* is parked for
+      // a retry; `parked` is what tells the two apart.
+      let parked = false
+      void this.runWithRetries(entry.job, entry.attempt)
+        .then(value => { parked = value })
+        .finally(() => this.releaseWorker(entry, parked))
     }
+  }
+
+  /**
+   * Release one worker slot and let the next queued job start.
+   *
+   * @param entry - The job that occupied the slot.
+   * @param parked - True when a delayed retry now owns the job: it is still in
+   * flight, so its dedupe key stays and the queue is not idle.
+   */
+  private releaseWorker(entry: QueuedJob, parked: boolean): void {
+    this.activeWorkers--
+    if (!parked) this.pendingKeys.delete(`${entry.job.sessionId}:${entry.job.turn}`)
+    this.pump()
+    this.maybeResolveIdle()
   }
 
   /**
@@ -712,27 +770,72 @@ export class ExtractionQueue {
     }, delayMs)
   }
 
-  private async runWithRetries(job: ExtractionJob): Promise<void> {
+  /**
+   * Nominal-then-jittered delay before the retry that follows `attempt`.
+   *
+   * @param attempt - The attempt that just failed (1-based).
+   * @returns Jittered delay in ms, or 0 when the configured entry is 0.
+   */
+  private retryDelayFor(attempt: number): number {
+    const base = this.retryDelayMs[attempt - 1] ?? this.retryDelayMs[this.retryDelayMs.length - 1] ?? 0
+    return base > 0 ? Math.max(0, jitterRetryDelay(base, this.random)) : 0
+  }
+
+  /**
+   * Park a job for its backoff *outside* any worker slot, then re-queue it at
+   * the tail and pump. The slot is free for the whole wait, so at concurrency=1
+   * a job waiting out a retry no longer blocks the queue; re-entering at the
+   * tail keeps the order FIFO, so a failing job cannot starve the jobs behind
+   * it. The job keeps its dedupe key and its attempt counter while parked.
+   *
+   * @param job - Job to retry.
+   * @param nextAttempt - Attempt number the re-queued job resumes at.
+   * @param delayMs - Jittered backoff in ms (always > 0).
+   */
+  private scheduleRetry(job: ExtractionJob, nextAttempt: number, delayMs: number): void {
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(timer)
+      if (this.closed) return
+      this.queue.push({ job, attempt: nextAttempt })
+      this.pump()
+    }, delayMs)
+    this.retryTimers.add(timer)
+  }
+
+  /**
+   * Run one job's remaining attempts, releasing the worker slot for any wait
+   * longer than zero.
+   *
+   * @param job - Job to run.
+   * @param firstAttempt - Attempt to resume at (1 for a fresh job).
+   * @returns `true` when the job was parked in a delayed retry (still in
+   * flight, nothing booked), `false` when it settled or was booked skipped.
+   */
+  private async runWithRetries(job: ExtractionJob, firstAttempt = 1): Promise<boolean> {
     const attempts = 1 + this.maxRetries
     let lastError: unknown
-    for (let attempt = 1; attempt <= attempts; attempt++) {
-      if (attempt > 1) {
-        const base = this.retryDelayMs[attempt - 2] ?? this.retryDelayMs[this.retryDelayMs.length - 1] ?? 0
-        const delay = base > 0 ? Math.max(0, jitterRetryDelay(base, this.random)) : 0
-        // A close during the backoff abandons the remaining attempts without
-        // booking the round: the durable log still lists the job as pending.
-        if (delay > 0 && !(await this.sleepForRetry(delay))) return
-      }
+    for (let attempt = firstAttempt; attempt <= attempts; attempt++) {
       try {
         await this.run(job)
-        return
+        return false
       } catch (error) {
         lastError = error
         this.onAttemptFailed?.(job, attempt, error)
+        if (attempt >= attempts) break
+        const delay = this.retryDelayFor(attempt)
+        // A zero delay has nothing to move off the slot: retry in place, as
+        // before. A close during the backoff abandons the remaining attempts
+        // without booking the round: the durable log still lists the job as
+        // pending.
+        if (delay <= 0) continue
+        if (this.closed) return false
+        this.scheduleRetry(job, attempt + 1, delay)
+        return true
       }
     }
     this.skippedCount++
     this.onSkip?.(job, lastError)
+    return false
   }
 }
 

@@ -8,6 +8,31 @@ memoplus4dsh 的重要修改归档，按开发里程碑组织。各里程碑的�
 
 ## v0.2（未发布）— 模型依赖面可配置化
 
+- **设置卡片扩到 11 个键，配置导入导出成为基本功能。** Web 卡片（**设置 → 插件 →
+  插件配置**）现在编辑这个命名空间拥有的全部键：`promptProfile`、
+  `promptProfilesDir`、`reasoningEffortPolicy`、`thinkingTokenHeadroom`、
+  `injectTopK`、`debug`、`extractionConcurrency`、`extractionJobIntervalMs`、
+  `extractionRetryDelayMs`、`extractionMaxRetries`、
+  `extractionMaxFailureRounds`；按分组排版（提示词 / 检索与推理 / 抽取队列 / 诊断），
+  每行带一行说明、默认值、是否被覆盖，以及**怎么生效**。即时类（`debug`、
+  `thinkingTokenHeadroom`、`injectTopK`、`reasoningEffortPolicy`、
+  `extractionMaxFailureRounds`）每次使用都重读，保存即落在下一次调用上；四个队列类
+  键由 `ExtractionQueue` 在构造时固定，卡片上逐项标 **「重启后生效」**，插件保存后
+  如实告警、不假装生效。为了让这句话是真的，设置分区改成**在建队列之前**挂载——只
+  存在于设置层的值就是下次启动读到的值。数字字段就地校验（非法输入阻塞保存、草稿
+  保留），`extractionRetryDelayMs` 用逗号分隔的数字编辑（也接受 JSON 数组粘贴）并以
+  数组存储，`debug` 明确标注为诊断开关（**默认关**、日志量显著增加）。缺字段、缺
+  快照、类型错乱一律降级渲染而不抛异常。**导入导出**：卡片可下载/复制 JSON 快照，
+  也可从文件或粘贴文本导入（解析 → 校验 → 只取本命名空间的键 → 字段级写入、revision
+  设栅），写之前先告诉用户将写入哪些键，坏文件整份拒绝且不动设置文档。
+  `scripts/config.mjs export [--out FILE] [--data-dir DIR]` 打印完整生效快照并逐项
+  标注来源（`settings` / `cordis` / `default`），同时单列它永远不会回写的
+  `cordis.patch.yml` 键；`import FILE [--dry-run]` 先校验，写前把设置文档备份到
+  `/tmp/`（打印路径），只回写拥有的键，且注释、锚点、其它命名空间原样保留。卡片与
+  CLI 共用一份键清单、一份 schema、一份导入解析与一份导出拼装
+  （`src/settings.ts`），不会漂移；导入只写 `source=settings` 的键，所以"导出再导入"
+  不会把继承值固化成显式覆盖。`memory_status` 另增一段报告抽取队列的生效值及其生效
+  语义。
 - **Prompt profile。** 五个阶段的 prompt（抽取、实体合并、supersede 判定、
   查询扩展、查询蒸馏）以及随之绑定的模型参数（输出上限、单次超时、reasoning
   effort）不再是字面量。一个 profile 形如 `{ name, match: { provider?, model? },
@@ -81,12 +106,45 @@ memoplus4dsh 的重要修改归档，按开发里程碑组织。各里程碑的�
   （dsh 自带的 schema 库）与构建期依赖 `esbuild`。
 - **抽取重试改为「耐心且节流」。** `extractionMaxRetries` 默认 2→**4**、新增 `extractionRetryDelayMs`（默认 `[15s,1m,3m,10m]`，末项重复，±20% 抖动，取代硬编码的 5s/30s）、新增 `extractionJobIntervalMs`（默认 **3s**，相邻任务开始的最小间隔）、`extractionMaxFailureRounds` 默认 3→**10**。启动重抽不再连发（14 条摊开约 40 秒），配合跨「下一轮对话 + 下次启动」的持续重抽，熬得过上游几十秒到几分钟的 500 抖动；每条 turn 最多 10 轮 × 5 次尝试。`close()` 会中断退避且不白记账，dispose 不会为 600s 退避买单。
  新增 `debug`（**默认 false**）：打开后才写每个 session 事件的 `listener-saw` 轨迹（此前无条件写，一天近千行，信噪比太低）与空内容调用的 `llm-empty` 现场记录（`provider`/`model`/`maxTokens`/`chunks`/`chars`/`finish`/`usage`，字段取自 `@deepseek-ai/dsh-llm` 的 `StreamChunk` 类型）。**失败路径的现场信息无条件拼进错误消息**（`extraction produced empty content (finish=…, chunks=…, chars=…)`），所以默认配置下也能诊断；损失账本（`failed`/`abandoned`/`requeue`）继续无条件写。
+- **退避不再占用 worker 槽位；`extractionConcurrency` 默认 1→3。** 此前失败但还有
+  重试机会的任务是在 worker 内 `await` 退避的，于是并发=1 时一条任务 15s–10min 的
+  等待会把排在它后面的任务全堵住。现在该任务挂到定时器上、**立即释放槽位**，延迟
+  到点后从**队尾**重新入队（FIFO——一条失败任务不会饿死排在它后面的任务）。
+  `whenIdle()` 仍会等这条延迟重试：只有「队列空 + 无活跃 worker + 无待触发重试
+  timer」三者同时成立才 resolve。`close()` 清掉所有重试 timer，且被它打断的那一轮
+  不记账（durable log 仍留 pending，下次启动带原 `failures` 重抽）；等待期间该 job
+  仍占着去重 key，同 key 重复 enqueue 依旧返回 false。每轮尝试次数
+  （`1 + extractionMaxRetries`）、并发上限、`jobIntervalMs` 开始间隔节流、
+  `skipped`/`onSkip`/`onAttemptFailed` 账本语义均不变。池默认值改为 3 的理由：
+  请求**速率**由 `extractionJobIntervalMs` 决定（无论几个槽位，开始时刻都按 3s
+  铺开），所以 3 个在途不会提高突发速率，只是避免一条任务的重试等待饿死队列。
 - **修复：抽取失败不再静默丢掉一个 turn 的记忆。** 原先一轮重试用尽后直接写
   `settled` 墓碑——终态、不重试、除了日志行没有任何地方能看到。现在失败写
   `failed` 记录，该 turn 保持"未结"并在下一轮对话和下次启动时重抽，直到
   `extractionMaxFailureRounds`（默认 3）轮为止；只有真正放弃时才写 `abandoned`，
   并由 `memory_status` 与 doctor 明确报出"N 个 turn 的记忆没有写入图"。压缩
   日志时保留 `abandoned` 记录（最近 100 条），损失凭证不会随重启被抹掉。
+- **`deepseek-v4.1-flash` 的参考 profile，以及选出它的那套脚手架。** `profiles/`
+  里放：一份**只按模型名匹配**的参考 profile（`deepseek-v4.1-flash.json`，
+  `match.model`——同名即同模型，谁提供这条路由都套用）、它对比过的四个候选抽取
+  prompt（A 字面量卫生、B 同一性纪律、C 格式+双语、D 合并）、以及冻结的 18 轮 A/B
+  语料（`profiles/ab-corpus.jsonl`，由 `scripts/build-ab-corpus.mjs` 从
+  `extraction-pending.jsonl` 与会话日志经插件自己的 `buildTurnText` 生成）。
+  `scripts/ab-extraction-prompts.mjs` 按插件的方式调用端点（streaming、
+  `thinking` / `max_tokens` 可配），并用插件自己的解析器给原始 pipe 表打分：
+  字面量噪声（拆成"纯值类"`number`/`version`/`boolean`/`quantity` 与"标识符类"）、
+  格式合规、产出量、中文轮的语言一致性、E1 的模型名折叠形态。`--score-raw` 可以
+  离线重算已保存的输出（加指标零调用成本）；
+  `scripts/audit-literal-entities.mjs` 在真实图里统计同一批名字形态，并把
+  subject 位（来自 `CANONICAL_NAME`）与合法的 object 位分开算。实测结论：**唯一稳健的
+  收益是中文轮的语言一致性**（5 组同批对照里 baseline 的中文事实句占比 18.5%~49.6%，
+  所选候选 49.6%~84.5%）；**格式合规平均更好但不稳健**（列数不符 3 胜 1 平 1 负、
+  空核心字段 4 胜 1 负，负的那次来自同一轮长英文任务书，两边格式纪律一起崩）；
+  **字面量噪声与产出量没有可靠变化**（输出 token 有升有降，输入稳定 +500 prompt
+  token/次）。而调优出发时的两条假设**没有**复现——"值当实体名"已接近地板
+  （1.2%~1.7%，显式加规则反而升到 3.5%），模型名折叠在抽取阶段一次都没发生
+  （206 次调用、200+ 条输出里 0 条：E1 在实体合并阶段，本轮没有动它）。报告与局限见
+  [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md)。
 
 ## r2 全量重跑 — 2026-09-11
 

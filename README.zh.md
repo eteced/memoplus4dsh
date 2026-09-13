@@ -118,7 +118,7 @@ scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 | `extractionRetryDelayMs` | `[15000,60000,180000,600000]` | 同一轮内重试之间的等待（末项重复，±20% 抖动）。原先是硬编码 `[5s,30s]`——太密，跨不过上游几十秒级的故障窗口 |
 | `extractionJobIntervalMs` | `3000` | 相邻两个抽取任务**开始**之间的最小间隔（`0` = 关闭）。这是防止「启动爆发」的关键：14 条积压按 0s/3s/…/39s 稀疏铺开，而不是 14 连发撞进故障窗口 |
 | `extractionMaxFailureRounds` | `10` | 失败轮次上限（一轮 = 用尽一次 `extractionMaxRetries`）。未达上限的 turn 会在下一轮对话和下次启动时重抽；达上限后记入 `abandoned`，并由 `memory_status` / doctor 报告该 turn 的记忆未写入 |
-| `extractionConcurrency` | `1` | 抽取 worker 池大小；`1` 为严格串行。仅当端点能承受并发抽取调用时才调高 |
+| `extractionConcurrency` | `3` | 抽取 worker 池大小。它**不提高请求速率**：`extractionJobIntervalMs` 量的是相邻任务**开始**之间的间隔，所以无论几个槽位，开始时刻都按 3s 铺开。3 是为了让等待重试退避（最长 10 分钟）的任务不再饿死排在它后面的 turn——退避现在完全不占槽位，重入队也排到队尾。`1` 为严格串行 |
 | `snapshotThreshold` | `1000` | 两次快照压缩之间的 journal 操作数 |
 | `debug` | `false` | 诊断开关。打开后把每个 session 事件的 `listener-saw` 轨迹与空内容调用的 `llm-empty` 现场记录写进 `extraction-debug.jsonl`（正常也能到每天近千行）。**默认关闭，不要给用户默认打开**；关掉不影响损失账本（`failed` / `abandoned` / `requeue` 等仍无条件写） |
 | `promptProfiles` | （无） | 具名 prompt profile，按声明顺序与**该次调用实际使用的模型**匹配。每项形如 `{ name, match: { provider?, model? }, stages: { <阶段>: { prompt, maxTokens?, timeoutMs?, reasoningEffort? } } }`，`*` 为通配。内置 `default` profile 承载 v0.1 的原始 prompt，始终兜底 |
@@ -149,6 +149,8 @@ node scripts/prompts.mjs export --out /tmp/all.json --include-default
 
 导入前会先用 `validateProfiles` 校验（缺必需占位符、未知阶段、非正数上限都会拒绝），所以坏文件不会被写进目录。文件在 dsh 启动时读取，导入后重启生效——profile 本身是按调用解析的，不需要其它步骤。
 
+**仓库里随包提供一份调优过的参考 profile**（`profiles/`），而且是**实测**出来的、不是声明的：`profiles/deepseek-v4.1-flash.json` **只按模型名匹配**（`match.model = "deepseek-v4.1-flash*"`，不带 `provider`——同名即同模型，谁提供这条路由都套用），承载四个候选里实测最优的抽取 prompt（收益主要在"中文轮事实句的语言一致性"，报告里明确写了它**没有**改善什么），并固定 `maxTokens: 8192` 与 `reasoningEffort: "off"`。把它拷进 `<dataDir>/prompts/`（或 `scripts/prompts.mjs import`）后重启即可。18 个真实 turn 的冻结语料（`profiles/ab-corpus.jsonl`）、候选、脚手架（`scripts/ab-extraction-prompts.mjs`）、图侧审计（`scripts/audit-literal-entities.mjs`）、全部数字，以及同样重要的——**这次 A/B 没有证明什么**——都写在 [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md)。
+
 ### 让 thinking 真的关掉：在路由上声明 `off`（推荐）
 
 抽取是结构化任务，thinking 会在任何可见正文之前先把输出预算吃光。在 `opencode-go-extra/deepseek-v4.1-flash` 这条路由（`compat.thinkingFormat: deepseek`）上，同一条抽取输入、同样 `max_tokens: 8192` 实测：thinking 开着（`reasoning_effort: low`）两次都是 `finish=length`、可见内容 0 字符、8192/8192 token 全花在思考上；thinking 关掉（`thinking: {type: disabled}`）两次都是 `finish=stop`、可见内容 2399 / 2493 字符、各 37 行、思考 0 token。**思考 token 无法从输出预算里单独排除**——`thinking.budget_tokens`、`thinking_token_budget`、`thinking_budget`、`thinking_budget_tokens` 逐个实测都被该网关忽略，思考照样吃满 `max_tokens`。真正有效的是**把 thinking 整个关掉**，那样思考 token 就是 0。
@@ -174,9 +176,17 @@ llm-pi-ai:
 
 ### 配置页面（Web GUI）
 
-插件在 dsh 的 settings 服务上注册 `memoplus4dsh` 命名空间，因此 **设置 → 插件 → 插件配置** 里会出现一张「memoplus4dsh 记忆插件」卡片，可编辑上面两个字段：`promptProfile`（强制指定 profile）与 `promptProfilesDir`（外部 profile 目录）。标签页只渲染「Host 服务了该命名空间」且「有卡片以该命名空间为键注册」的交集，两半都在本包里（Host 半侧 `src/settings.ts`，浏览器半侧 `src/client/`），无需改动 dsh 本身。
+插件在 dsh 的 settings 服务上注册 `memoplus4dsh` 命名空间，因此 **设置 → 插件 → 插件配置** 里会出现一张「memoplus4dsh 记忆插件」卡片，按分组编辑这个命名空间拥有的 **11 个键**：`promptProfile`、`promptProfilesDir`（提示词）、`injectTopK`、`reasoningEffortPolicy`、`thinkingTokenHeadroom`（检索与推理）、`extractionConcurrency`、`extractionJobIntervalMs`、`extractionRetryDelayMs`、`extractionMaxRetries`、`extractionMaxFailureRounds`（抽取队列）、`debug`（诊断）。标签页只渲染「Host 服务了该命名空间」且「有卡片以该命名空间为键注册」的交集，两半都在本包里（Host 半侧 `src/settings.ts`，浏览器半侧 `src/client/`），无需改动 dsh 本身。
 
-保存后**立即生效**：插件接住新值并重建 profile 注册表，下一次调用就用新配置（`memory_status` 会立刻反映）。写错 profile 名字会被 Host 拒绝并说明原因，而不是悄悄回退到默认。其余配置项仍只由 `cordis.yml` entry 提供，卡片不接管它们。
+每一行都写着这一项**怎么生效**：
+
+| 生效语义 | 键 | 说明 |
+|---|---|---|
+| 保存即生效 | `promptProfile`、`promptProfilesDir` | 保存后重建 profile 注册表，下一次调用就用新值 |
+| 保存即生效 | `injectTopK`、`reasoningEffortPolicy`、`thinkingTokenHeadroom`、`debug`、`extractionMaxFailureRounds` | 每次使用都重读，不需要重启 |
+| **重启后生效** | `extractionConcurrency`、`extractionJobIntervalMs`、`extractionRetryDelayMs`、`extractionMaxRetries` | 这四个由 `ExtractionQueue` 在**构造时**固定；卡片上逐项标注，保存后插件会告警"需要重启 dsh 才生效"，不假装已经生效 |
+
+写错 profile 名字、数字为负这类问题会被 Host 拒绝并说明原因；非法输入也会在卡片里就地阻塞保存（草稿保留，不会丢）。`debug` 明确标注「诊断开关，默认关，打开会显著增加日志量」。其余配置项（`extraction`、`embedding*`、`promptProfiles`、`dataDir` …）仍只由 `cordis.yml`（实际是 profile 的 `cordis.patch.yml`）提供，卡片不接管它们。
 
 浏览器半侧是 `npm run build` 产出的 `lib/client.js`（esbuild 打包成 dsh 客户端模块系统要求的 `window.__ModuleLoader__.load({ id, factory })` 惰性工厂）。首次新增这张卡片需要重启 dsh——它启动时扫描 Loader 条目里的 `dsh.client` 声明；此后改卡片代码只需刷新页面。
 
@@ -207,6 +217,41 @@ llm-pi-ai:
 ```
 
 profile 的 prompt 必须保留该阶段的输入占位符——extraction 是 `{turn_text}`，两个裁决阶段是 `{lines}`，两个查询侧阶段是 `{query}`（加载时校验，不满足直接拒绝该 profile）。extraction prompt 中的 `{known_entities}` / `{candidate_mentions}` 是可选的，缺失只告警。
+
+### 配置导入导出
+
+**UI（卡片底部「配置导入导出」）**：「导出配置（下载 JSON）」与「复制到剪贴板」导出**完整生效快照**；「选择文件导入」与「粘贴 JSON 导入」导入，流程是 解析 → 结构校验 → 只取本命名空间拥有的键 → 字段级写入（revision 设栅）。点「解析并预览」会先告诉用户**将写入哪些键**、哪些被忽略，再点「确认导入」才写；坏文件整份拒绝，设置文档不会被改动。
+
+**CLI（`scripts/config.mjs`，与卡片同一份键与规则）**：
+
+```sh
+npm run build                                                # CLI 复用构建产物
+node scripts/config.mjs export --out /tmp/memoplus.json       # 完整生效快照 + 来源标注
+node scripts/config.mjs export                                # 不加 --out 时 JSON 走 stdout
+node scripts/config.mjs import /tmp/memoplus.json --dry-run    # 只打印将写入的键与差异，不改文件
+node scripts/config.mjs import /tmp/memoplus.json              # 先校验再写；写前自动备份设置文档到 /tmp/（打印路径）
+```
+
+**格式**（UI 与 CLI 完全一致）：
+
+```json
+{
+  "version": 1,
+  "plugin": "memoplus4dsh",
+  "exportedAt": "2026-09-13T13:52:59.857Z",
+  "values": { "injectTopK": 8, "thinkingTokenHeadroom": 3, "debug": false },
+  "sources": { "injectTopK": "cordis", "thinkingTokenHeadroom": "default", "debug": "default" },
+  "notWritten": { "extraction": "turn_end" }
+}
+```
+
+- `values` 是**完整生效快照**：设置层（`settings.yaml` 的 `memoplus4dsh` 段）> `cordis.patch.yml` 里同名键 > 插件默认值。三层都没有值的键（`promptProfile` / `promptProfilesDir`）不出现。
+- `sources` 逐项标注来源（`settings` / `cordis` / `default`）。
+- `notWritten` 单列组装层里**不属于**本命名空间的键——本工具永远不会回写它们。
+- **导入只回写设置层拥有的键**，且带 `sources` 的文件只写 `source=settings` 的键（手写的文件没有 `sources`，就按 `values` 里拥有的键写入）。所以"导出再导入"不会把继承自 `cordis.patch.yml` / 默认值的项固化成显式覆盖；未知键只报告、不写。
+- 数字列表字段（`extractionRetryDelayMs`）在卡片里用**逗号分隔的数字**编辑（也接受 JSON 数组粘贴），在导出/导入文件里始终是 JSON 数组。
+- CLI 只打印本命名空间那部分：设置文档里其它命名空间的密钥与无关内容不会出现在任何输出里（JSON 走 stdout，说明走 stderr）。
+- CLI 的导入用 YAML 文档的叶子级写入，**注释、锚点、其它命名空间原样保留**，并以同目录临时文件 + rename 落盘（运行中的 dsh watcher 不会看到半截文档，且会热读到这次改动）。
 
 > **embedding 升级的边界，如实说明。** sidecar 是通过 sentence-transformers 的 `prompt_name` 施加查询指令的，也就是**模型自己定义的具名预设**。而要求**文本前缀**的模型（`intfloat/multilingual-e5-*` 需要 `query: ` / `passage: `，`BAAI/bge-*` 也有类似要求）没有这种预设，所以用它们时查询侧是按裸文本嵌入的——仍然能用，但少了模型训练时的前缀。建议选不需要前缀的模型（`sentence-transformers/paraphrase-multilingual-mpnet-base-v2` 是 768 维的现成更强选项）。**文本前缀尚未支持**，作为后续项跟踪。
 >

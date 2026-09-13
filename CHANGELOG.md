@@ -8,6 +8,41 @@ MemoryAgentBench; see [docs/evaluation.md](docs/evaluation.en.md) for the full a
 
 ## v0.2 (unreleased) — model-dependent surfaces as configuration
 
+- **The settings card grew to 11 keys, and config import/export is now a first-class
+  feature.** The Web card (**Settings → Plugins → Plugin configuration**) edits the
+  entire settings-owned slice of the plugin config — `promptProfile`,
+  `promptProfilesDir`, `reasoningEffortPolicy`, `thinkingTokenHeadroom`,
+  `injectTopK`, `debug`, `extractionConcurrency`, `extractionJobIntervalMs`,
+  `extractionRetryDelayMs`, `extractionMaxRetries`, `extractionMaxFailureRounds`
+  — laid out in groups (prompts / retrieval & reasoning / extraction queue /
+  diagnostics), each row carrying a one-line explanation, its default, whether it
+  is overridden, and its **apply semantic**. The live keys (`debug`,
+  `thinkingTokenHeadroom`, `injectTopK`, `reasoningEffortPolicy`,
+  `extractionMaxFailureRounds`) are read at each use, so a save lands on the next
+  call; the four queue-class keys are fixed when `ExtractionQueue` is constructed,
+  so the card marks them **"restart to apply"** and the plugin logs a warning
+  instead of pretending. To make that claim true, the settings section is now
+  installed *before* the queue is built, so a value that lives only in the
+  settings layer is what the next start reads. Numeric fields validate locally
+  (invalid input blocks the save and keeps the draft), `extractionRetryDelayMs`
+  is edited as a comma-separated list (a JSON array is accepted too) and stored as
+  an array, and `debug` is labelled as the diagnostic switch it is (**off by
+  default**, significantly more log volume). Missing fields, a missing snapshot,
+  and wrong-typed values all degrade to a readable render instead of throwing.
+  **Import/export**: the card downloads or copies a JSON snapshot and imports one
+  from a file or the clipboard (parse → validate → keep only this namespace's keys
+  → per-field write behind the revision fence), showing which keys it will write
+  *before* writing and refusing a bad file without touching the settings document.
+  `scripts/config.mjs export [--out FILE] [--data-dir DIR]` prints the full
+  effective snapshot with per-key provenance (`settings` / `cordis` / `default`)
+  plus the `cordis.patch.yml` keys it will never write back; `import FILE
+  [--dry-run]` validates first, backs the settings document up to `/tmp/`
+  (printing the path), and writes only the owned keys with comments, anchors, and
+  other namespaces preserved. The card and the CLI share one key list, one schema,
+  one import parser, and one export builder (`src/settings.ts`), so they cannot
+  drift; an import only writes `source=settings` keys, so export-then-import never
+  freezes an inherited value into an override. `memory_status` now also reports
+  the effective extraction-queue values with their apply semantics.
 - **Prompt profiles.** The five stage prompts (extraction, entity merge,
   supersede, query expansion, query distillation) and the model parameters that
   travel with them — output cap, per-call timeout, reasoning effort — are no
@@ -106,6 +141,24 @@ MemoryAgentBench; see [docs/evaluation.md](docs/evaluation.en.md) for the full a
   schema library dsh ships) and the build-time `esbuild`.
 - **Extraction retries are patient and throttled.** `extractionMaxRetries` defaults 2→**4**; `extractionRetryDelayMs` (new, default `[15s,1m,3m,10m]`, last entry repeating, ±20% jitter) replaces the hardcoded 5s/30s; `extractionJobIntervalMs` (new, default **3s**) spaces job starts; `extractionMaxFailureRounds` defaults 3→**10**. A start-up requeue no longer fires back to back (14 jobs spread over ~40s), and persistent retrying across turns and restarts outlasts a provider returning 500s for tens of seconds to minutes. `close()` interrupts a backoff without booking the round, so dispose never pays for a 600s wait.
  The new `debug` (**default false**) gates the per-session-event `listener-saw` trace (previously unconditional at ~1000 lines/day) and an `llm-empty` record for empty-content calls (`provider`/`model`/`maxTokens`/`chunks`/`chars`/`finish`/`usage`, fields taken from `@deepseek-ai/dsh-llm`'s `StreamChunk`). **On the failure path the evidence is unconditional**: the thrown error reads `extraction produced empty content (finish=…, chunks=…, chars=…)`, so a default deployment can still diagnose it. The loss ledger (`failed`/`abandoned`/`requeue`) stays unconditional.
+- **Retry backoff no longer holds a worker slot, and `extractionConcurrency`
+  defaults 1→3.** A failed job with attempts left used to `await` its backoff
+  *inside* the worker, so at concurrency=1 one job's 15s–10min wait blocked every
+  job behind it. The job is now parked on a timer and its slot is released
+  immediately; when the delay elapses it re-enters at the **tail** of the queue
+  (FIFO — a failing job cannot starve the jobs queued behind it). `whenIdle()`
+  still waits for a parked retry: it resolves only when the queue is empty,
+  there is no active worker **and** no pending retry timer. `close()` clears
+  every retry timer and books nothing for the round it interrupts (the durable
+  log keeps the turn pending, so the next start retries it with its existing
+  failure count), and a parked job keeps its dedupe key, so a duplicate enqueue
+  is still refused. Attempts per round are unchanged (`1 +
+  extractionMaxRetries`), as are the concurrency cap, the start-interval
+  pacing, and the `skipped`/`onSkip`/`onAttemptFailed` accounting. The pool
+  default rises to 3 because the request *rate* is set by
+  `extractionJobIntervalMs` — starts stay 3s apart however many slots exist —
+  so three in flight adds no burst; it only stops a retry wait from starving
+  the queue.
 - **Fixed: an extraction failure no longer drops a turn's memories silently.** A
   turn whose retries were exhausted used to get a `settled` tombstone — terminal,
   never retried, and visible nowhere but a log line. It now records a `failed`
@@ -114,6 +167,37 @@ MemoryAgentBench; see [docs/evaluation.md](docs/evaluation.en.md) for the full a
   writes `abandoned`, which `memory_status` and doctor report as turns whose
   memories are not in the graph. Compaction keeps `abandoned` records (newest
   100), so the evidence of a loss survives restarts.
+- **A measured reference profile for `deepseek-v4.1-flash`, and the harness that
+  chose it.** `profiles/` holds a reference profile matched on the **model name
+  only** (`deepseek-v4.1-flash.json`, `match.model` — the same model name means
+  the same model, whichever provider serves it), the four candidate extraction
+  prompts it was measured against (A literal-hygiene, B identity-discipline,
+  C format+bilingual, D combined), and the frozen 18-turn A/B corpus
+  (`profiles/ab-corpus.jsonl`, built by `scripts/build-ab-corpus.mjs` from
+  `extraction-pending.jsonl` and the session logs through the plugin's own
+  `buildTurnText`). `scripts/ab-extraction-prompts.mjs` calls the endpoint the
+  way the plugin does (streaming, configurable `thinking` / `max_tokens`) and
+  scores raw pipe-table output with the plugin's own parser: literal-noise split
+  into value-shaped (`number`/`version`/`boolean`/`quantity`) and
+  identifier-shaped names, format compliance, volume, language match on Chinese
+  turns, and the E1 model-name-collapse shape. `--score-raw` re-scores a saved
+  run offline, so a new metric costs no calls, and
+  `scripts/audit-literal-entities.mjs` measures the same name classes in the live
+  graph, separating subject-side names (from `CANONICAL_NAME`) from legitimate
+  object-side ones. Measured outcome: the one robust win is **language
+  consistency on Chinese turns** (across five same-batch comparisons the baseline
+  wrote 18.5–49.6% of its fact sentences in Chinese, the chosen candidate
+  49.6–84.5%); **format compliance is better on average but not robust**
+  (column-count violations 3 wins / 1 tie / 1 loss, empty core fields 4 wins /
+  1 loss — the losses come from one long English turn where both prompts'
+  discipline collapsed); and **literal-noise and output volume show no reliable
+  change** (output tokens move both ways; input cost is reliably +500 prompt
+  tokens per call). The two hypotheses the tuning started from did **not**
+  reproduce — value-shaped entity names are already near the floor (1.2–1.7%
+  baseline; the explicit rule *raised* it to 3.5%) and model-name collapse never
+  happens at extraction (0 rows in 206 calls / 200+ outputs: E1 lives in the
+  entity-merge stage, which this round did not touch). Report and limits:
+  [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md).
 
 ## r2 full rerun — 2026-09-11
 

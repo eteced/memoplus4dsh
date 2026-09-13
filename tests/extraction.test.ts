@@ -211,13 +211,14 @@ describe('ExtractionQueue', () => {
     const inFlight: number[] = []
     // jobIntervalMs: 0: these unit tests are not rate-limited, and the pacing
     // default is 3000ms; spacing itself is covered by the pacing tests below.
+    // concurrency: 1 is explicit because this test asserts strict serial order.
     const queue = new ExtractionQueue(async job => {
       inFlight.push(job.turn)
       expect(inFlight).toHaveLength(1)
       await new Promise(r => setTimeout(r, 5))
       inFlight.pop()
       order.push(job.turn)
-    }, { jobIntervalMs: 0 })
+    }, { concurrency: 1, jobIntervalMs: 0 })
     queue.enqueue(makeJob({ turn: 0 }))
     queue.enqueue(makeJob({ turn: 1 }))
     queue.enqueue(makeJob({ turn: 2 }))
@@ -789,6 +790,223 @@ describe('ExtractionQueue pacing, retry delays, and defaults', () => {
       expect(starts).toEqual([0, 3_000])
       await idle
     })
+  })
+})
+
+describe('ExtractionQueue: retry backoff outside the worker slot', () => {
+  // Fake timers keep the seconds-to-minutes backoffs exact without dragging the
+  // suite; `random` pins the jitter so every delay under test is a literal.
+  const withFakeTimers = async (body: () => Promise<void>): Promise<void> => {
+    vi.useFakeTimers({ now: 0 })
+    try {
+      await body()
+    } finally {
+      vi.useRealTimers()
+    }
+  }
+  /** Jitter source that yields the nominal delay (0.5 → 1 + 0.2·(2·0.5−1)). */
+  const pinJitter = (): number => 0.5
+
+  it('concurrency=1: a job waiting out a long backoff does not hold the slot', async () => {
+    await withFakeTimers(async () => {
+      const starts: { turn: number; at: number }[] = []
+      const queue = new ExtractionQueue(async job => {
+        starts.push({ turn: job.turn, at: Date.now() })
+        if (job.turn === 0) throw new Error('boom')
+      }, {
+        concurrency: 1, maxRetries: 1, retryDelayMs: [600_000],
+        random: pinJitter, jobIntervalMs: 0,
+      })
+      queue.enqueue(makeJob({ turn: 0 }))
+      await vi.advanceTimersByTimeAsync(0)
+      // Turn 0's first attempt failed and is parked 600s out; its slot is free.
+      expect(starts).toEqual([{ turn: 0, at: 0 }])
+      expect(vi.getTimerCount()).toBe(1)
+      queue.enqueue(makeJob({ turn: 1 }))
+      await vi.advanceTimersByTimeAsync(0)
+      // The old in-slot sleep would have made turn 1 wait until t=600s.
+      expect(starts).toEqual([{ turn: 0, at: 0 }, { turn: 1, at: 0 }])
+      await vi.advanceTimersByTimeAsync(600_000)
+      expect(starts).toEqual([
+        { turn: 0, at: 0 }, { turn: 1, at: 0 }, { turn: 0, at: 600_000 },
+      ])
+      await queue.whenIdle()
+      expect(queue.skipped).toBe(1) // 1 + maxRetries attempts, then booked failed
+      expect(vi.getTimerCount()).toBe(0)
+    })
+  })
+
+  it('re-queues a delayed retry at the tail, so a failing job cannot starve the queue', async () => {
+    await withFakeTimers(async () => {
+      const order: string[] = []
+      const queue = new ExtractionQueue(async job => {
+        order.push(`${job.sessionId}:${job.turn}`)
+        if (job.turn === 0) throw new Error('boom')
+      }, { concurrency: 1, maxRetries: 1, retryDelayMs: [1_000], random: pinJitter, jobIntervalMs: 0 })
+      queue.enqueue(makeJob({ turn: 0 }))
+      await vi.advanceTimersByTimeAsync(0) // attempt 1 fails, parked to t=1000
+      queue.enqueue(makeJob({ turn: 1 }))
+      queue.enqueue(makeJob({ turn: 2 }))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(order).toEqual(['session-1:0', 'session-1:1', 'session-1:2'])
+      await vi.advanceTimersByTimeAsync(1_000)
+      // The retry lands behind the two jobs queued after it, not ahead of them.
+      expect(order).toEqual(['session-1:0', 'session-1:1', 'session-1:2', 'session-1:0'])
+      await queue.whenIdle()
+    })
+  })
+
+  it('whenIdle waits for a parked retry instead of resolving in the gap', async () => {
+    await withFakeTimers(async () => {
+      let attempts = 0
+      const queue = new ExtractionQueue(async () => {
+        attempts++
+        if (attempts === 1) throw new Error('boom')
+      }, { maxRetries: 1, retryDelayMs: [60_000], random: pinJitter, jobIntervalMs: 0 })
+      queue.enqueue(makeJob())
+      let idleResolved = false
+      const idle = queue.whenIdle().then(() => { idleResolved = true })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(attempts).toBe(1)
+      expect(vi.getTimerCount()).toBe(1) // parked, so the queue is not idle
+      await vi.advanceTimersByTimeAsync(59_999)
+      expect(idleResolved).toBe(false) // no premature resolve during the backoff
+      await vi.advanceTimersByTimeAsync(1)
+      await idle
+      expect(attempts).toBe(2)
+      expect(idleResolved).toBe(true)
+      expect(queue.skipped).toBe(0)
+    })
+  })
+
+  it('close() clears the parked retry timer without booking the round', async () => {
+    await withFakeTimers(async () => {
+      let attempts = 0
+      const onSkip = vi.fn()
+      const queue = new ExtractionQueue(async () => {
+        attempts++
+        throw new Error('boom')
+      }, { maxRetries: 4, retryDelayMs: [600_000], random: pinJitter, jobIntervalMs: 0, onSkip })
+      queue.enqueue(makeJob())
+      let idleResolved = false
+      const idle = queue.whenIdle().then(() => { idleResolved = true })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(attempts).toBe(1)
+      expect(vi.getTimerCount()).toBe(1)
+      queue.close()
+      // dispose must not leave the 600s retry (or anything else) on the loop…
+      expect(vi.getTimerCount()).toBe(0)
+      await idle
+      expect(idleResolved).toBe(true)
+      // …and the interrupted round books nothing: the durable log still lists
+      // the job as pending, so the next start retries it with its old failures.
+      expect(attempts).toBe(1)
+      expect(queue.skipped).toBe(0)
+      expect(onSkip).not.toHaveBeenCalled()
+    })
+  })
+
+  it('keeps a parked job deduped while it waits out its retry', async () => {
+    await withFakeTimers(async () => {
+      let attempts = 0
+      const queue = new ExtractionQueue(async () => {
+        attempts++
+        if (attempts === 1) throw new Error('boom')
+      }, { maxRetries: 1, retryDelayMs: [30_000], random: pinJitter, jobIntervalMs: 0 })
+      expect(queue.enqueue(makeJob({ turn: 7 }))).toBe(true)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(attempts).toBe(1)
+      // Waiting for a retry is still in flight: the same key is refused…
+      expect(queue.enqueue(makeJob({ turn: 7 }))).toBe(false)
+      // …while another turn and another session are unaffected.
+      expect(queue.enqueue(makeJob({ sessionId: 'session-2', turn: 7 }))).toBe(true)
+      await vi.advanceTimersByTimeAsync(30_000)
+      await queue.whenIdle()
+      expect(attempts).toBe(3)
+      // Once it settles the key is free again.
+      expect(queue.enqueue(makeJob({ turn: 7 }))).toBe(true)
+      await queue.whenIdle()
+      expect(attempts).toBe(4)
+    })
+  })
+
+  it('books every attempt and callback across parked retries', async () => {
+    await withFakeTimers(async () => {
+      const starts: number[] = []
+      const failedAttempts: number[] = []
+      const skipped: ExtractionJob[] = []
+      const queue = new ExtractionQueue(async () => {
+        starts.push(Date.now())
+        throw new Error('boom')
+      }, {
+        maxRetries: 2, retryDelayMs: [1_000, 2_000], random: pinJitter, jobIntervalMs: 0,
+        onAttemptFailed: (_job, attempt) => failedAttempts.push(attempt),
+        onSkip: job => skipped.push(job),
+      })
+      queue.enqueue(makeJob())
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(1_000)
+      await vi.advanceTimersByTimeAsync(2_000)
+      await idle
+      // Still 1 + maxRetries attempts, each spaced by its own jittered delay.
+      expect(starts).toEqual([0, 1_000, 3_000])
+      expect(failedAttempts).toEqual([1, 2, 3])
+      expect(skipped.map(j => j.turn)).toEqual([0])
+      expect(queue.skipped).toBe(1)
+    })
+  })
+
+  it('concurrency=3: three in flight, yet starts still paced by jobIntervalMs', async () => {
+    await withFakeTimers(async () => {
+      const starts: number[] = []
+      let active = 0
+      let maxActive = 0
+      const queue = new ExtractionQueue(async () => {
+        starts.push(Date.now())
+        active++
+        maxActive = Math.max(maxActive, active)
+        await new Promise(r => setTimeout(r, 10_000))
+        active--
+      }, { concurrency: 3, jobIntervalMs: 3_000 })
+      for (const turn of [0, 1, 2]) queue.enqueue(makeJob({ turn }))
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(starts).toEqual([0])
+      await vi.advanceTimersByTimeAsync(3_000)
+      expect(starts).toEqual([0, 3_000])
+      await vi.advanceTimersByTimeAsync(3_000)
+      expect(starts).toEqual([0, 3_000, 6_000])
+      // All three overlap now, but there was no burst: starts stayed 3s apart.
+      expect(maxActive).toBe(3)
+      await vi.advanceTimersByTimeAsync(10_000)
+      await idle
+      expect(vi.getTimerCount()).toBe(0)
+    })
+  })
+
+  it('defaults to a 3-worker pool, so one parked retry cannot idle the queue', async () => {
+    let active = 0
+    let maxActive = 0
+    const started: number[] = []
+    const releases: (() => void)[] = []
+    // concurrency omitted on purpose: the default is the subject here.
+    const queue = new ExtractionQueue(async job => {
+      started.push(job.turn)
+      active++
+      maxActive = Math.max(maxActive, active)
+      await new Promise<void>(resolve => releases.push(resolve))
+      active--
+    }, { jobIntervalMs: 0 })
+    for (const turn of [0, 1, 2, 3]) queue.enqueue(makeJob({ turn }))
+    expect(started).toEqual([0, 1, 2]) // three slots, the fourth job waits
+    expect(maxActive).toBe(3)
+    for (const release of releases.splice(0)) release()
+    await new Promise(r => setTimeout(r, 0)) // let the freed slot pick up turn 3
+    expect(started).toEqual([0, 1, 2, 3])
+    for (const release of releases.splice(0)) release()
+    await queue.whenIdle()
+    expect(maxActive).toBe(3)
   })
 })
 

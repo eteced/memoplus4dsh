@@ -136,6 +136,8 @@ node scripts/prompts.mjs export --out /tmp/all.json --include-default
 
 An import is validated with `validateProfiles` first — a missing required placeholder, an unknown stage, or a non-positive bound is refused before anything is written. Profiles are read at dsh start, so an import becomes live on restart; resolution itself is per call, so nothing else is needed.
 
+**A tuned reference profile ships in the repository** under `profiles/`, and it is measured rather than asserted. `profiles/deepseek-v4.1-flash.json` matches on the **model name only** (`match.model = "deepseek-v4.1-flash*"`, no `provider` — the same model name means the same model, whichever route serves it) and carries the extraction prompt that measured best of four candidates on this route (the win is mainly language consistency on Chinese turns — the report is explicit about what it did *not* improve), with `maxTokens: 8192` and `reasoningEffort: "off"` pinned. Copy it into `<dataDir>/prompts/` (or `scripts/prompts.mjs import`) and restart. The frozen corpus of 18 real turns (`profiles/ab-corpus.jsonl`), the candidates, the harness (`scripts/ab-extraction-prompts.mjs`), the graph-side audit (`scripts/audit-literal-entities.mjs`), the numbers, and — just as important — what the A/B did *not* show are in [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md).
+
 ### Turning thinking off: declare `off` on the route (recommended)
 
 Extraction is a structured task, and thinking spends the output budget before any visible text exists. On the `opencode-go-extra/deepseek-v4.1-flash` route (`compat.thinkingFormat: deepseek`), the same extraction input at the same `max_tokens: 8192` measured: with thinking on (`reasoning_effort: low`) both runs ended `finish=length` with 0 visible characters and 8192/8192 tokens spent on reasoning; with thinking off (`thinking: {type: disabled}`) both runs ended `finish=stop` with 2399 and 2493 visible characters, 37 rows each, and 0 reasoning tokens. **Thinking tokens cannot be excluded from the output budget** — `thinking.budget_tokens`, `thinking_token_budget`, `thinking_budget`, and `thinking_budget_tokens` are each ignored by this gateway, and thinking still consumes `max_tokens` to the cap. What does work is **turning thinking off**, which brings the reasoning tokens to zero.
@@ -161,9 +163,17 @@ Then let the stages actually fall to `off`: a profile must not pin `reasoningEff
 
 ### Settings page (Web GUI)
 
-The plugin registers a `memoplus4dsh` namespace on the settings service, so **Settings → Plugins → Plugin configuration** shows a "memoplus4dsh memory plugin" card editing the two fields above: `promptProfile` (force one profile) and `promptProfilesDir` (external profile directory). The tab renders the intersection of a served namespace and a card registered on that key; both halves ship in this package (Host half `src/settings.ts`, browser half `src/client/`), with no change to dsh itself.
+The plugin registers a `memoplus4dsh` namespace on the settings service, so **Settings → Plugins → Plugin configuration** shows a "memoplus4dsh memory plugin" card editing the **11 keys** this namespace owns, grouped: `promptProfile` / `promptProfilesDir` (prompts), `injectTopK` / `reasoningEffortPolicy` / `thinkingTokenHeadroom` (retrieval & reasoning), `extractionConcurrency` / `extractionJobIntervalMs` / `extractionRetryDelayMs` / `extractionMaxRetries` / `extractionMaxFailureRounds` (extraction queue), `debug` (diagnostics). The tab renders the intersection of a served namespace and a card registered on that key; both halves ship in this package (Host half `src/settings.ts`, browser half `src/client/`), with no change to dsh itself.
 
-A save takes effect immediately: the plugin takes the new value and rebuilds the prompt registry, so the next call uses it (`memory_status` reflects it right away). A mistyped profile name is refused by the Host with its reason instead of silently falling back. Every other setting still comes from the `cordis.yml` entry; the card does not take them over.
+Every row states **how it applies**:
+
+| Apply semantic | Keys | Why |
+|---|---|---|
+| Live (next call) | `promptProfile`, `promptProfilesDir` | the profile registry is rebuilt on save |
+| Live (next call) | `injectTopK`, `reasoningEffortPolicy`, `thinkingTokenHeadroom`, `debug`, `extractionMaxFailureRounds` | re-read at every use |
+| **Restart** | `extractionConcurrency`, `extractionJobIntervalMs`, `extractionRetryDelayMs`, `extractionMaxRetries` | fixed when `ExtractionQueue` is constructed; the card marks these "restart to apply" and the plugin logs a warning rather than pretending |
+
+A mistyped profile name or a negative number is refused by the Host with its reason, and invalid input blocks the save in the card itself (the draft is kept). `debug` is labelled "diagnostic switch, off by default, significantly increases log volume". Every other setting (`extraction`, `embedding*`, `promptProfiles`, `dataDir`, …) still comes from the `cordis.yml` entry (in practice the profile's `cordis.patch.yml`); the card does not take them over.
 
 The browser half is `lib/client.js`, produced by `npm run build` (esbuild into the `window.__ModuleLoader__.load({ id, factory })` lazy factory dsh's client module system requires). Adding the card for the first time needs a dsh restart, because the client bundle graph is scanned from Loader entries at start; changing card code afterwards needs only a page reload.
 
@@ -196,6 +206,41 @@ The browser half is `lib/client.js`, produced by `npm run build` (esbuild into t
 
 A profile prompt must keep its stage's input placeholder — `{turn_text}` for extraction, `{lines}` for both adjudication stages, `{query}` for both query-side stages (checked at load, refuses the profile otherwise). `{known_entities}` and `{candidate_mentions}` are optional in the extraction prompt and only warned about.
 
+### Config import/export
+
+**UI (the card's "配置导入导出" section)**: *Export (download JSON)* and *Copy to clipboard* produce the **full effective snapshot**; *Choose a file* and *paste JSON* import one. The import path is parse → structural validation → keep only this namespace's keys → per-field write (revision fence). "解析并预览" first shows **which keys will be written** and which are ignored; only "确认导入" writes. A bad file is refused outright and the settings document is left untouched.
+
+**CLI (`scripts/config.mjs`, same keys and same rules as the card)**:
+
+```sh
+npm run build                                                 # the CLI reuses the build output
+node scripts/config.mjs export --out /tmp/memoplus.json        # full effective snapshot + provenance
+node scripts/config.mjs export                                 # without --out the JSON goes to stdout
+node scripts/config.mjs import /tmp/memoplus.json --dry-run     # print the keys and the diff, change nothing
+node scripts/config.mjs import /tmp/memoplus.json               # validate first, then write; backs the document up to /tmp/ (path printed)
+```
+
+**Format** (identical for the UI and the CLI):
+
+```json
+{
+  "version": 1,
+  "plugin": "memoplus4dsh",
+  "exportedAt": "2026-09-13T13:52:59.857Z",
+  "values": { "injectTopK": 8, "thinkingTokenHeadroom": 3, "debug": false },
+  "sources": { "injectTopK": "cordis", "thinkingTokenHeadroom": "default", "debug": "default" },
+  "notWritten": { "extraction": "turn_end" }
+}
+```
+
+- `values` is the **full effective snapshot**: settings layer (`settings.yaml`'s `memoplus4dsh` section) > the same key in `cordis.patch.yml` > the plugin default. Keys no layer provides (`promptProfile`, `promptProfilesDir`) are absent.
+- `sources` marks each key's provenance (`settings` / `cordis` / `default`).
+- `notWritten` lists the composition-layer keys that are **not** owned by this namespace — the tool never writes them back.
+- **An import writes only the settings layer's owned keys**, and a file carrying `sources` writes only `source=settings` keys (a hand-written file without `sources` writes every owned key it lists). So export-then-import never freezes an inherited value into an explicit override, and unknown keys are reported, not written.
+- The number-list field (`extractionRetryDelayMs`) is edited in the card as **comma-separated numbers** (a pasted JSON array works too) and is always a JSON array in the exported/imported file.
+- The CLI prints only this namespace's slice: secrets and unrelated content from other namespaces never appear in any output (JSON on stdout, notes on stderr).
+- The CLI's import performs leaf-level writes on the YAML document, so **comments, anchors, and other namespaces are preserved**, and lands through a same-directory temp file plus rename (a running dsh watcher never sees a half-written document and hot-reads the change).
+
 > **Embedding-upgrade limits, stated honestly.** The sidecar applies the query instruction through sentence-transformers' `prompt_name`, i.e. a *named preset defined by the model*. Models that instead require a **text prefix** (`intfloat/multilingual-e5-*` wants `query: ` / `passage: `, `BAAI/bge-*` wants a similar instruction) have no such preset, so with those the query side embeds bare — it still works, but without the prefix the model was trained with. Prefer a model that needs no prefix (`sentence-transformers/paraphrase-multilingual-mpnet-base-v2` is a drop-in stronger option at 768 dims). Text-prefix support is not implemented; it is tracked as a follow-up.
 >
 > The sidecar path also downloads whatever the model needs on first use, and a model swap re-embeds the stored vectors lazily — expect the first retrieval after a swap to be slower.
@@ -209,7 +254,7 @@ A profile prompt must keep its stage's input placeholder — `{turn_text}` for e
 | `extractionRetryDelayMs` | `[15000,60000,180000,600000]` | Wait between attempts inside one round (last entry repeats, ±20% jitter). It was hardcoded `[5s,30s]` — too dense to outlast a provider outage lasting tens of seconds |
 | `extractionJobIntervalMs` | `3000` | Minimum gap between job **starts** (`0` disables). This is what prevents a start-up burst: 14 queued jobs spread over 0s/3s/.../39s instead of firing back to back into a failing window |
 | `extractionMaxFailureRounds` | `10` | Failure rounds before a turn is abandoned (one round exhausts `extractionMaxRetries`). Below the cap the turn is retried on the next turn and on the next start; at the cap it is recorded as `abandoned` and reported by `memory_status` / doctor as memories not written |
-| `extractionConcurrency` | `1` | Extraction worker pool size; `1` is strict serial. Raise only when the endpoint tolerates overlapping extraction calls |
+| `extractionConcurrency` | `3` | Extraction worker pool size. It does **not** raise the request rate: `extractionJobIntervalMs` is measured between job *starts*, so starts stay 3s apart however many slots exist. 3 keeps a job waiting out a retry backoff (up to 10 min) from starving the turns queued behind it — a retry wait now holds no slot at all, and a re-queued retry goes to the back of the queue. `1` is strict serial |
 | `snapshotThreshold` | `1000` | Journal ops between snapshot compactions |
 | `debug` | `false` | Diagnostic switch. Writes a `listener-saw` trace per session event and an `llm-empty` record for empty-content calls into `extraction-debug.jsonl` (~1000 lines/day even when healthy). **Off by default and never enabled for users**; turning it off does not affect the loss ledger (`failed` / `abandoned` / `requeue` stay unconditional) |
 

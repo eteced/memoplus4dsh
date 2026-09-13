@@ -8,12 +8,14 @@
  *
  * 输出四块:
  *   1. 安装状态（profile 挂载、链接、构建产物）
- *   2. 生效配置（默认值 + cordis.patch.yml 受管块覆盖，逐项标注来源）
+ *   2. 生效配置（默认值 + cordis.patch.yml 受管块 + 设置页覆盖，逐项标注来源）
  *   3. 组件探测（embedding 后端链、NER 检测链、模型缓存）
  *   4. 记忆数据（图规模、抽取队列积压、最近抽取时间）
  *
  * 注: DEFAULTS 镜像 src/index.ts / store.ts / extraction.ts 的内联默认值，
- * 改默认值时请同步此处。
+ * 改默认值时请同步此处。设置页（Web 卡片）与 `scripts/config.mjs` 写入的设置层
+ * 会盖在 cordis.patch.yml 之上，所以第 2 块也读 `<dsh-home>/settings.yaml` 里
+ * memoplus4dsh 那一段（只读这一段，其它命名空间的内容绝不打印）。
  */
 
 import { existsSync, readFileSync, lstatSync, readdirSync, statSync } from 'node:fs'
@@ -36,6 +38,8 @@ const DSH_HOME = resolve(DSH_HOME_ARG || process.env.DSH_HOME || join(homedir(),
 const PROFILE_DIR = join(DSH_HOME, 'profiles', PROFILE)
 const PATCH_FILE = join(PROFILE_DIR, 'cordis.patch.yml')
 const DATA_DIR = join(DSH_HOME, 'memoplus4dsh')
+const SETTINGS_FILE = join(DSH_HOME, 'settings.yaml')
+const SETTINGS_NS = 'memoplus4dsh'
 
 // ---- 默认值镜像（src/index.ts 等） ----
 const DEFAULTS = {
@@ -72,7 +76,7 @@ const DEFAULTS = {
   extractionMaxFailureRounds: 10,
   extractionRetryDelayMs: [15000, 60000, 180000, 600000],
   extractionJobIntervalMs: 3000,
-  extractionConcurrency: 1,
+  extractionConcurrency: 3,
   snapshotThreshold: 1000,
   debug: false,
 }
@@ -99,6 +103,33 @@ function readOverrides() {
     overrides[k] = v === 'true' ? true : v === 'false' ? false : /^\d+$/.test(v) ? Number(v) : v.replace(/^['"]|['"]$/g, '')
   }
   return overrides
+}
+
+/**
+ * 设置文档里本插件那一段的覆盖（Web 卡片 / `scripts/config.mjs` 写入的设置层）。
+ *
+ * 只保留 DEFAULTS 里已知的键：设置文档里其它命名空间的内容（含密钥）绝不打印，
+ * 也不参与本插件的生效值。读不到就返回 null，doctor 照常跑完。
+ * @returns 覆盖项对象，或 null（没有文档 / 没有该段 / 解析失败）。
+ */
+async function readSettingsOverrides() {
+  if (!existsSync(SETTINGS_FILE)) return null
+  let parse
+  try {
+    ({ parse } = await import('yaml'))
+  } catch {
+    return null
+  }
+  try {
+    const document = parse(readFileSync(SETTINGS_FILE, 'utf8'))
+    const section = document?.[SETTINGS_NS]
+    if (typeof section !== 'object' || section === null || Array.isArray(section)) return null
+    const owned = {}
+    for (const [key, value] of Object.entries(section)) if (key in DEFAULTS) owned[key] = value
+    return Object.keys(owned).length > 0 ? owned : null
+  } catch {
+    return null
+  }
 }
 
 function pyProbe(python, modules) {
@@ -210,13 +241,23 @@ if (existsSync(libIndex)) {
 }
 
 // ---------- 2. 生效配置 ----------
-console.log('\n== 生效配置（来源: 默认值 / 自定义） ==')
-const eff = { ...DEFAULTS, ...(overrides ?? {}) }
+console.log('\n== 生效配置（来源: 默认值 / cordis.patch.yml / 设置页） ==')
+const settingsOverrides = await readSettingsOverrides()
+// 优先级与插件里一致：schema 默认 → 组装层（cordis.patch.yml）→ 设置层（设置页）。
+const eff = { ...DEFAULTS, ...(overrides ?? {}), ...(settingsOverrides ?? {}) }
 const width = Math.max(...Object.keys(eff).map(k => k.length))
 for (const k of Object.keys(eff)) {
-  const custom = overrides && k in overrides
-  console.log(`  ${k.padEnd(width)} = ${JSON.stringify(eff[k])}  (${custom ? '自定义' : '默认值'})`)
+  const source = settingsOverrides !== null && k in settingsOverrides
+    ? '设置页'
+    : overrides && k in overrides ? 'cordis.patch.yml' : '默认值'
+  console.log(`  ${k.padEnd(width)} = ${JSON.stringify(eff[k])}  (${source})`)
 }
+if (settingsOverrides !== null) {
+  console.log(info(`设置文档 ${SETTINGS_FILE} 里有 ${Object.keys(settingsOverrides).length} 项本插件覆盖: ${Object.keys(settingsOverrides).join(', ')}`))
+} else {
+  console.log(info(`设置文档 ${SETTINGS_FILE} 里没有本插件的覆盖（设置页/CLI 写入后会出现在这里）`))
+}
+console.log(info('设置页能改的键与各自的生效语义: node scripts/config.mjs export（队列类四个键需重启 dsh，其余保存即生效）'))
 
 // ---------- 3. 组件探测 ----------
 const nerPython0 = 'python3'

@@ -43,10 +43,19 @@ interface Harness {
   drain: () => Promise<void>
 }
 
-/** The two settings fields the Web card edits, as the settings service resolves them. */
+/** The settings fields the Web card edits, as the settings service resolves them. */
 interface SettingsValue {
   promptProfile?: string
   promptProfilesDir?: string
+  reasoningEffortPolicy?: 'adapt' | 'strict'
+  thinkingTokenHeadroom?: number
+  extractionConcurrency?: number
+  extractionJobIntervalMs?: number
+  extractionRetryDelayMs?: number[]
+  extractionMaxRetries?: number
+  extractionMaxFailureRounds?: number
+  injectTopK?: number
+  debug?: boolean
 }
 
 interface SettingsControl {
@@ -74,13 +83,20 @@ const DEFAULT_EFFORTS: ModelInfoStub = () => ({ reasoning: { efforts: ['off', 'l
 function harness(
   stream: StreamStub = () => { throw new Error('boot wiring must not call the model') },
   modelInfo: ModelInfoStub = DEFAULT_EFFORTS,
+  /**
+   * The user document this deployment already has. Seeded before `apply`, so a
+   * test can prove that a value living only in the settings layer is what the
+   * plugin reads at start-up — which is what makes "restart to apply" true for
+   * the queue-class fields.
+   */
+  initialSettings: SettingsValue = {},
 ): Harness {
   const tools = new Map<string, ToolDefinition>()
   const handlers = new Map<string, (...args: never[]) => unknown>()
   const warnings: string[] = []
   const infos: string[] = []
   const disposers: (() => unknown)[] = []
-  let settingsValue: SettingsValue = {}
+  let settingsValue: SettingsValue = initialSettings
   let settingsHooks: { setSource: (current: () => SettingsValue) => void; onChange: () => void; validate?: (value: SettingsValue) => void } | undefined
   const settings: SettingsControl = {
     push: next => {
@@ -153,8 +169,13 @@ function harness(
  * by *spawning* the python sidecars — hermetic tests must not load torch, so the
  * backend rows are exercised explicitly by the tests that need them.
  */
-function boot(overrides: Partial<Config> = {}, stream?: StreamStub, modelInfo?: ModelInfoStub): Harness {
-  const h = harness(stream, modelInfo)
+function boot(
+  overrides: Partial<Config> = {},
+  stream?: StreamStub,
+  modelInfo?: ModelInfoStub,
+  settings?: SettingsValue,
+): Harness {
+  const h = harness(stream, modelInfo, settings)
   apply(h.ctx, { extraction: 'turn_end', dataDir: dir, nerAssist: false, embedding: false, ...overrides })
   return h
 }
@@ -894,5 +915,151 @@ describe('adaptive reasoning effort', () => {
     const report1 = await status(off1)
     expect(report1).toContain('thinking headroom: off (1x')
     expect(report1).toContain('extraction: profile default, maxTokens 8192, effort off → low')
+  })
+})
+
+/**
+ * 设置卡片保存的值真的到达运行中的插件——这一组是"保存即生效 / 重启后生效"两种
+ * 语义的可执行定义。
+ *
+ * 即时类（`applies: 'live'`）用**下一次真实调用的请求**来断言，而不是只看状态
+ * 报告：`thinkingTokenHeadroom` / `reasoningEffortPolicy` 改完立刻体现在发出去的
+ * `maxTokens` / `reasoningEffort` 上；`debug` 改完立刻体现在事件流轨迹写不写。
+ * 队列类（`applies: 'restart'`）用假定时器断言两件事：启动时读到的是**设置层**的
+ * 值（所以"重启后生效"是真的），而运行中改它只告警、不改变当前节奏。
+ */
+describe('settings-driven runtime', () => {
+  /** A stream that yields nothing; the call books a failure, but its request was already built. */
+  async function* noChunks(): AsyncGenerator<StreamChunk> {}
+
+  /** Capture the request of every model call, then behave like a starved endpoint. */
+  function capture(into: GenerateOptions[]): StreamStub {
+    return options => {
+      into.push(options)
+      return noChunks()
+    }
+  }
+
+  /** The incident route: `reasoningEfforts: {low, high, max}`, no `off`. */
+  const noOff: ModelInfoStub = () => ({ reasoning: { efforts: ['low', 'high', 'max'].map(id => ({ id })) } })
+
+  /** 事件流轨迹的行数（`debug` 打开时每个 session 事件一行）。 */
+  const sawCount = (): number => debugLines().filter(entry => entry['kind'] === 'listener-saw').length
+
+  /** One outstanding job, exactly as the durable log writes it. */
+  const pendingLine = (turn: number): string => JSON.stringify({
+    kind: 'pending',
+    job: { sessionId: 's', turn, turnText: `User: ${turn}`, mentionTime: '2026-09-13T00:00:00.000Z' },
+  })
+
+  /** Turns whose attempt failed, in the order the failures were booked. */
+  const attemptedTurns = (): number[] => debugLines()
+    .filter(entry => entry['kind'] === 'attempt-failed')
+    .map(entry => entry['turn'] as number)
+
+  it('applies a live budget setting to the very next call, without a restart', async () => {
+    const calls: GenerateOptions[] = []
+    const h = boot({ extractionMaxRetries: 0 }, capture(calls), noOff)
+    // 默认 3 会把 8192 抬到 24576（档位适配成 low，thinking 开着）。
+    h.settings.push({ thinkingTokenHeadroom: 1 })
+    emitTurnEnd(h)
+    await h.drain()
+    expect(calls[0]).toMatchObject({ reasoningEffort: 'low', maxTokens: 8192 })
+  })
+
+  it('applies a live effort-policy change to the very next call', async () => {
+    const calls: GenerateOptions[] = []
+    const h = boot({ extractionMaxRetries: 0 }, capture(calls), noOff)
+    // adapt（默认）把内置 off 降级成该路由的最低档；换成 strict 后原样发 off，
+    // 由 dsh 自己拒绝——这正是这个开关的语义。
+    h.settings.push({ reasoningEffortPolicy: 'strict' })
+    emitTurnEnd(h)
+    await h.drain()
+    expect(calls[0]).toMatchObject({ reasoningEffort: 'off' })
+    expect(h.warnings.filter(message => message.includes('reasoning effort'))).toEqual([])
+  })
+
+  it('turns the per-event diagnostic trace on and off from the settings card', () => {
+    const h = boot({ extractionMaxRetries: 0 }, capture([]))
+    // 默认 false：事件流轨迹一行都不写。
+    emitTurnEnd(h, 2)
+    expect(sawCount()).toBe(0)
+    h.settings.push({ debug: true })
+    emitTurnEnd(h, 3)
+    expect(sawCount()).toBe(1)
+    h.settings.push({ debug: false })
+    emitTurnEnd(h, 4)
+    expect(sawCount()).toBe(1)
+    return h.drain()
+  })
+
+  it('takes a queue-class setting at construction, and says a later change needs a restart', async () => {
+    vi.useFakeTimers({ now: 0 })
+    try {
+      writeFileSync(join(dir, 'extraction-pending.jsonl'), [pendingLine(1), pendingLine(2), pendingLine(3), ''].join('\n'), 'utf8')
+      // 组装层说"不限速"（0），设置层说 5s：设置层赢，而且必须是**启动时**就读到
+      // （队列在构造时固定），否则"重启后生效"是空话。
+      const h = boot({ extractionMaxRetries: 0, extractionJobIntervalMs: 0 }, capture([]), undefined, { extractionJobIntervalMs: 5_000 })
+      // 挂载时的那次 onChange 不算"需要重启"：值马上被构造时读到。
+      expect(h.warnings.join(' ')).not.toContain('需要重启')
+      await vi.advanceTimersByTimeAsync(0)
+      expect(attemptedTurns()).toEqual([1])
+      await vi.advanceTimersByTimeAsync(4_999)
+      expect(attemptedTurns()).toEqual([1])
+      await vi.advanceTimersByTimeAsync(1)
+      expect(attemptedTurns()).toEqual([1, 2])
+
+      // 运行中从卡片改成 0：本次运行不生效（队列已按 5s 固定），并且如实告警。
+      h.settings.push({ extractionJobIntervalMs: 0 })
+      expect(h.warnings.join(' ')).toContain('extractionJobIntervalMs')
+      expect(h.warnings.join(' ')).toContain('需要重启')
+      await vi.advanceTimersByTimeAsync(4_999)
+      expect(attemptedTurns()).toEqual([1, 2])
+      await vi.advanceTimersByTimeAsync(1)
+      expect(attemptedTurns()).toEqual([1, 2, 3])
+      await h.drain()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('re-reads the failure-round cap at every failure judgement, so that one is live', async () => {
+    const writeLedger = (): void => writeFileSync(join(dir, 'extraction-pending.jsonl'), [
+      JSON.stringify({ kind: 'pending', job: { sessionId: 's', turn: 3, turnText: 'User: x', mentionTime: '2026-09-13T00:00:00.000Z' } }),
+      JSON.stringify({ kind: 'failed', sessionId: 's', turn: 3, error: 'boom', at: '2026-09-13T00:00:01.000Z', failures: 2 }),
+      '',
+    ].join('\n'), 'utf8')
+    // 对照：默认上限 10 时第 3 轮失败只是重抽，不放弃。
+    writeLedger()
+    await boot({ extractionMaxRetries: 0 }).drain()
+    const underDefault = readFileSync(join(dir, 'extraction-pending.jsonl'), 'utf8')
+    expect(underDefault).toContain('"failures":3')
+    expect(underDefault).not.toContain('"kind":"abandoned"')
+
+    // 从卡片把上限压到 3：同一轮失败立刻记 abandoned——上限是每次失败判定重读的，
+    // 所以这一项是即时类，不需要重启（与上面四个队列类键的区别就在这里）。
+    writeLedger()
+    const h = boot({ extractionMaxRetries: 0 })
+    h.settings.push({ extractionMaxFailureRounds: 3 })
+    await h.drain()
+    const capped = readFileSync(join(dir, 'extraction-pending.jsonl'), 'utf8')
+    expect(capped).toContain('"kind":"abandoned"')
+    expect(capped).toContain('"failures":3')
+  })
+
+  it('reports the effective queue values and their apply semantics in memory_status', async () => {
+    const h = boot({ extractionConcurrency: 7 })
+    const report = await status(h)
+    expect(report).toContain('[extraction queue]')
+    expect(report).toContain('extractionConcurrency = 7  (fixed at construction')
+    expect(report).toContain('extractionMaxFailureRounds = 10  (re-read at every failure round')
+  })
+
+  it('refuses a negative number from the settings card, naming the field', () => {
+    const h = boot()
+    expect(() => h.settings.validate({ injectTopK: -1 })).toThrow(/injectTopK must be a non-negative finite number/)
+    expect(() => h.settings.validate({ extractionRetryDelayMs: [1000, -5] })).toThrow(/extractionRetryDelayMs must be an array/)
+    expect(() => h.settings.validate({ injectTopK: 0, debug: true })).not.toThrow()
+    expect(() => h.settings.validate({})).not.toThrow()
   })
 })
