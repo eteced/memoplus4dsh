@@ -124,6 +124,8 @@ scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 | `promptProfiles` | （无） | 具名 prompt profile，按声明顺序与**该次调用实际使用的模型**匹配。每项形如 `{ name, match: { provider?, model? }, stages: { <阶段>: { prompt, maxTokens?, timeoutMs?, reasoningEffort? } } }`，`*` 为通配。内置 `default` profile 承载 v0.1 的原始 prompt，始终兜底 |
 | `promptProfilesDir` | `<dataDir>/prompts` | 外部 profile 文件目录。每个 `*.json` 可放一个 profile、一个数组或 `{"profiles": [...]}`；文件名序加载，**排在内联 `promptProfiles` 之后**（内联先匹配，文件只做扩展）。坏文件在启动时即报错，不会带着它去调用模型 |
 | `promptProfile` | （自动） | 强制使用某个 profile，跳过路由匹配 |
+| `reasoningEffortPolicy` | `adapt` | 某阶段的档位不被该路由支持时怎么办。`adapt`（默认）：内置默认 `off` 按 dsh 暴露的档位适配——支持 `off` 就发 `off`，否则取该路由的最低档（只声明 `low/high/max` 的路由即 `low`），一档都拿不到（模型没有 reasoning 元数据、路由查不到）就整个省略 effort，交给 dsh/模型默认；用户显式设置的档位不被支持时同样降级，并在日志里每个路由告警一次。`strict`：配置什么就发什么，不支持的档位由 dsh 拒绝（`UNSUPPORTED_REASONING_EFFORT`） |
+| `thinkingTokenHeadroom` | `3` | 思考预算余量倍数；`1` = 关闭。**实际生效的 effort 不是 `off`**（thinking 开启——内置 `off` 被适配成最低档，或 effort 被整个省略）时，把该阶段解析出的 `maxTokens` 乘以这个倍数，给可见输出留位置：本路由实测同一条抽取输入、同样 8192 的预算，thinking 开着时两次都 `finish=length`、可见内容 0 字符、8192/8192 token 全在思考上。`off` 时不乘，保持旧行为与旧成本。`STAGE_DEFAULTS` 与 profile/override 的解析值本身不变，乘的只是这一枪实际发出的值（`memory_status` 各阶段显示的就是它）。路由能派发 `off` 时这个倍数不会触发——**推荐做法是在路由上声明 `off`**（见下文），它是兜底 |
 | `prompts` | （无） | 阶段级覆盖，优先级高于所有 profile：`extraction` / `entityMerge` / `supersede` / `queryExpansion` / `queryDistill` |
 
 ### Prompt profile 与 embedding 升级
@@ -146,6 +148,29 @@ node scripts/prompts.mjs export --out /tmp/all.json --include-default
 ```
 
 导入前会先用 `validateProfiles` 校验（缺必需占位符、未知阶段、非正数上限都会拒绝），所以坏文件不会被写进目录。文件在 dsh 启动时读取，导入后重启生效——profile 本身是按调用解析的，不需要其它步骤。
+
+### 让 thinking 真的关掉：在路由上声明 `off`（推荐）
+
+抽取是结构化任务，thinking 会在任何可见正文之前先把输出预算吃光。在 `opencode-go-extra/deepseek-v4.1-flash` 这条路由（`compat.thinkingFormat: deepseek`）上，同一条抽取输入、同样 `max_tokens: 8192` 实测：thinking 开着（`reasoning_effort: low`）两次都是 `finish=length`、可见内容 0 字符、8192/8192 token 全花在思考上；thinking 关掉（`thinking: {type: disabled}`）两次都是 `finish=stop`、可见内容 2399 / 2493 字符、各 37 行、思考 0 token。**思考 token 无法从输出预算里单独排除**——`thinking.budget_tokens`、`thinking_token_budget`、`thinking_budget`、`thinking_budget_tokens` 逐个实测都被该网关忽略，思考照样吃满 `max_tokens`。真正有效的是**把 thinking 整个关掉**，那样思考 token 就是 0。
+
+前提是路由要声明 `off`：dsh 在派发前按模型声明的档位校验 effort，手写模型没声明 `off` 时会以 `UNSUPPORTED_REASONING_EFFORT` 拒绝。把 `off` 加进 `settings.yaml` 的模型声明（值留空 = “支持 `off`，不发 effort 参数”；本路由 `thinkingFormat: deepseek` 下 pi-ai 因此发 `thinking: {type: disabled}`）：
+
+```yaml
+llm-pi-ai:
+  providers:
+    opencode-go-extra:
+      # ... apiKeyEnv / api / baseURL / headers / compat 不变 ...
+      models:
+        - id: deepseek-v4.1-flash
+          # ...
+          reasoningEfforts:
+            off:            # ← 新增：dsh 因此可以派发 off
+            low: low
+            high: high
+            max: max
+```
+
+然后让各阶段真的落到 `off`：profile 里不要写 `reasoningEffort: low`（内置默认本来就是 `off`），或者显式写 `"reasoningEffort": "off"`。两者都就位后，`reasoningEffortPolicy: adapt` 没有要降级的档位，`thinkingTokenHeadroom` 也不会乘——8192（或 profile 里的 `maxTokens`）全部留给可见输出。`thinkingTokenHeadroom`（默认 3）保留为兜底：某条路由确实派发不了 `off` 时，档位会被适配到最低档（thinking 开着），预算不放大就会重演上面的失败。取 3 是因为它是最小的整数倍，能把 8192 的内置默认抬到被思考吃掉的 16384 之上。
 
 ### 配置页面（Web GUI）
 

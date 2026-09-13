@@ -107,6 +107,8 @@ Set under the plugin's `config:` in the profile's `cordis.patch.yml`:
 | `promptProfiles` | (none) | Named prompt profiles, tried in declaration order against the model each call actually runs on. Each is `{ name, match: { provider?, model? }, stages: { <stage>: { prompt, maxTokens?, timeoutMs?, reasoningEffort? } } }`; `*` is a wildcard. The built-in `default` profile holds the v0.1 prompts and is always the fallback |
 | `promptProfilesDir` | `<dataDir>/prompts` | Directory of external profile files. Each `*.json` holds one profile, an array, or `{"profiles": [...]}`; files load in name order **after** the inline `promptProfiles`, so inline entries keep their matching order and files extend the set. A broken file fails at start instead of reaching the model |
 | `promptProfile` | (auto) | Force one profile by name instead of matching the route |
+| `reasoningEffortPolicy` | `adapt` | What happens when a stage's effort is not supported by the route. `adapt` (default): the built-in `off` follows what dsh reports for that route — `off` when declared, else the route's lowest declared level (`low` on a route declaring only `low/high/max`), else the effort is omitted entirely for dsh and the provider to default; a user-set effort that is unsupported degrades the same way, with one warning per route. `strict`: send the configured effort as-is and let dsh refuse it (`UNSUPPORTED_REASONING_EFFORT`) |
+| `thinkingTokenHeadroom` | `3` | Thinking-budget multiplier; `1` disables it. When the effort that actually goes on the wire is **not `off`** (thinking is on — the built-in `off` adapted to the lowest level, or the effort omitted), the stage's resolved `maxTokens` is multiplied by this factor to leave room for visible output: measured on this route, thinking on eats the whole 8192-token extraction budget and yields 0 visible characters. With `off` nothing is multiplied, keeping the old behaviour and the old cost. `STAGE_DEFAULTS` and the profile/override values themselves are unchanged; only the value actually sent is scaled, which is what `memory_status` shows per stage. On a route where `off` is dispatchable this multiplier never applies — declaring `off` is the recommended fix, and this is the fallback |
 | `prompts` | (none) | Per-stage overrides that beat every profile: `extraction` / `entityMerge` / `supersede` / `queryExpansion` / `queryDistill` |
 | `entityMergeLlm` | `true` | LLM-adjudicated entity merge at extraction (embedding candidates + one bounded call per turn; only explicit `sure` merges) |
 | `supersedeLlm` | `true` | LLM-adjudicated supersede detection (relation cardinality; older values marked `supersededBy`, history kept; re-mention guard + mark propagation) |
@@ -133,6 +135,29 @@ node scripts/prompts.mjs export --out /tmp/all.json --include-default
 ```
 
 An import is validated with `validateProfiles` first — a missing required placeholder, an unknown stage, or a non-positive bound is refused before anything is written. Profiles are read at dsh start, so an import becomes live on restart; resolution itself is per call, so nothing else is needed.
+
+### Turning thinking off: declare `off` on the route (recommended)
+
+Extraction is a structured task, and thinking spends the output budget before any visible text exists. On the `opencode-go-extra/deepseek-v4.1-flash` route (`compat.thinkingFormat: deepseek`), the same extraction input at the same `max_tokens: 8192` measured: with thinking on (`reasoning_effort: low`) both runs ended `finish=length` with 0 visible characters and 8192/8192 tokens spent on reasoning; with thinking off (`thinking: {type: disabled}`) both runs ended `finish=stop` with 2399 and 2493 visible characters, 37 rows each, and 0 reasoning tokens. **Thinking tokens cannot be excluded from the output budget** — `thinking.budget_tokens`, `thinking_token_budget`, `thinking_budget`, and `thinking_budget_tokens` are each ignored by this gateway, and thinking still consumes `max_tokens` to the cap. What does work is **turning thinking off**, which brings the reasoning tokens to zero.
+
+That requires the route to declare `off`: dsh validates an effort against the model's declared levels *before* dispatch and refuses `off` with `UNSUPPORTED_REASONING_EFFORT` on a hand-written model that has not declared it. Add `off` to the model's `reasoningEfforts` in `settings.yaml` (a valueless key means "`off` is selectable, send no effort parameter"; under this route's `thinkingFormat: deepseek` pi-ai then sends `thinking: {type: disabled}`):
+
+```yaml
+llm-pi-ai:
+  providers:
+    opencode-go-extra:
+      # ... apiKeyEnv / api / baseURL / headers / compat, unchanged ...
+      models:
+        - id: deepseek-v4.1-flash
+          # ...
+          reasoningEfforts:
+            off:            # ← added: dsh can now dispatch `off`
+            low: low
+            high: high
+            max: max
+```
+
+Then let the stages actually fall to `off`: a profile must not pin `reasoningEffort: low` (the built-in default is already `off`), or it may say `"reasoningEffort": "off"` explicitly. With both in place `reasoningEffortPolicy: adapt` has nothing to degrade and `thinkingTokenHeadroom` never multiplies — the whole 8192 (or the profile's `maxTokens`) goes to visible output. `thinkingTokenHeadroom` (default 3) remains the fallback for a route that genuinely cannot dispatch `off`: its effort is adapted to the lowest level, thinking is on, and without a bigger budget the failure above repeats. The factor is 3 because that is the smallest round multiplier that lifts the 8192 default above the 16384 the starvation consumed.
 
 ### Settings page (Web GUI)
 

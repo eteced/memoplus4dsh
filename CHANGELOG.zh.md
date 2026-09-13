@@ -20,6 +20,35 @@ memoplus4dsh 的重要修改归档，按开发里程碑组织。各里程碑的�
 - **`reasoningEffort` 可按阶段配置。** 原先硬编码为 `off`（M9 F-1 的规避：
   deepseek-v4-flash 在密集抽取输入上会失控推理、把预算烧空且输出为空）。换成
   需要思考才抽得好的模型时，现在改配置即可。
+- **reasoning effort 自适应。** 内置默认仍是 `off`，但 `off` 只有在路由的模型
+  声明了它时才发得出去：dsh 在派发前按适配器的模型元数据校验档位，不支持的档位
+  直接拒绝（`UNSUPPORTED_REASONING_EFFORT`），于是 `off` 默认值在只声明
+  `low/high/max` 的路由上会让每一次抽取都以一秒内报错的流结束。实际发出的档位
+  因此改在调用点按 dsh 已暴露的档位信息决定：配置的档位被该路由声明就原样发；
+  内置默认 `off` 不被声明时降级到该路由的最低档（只声明 `low/high/max` 的路由即
+  `low`），一档都拿不到（模型没有 reasoning 元数据、路由查不到）就整个省略
+  effort，交给 dsh/模型默认；用户显式设置的档位若不被支持，同样降级并每个路由
+  告警一次。新增 `reasoningEffortPolicy`（默认 `adapt`；`strict` = 配置什么就发
+  什么，由 dsh 自己拒绝）。
+- **thinking 开启时预算按 `thinkingTokenHeadroom` 放大（默认 3×），这是
+  `UNSUPPORTED_REASONING_EFFORT` → `max-tokens` 的连带修复。** 档位一被适配成
+  `low`，thinking 就开着并先吃掉输出预算：同一条抽取输入、同样 `max_tokens:
+  8192` 实测两次都是 `finish=length`、可见内容 0 字符、8192/8192 token 全是思考；
+  线上此前也出现过 `finish=max-tokens, outputTokens=16384, chars=0`。现在
+  **实际生效的 effort 不是 `off`**（含 effort 被整个省略）时，把该阶段解析出的
+  `maxTokens` 乘以这个倍数；`off` 不乘，旧行为与旧成本不变；`1` = 关闭。
+  `STAGE_DEFAULTS` 与 profile/override 的解析值本身不变，乘的只是这一枪实际发出
+  的值——`memory_status` 各阶段显示实际值（括号里给出配置值与倍数），空内容现场
+  记录也带上实际发出的 `maxTokens`。
+- **让 `off` 真的可派发：在路由上声明它（推荐）。** 实测该网关**不支持**独立的
+  思考预算（`thinking.budget_tokens` / `thinking_token_budget` / `thinking_budget`
+  / `thinking_budget_tokens` 逐个都被忽略，思考照样吃满 `max_tokens`），但
+  `thinking: {type: disabled}` 有效：同一输入关掉 thinking 后两次都 `finish=stop`、
+  2399/2493 字符、各 37 行、思考 0 token。所以在 `settings.yaml` 的模型声明里给
+  `reasoningEfforts` 加一个**值留空**的 `off:`（dsh 因此允许派发 `off`，本路由
+  `thinkingFormat: deepseek` 下 pi-ai 发 `thinking: {type: disabled}`），并让各阶段
+  的 effort 落到 `off`（profile 不写 `reasoningEffort: low` 即可，内置默认就是
+  `off`）。两者就位后余量倍数不会触发，预算全部留给可见输出。
 - **Embedding 预设按名字解析。** `embeddingModel` 可填新增 `embeddingModels`
   表中的任意键（内置 `multilingual` / `english` 为默认值）；未知名字在加载期
   即被拒绝，而不是等到下载时报一个含糊的错。

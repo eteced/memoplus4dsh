@@ -25,6 +25,47 @@ MemoryAgentBench; see [docs/evaluation.md](docs/evaluation.en.md) for the full a
   (the M9 F-1 workaround for deepseek-v4-flash spiralling into empty output on
   dense extraction inputs). A model that extracts better with thinking can now
   raise it without patching source.
+- **Adaptive reasoning effort.** The built-in default is still `off`, but `off`
+  is only sendable when the route's model declares it: dsh validates an effort
+  against the adapter's model metadata *before* dispatch and refuses what the
+  model does not list (`UNSUPPORTED_REASONING_EFFORT`), so the `off` default made
+  every extraction call on a route declaring only `low`/`high`/`max` end as a
+  stream that errored one second in. The effort that actually goes on the wire is
+  therefore decided at the call site from what dsh already exposes: a configured
+  effort the route declares is sent verbatim; the built-in `off` degrades to the
+  route's lowest declared level (`low` on a route declaring only
+  `low`/`high`/`max`), or is omitted entirely when the route declares/answers
+  nothing, leaving the choice to dsh and the provider; a user-set effort the route
+  cannot dispatch degrades the same way with one warning per route. New
+  `reasoningEffortPolicy` (`adapt` by default; `strict` sends the configured
+  effort as-is and lets dsh refuse it).
+- **While thinking is on, the budget is scaled by `thinkingTokenHeadroom`
+  (default 3×) — the follow-up fix to `UNSUPPORTED_REASONING_EFFORT` →
+  `max-tokens`.** The moment the effort adapts to `low`, thinking is on and eats
+  the output budget first: the same extraction input at the same
+  `max_tokens: 8192` measured `finish=length`, 0 visible characters and
+  8192/8192 tokens spent on reasoning, twice; production had already shown
+  `finish=max-tokens, outputTokens=16384, chars=0`. Now, whenever the effort that
+  actually goes on the wire is **not `off`** (including an omitted effort), the
+  stage's resolved `maxTokens` is multiplied by this factor; `off` is never
+  multiplied, so the old behaviour and the old cost are unchanged; `1` disables
+  it. `STAGE_DEFAULTS` and the profile/override values themselves are untouched —
+  only the value actually sent is scaled, which `memory_status` shows per stage
+  (with the configured value and factor in parentheses), and the empty-content
+  evidence records the `maxTokens` really sent.
+- **Make `off` dispatchable: declare it on the route (recommended).** This
+  gateway does **not** support an independent thinking budget (measured:
+  `thinking.budget_tokens`, `thinking_token_budget`, `thinking_budget`, and
+  `thinking_budget_tokens` are each ignored and thinking still consumes
+  `max_tokens` to the cap), but `thinking: {type: disabled}` does work: the same
+  input with thinking off ended `finish=stop` with 2399/2493 visible characters,
+  37 rows each, and 0 reasoning tokens. So add a **valueless** `off:` to the
+  model's `reasoningEfforts` in `settings.yaml` (dsh may then dispatch `off`; under
+  this route's `thinkingFormat: deepseek` pi-ai sends `thinking: {type: disabled}`)
+  and let the stages fall to `off` (a profile simply not pinning
+  `reasoningEffort: low` is enough — the built-in default is `off`). With both in
+  place the headroom multiplier never fires and the whole budget goes to visible
+  output.
 - **Embedding presets by name.** `embeddingModel` accepts any key declared in the
   new `embeddingModels` table (built-ins `multilingual` / `english` are the
   defaults), and an unknown name is refused at load instead of failing later

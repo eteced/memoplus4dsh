@@ -5,7 +5,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-tools'
-import type { ContentBlock, LlmFailure, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, LlmFailure, LlmResolvedModelInfo, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
@@ -28,6 +28,9 @@ import type { LoadedProfiles } from './prompts-file.js'
 import { registerMemoryTools } from './tools.js'
 import { installMemorySettings } from './settings.js'
 import type { MemorySettingsSection } from './settings.js'
+import { ReasoningEffortResolver } from './reasoning.js'
+import { DEFAULT_THINKING_TOKEN_HEADROOM, effectiveMaxTokens } from './reasoning.js'
+import type { EffortRoute, ReasoningEffortPolicy } from './reasoning.js'
 
 export const name = 'memoplus4dsh'
 
@@ -189,6 +192,31 @@ export interface Config {
   promptProfilesDir?: string
   /** Force one profile by name, disabling route matching (default: match, then `default`). */
   promptProfile?: string
+  /**
+   * 推理档位的适配策略，默认 `adapt`。
+   *
+   * `adapt`：内置默认 `off` 在该路由不被支持时按 dsh 暴露的档位降级——支持
+   * `off` 就用 `off`，不支持则取最低档（通常是 `low`），一档都拿不到（模型没
+   * 有 reasoning 元数据、或路由查不到信息）就整个省略 effort，交给 dsh/模型默认。
+   * 用户在配置/ profile 里**显式**设置的档位若不被该路由支持，同样降级，并在日志
+   * 里告警一次（每个路由一次）。任何一种情况都不会因为 effort 不匹配让抽取失败。
+   *
+   * `strict`：保持 v0.2 的行为——配置什么就发什么，不支持的档位由 dsh 自己拒绝
+   * （`UNSUPPORTED_REASONING_EFFORT`），给想严格的人。
+   */
+  reasoningEffortPolicy?: ReasoningEffortPolicy
+  /**
+   * 思考预算余量倍数，默认 **3**；`1` = 关闭。
+   *
+   * 当**实际生效的 effort 不是 `off`**（thinking 开启，包括路由查不到档位、
+   * effort 被整个省略的情形）时，把该阶段解析出的 `maxTokens` 乘以这个倍数，
+   * 给思考留出余量——实测 8192 的抽取预算会被思考全部吃光、可见内容为空
+   * （`finish=max-tokens`）。`off` 时不乘：那是 dsh 关掉 thinking 的档位，保持
+   * 旧行为与旧成本。`STAGE_DEFAULTS` 与 profile/override 的解析值都不变，乘的
+   * 只是这一枪实际发出的值（`memory_status` 各阶段显示的就是它）。倍数不是大于
+   * 1 的有限数（含 `1`）时不放大，配置的预算永远不会被缩小。
+   */
+  thinkingTokenHeadroom?: number
   /**
    * 诊断开关，**默认 false**。打开后把详细诊断写进
    * `<dataDir>/extraction-debug.jsonl`：每个 session 事件的 `listener-saw`
@@ -401,17 +429,30 @@ function formatCallEvidence(evidence: CallEvidence): string {
 async function callPluginLlm(
   ctx: Context,
   config: Config,
+  efforts: ReasoningEffortResolver,
   route: Route | undefined,
   prompt: string,
   maxTokens: number,
   timeoutMs?: number,
   reasoningEffort = 'off',
+  reasoningEffortExplicit = false,
   options: PluginCallOptions = {},
 ): Promise<string> {
   const resolved = effectiveRoute(config, route)
   if (resolved === undefined) {
     throw new Error('no provider/model route available for the memory plugin call')
   }
+  // 唯一一处"这一枪实际用什么档位"的决策点：内置默认 off 会按该路由声明的档位
+  // 适配（支持 off → off，否则最低档，拿不到档位信息 → 省略），用户显式设置的
+  // 档位不被支持时降级并只告警一次；strict 则原样透传交给 dsh 拒绝。见
+  // `src/reasoning.ts`。绝不因为 effort 不匹配让抽取失败。
+  const effort = await efforts.resolve(resolved, { effort: reasoningEffort, explicit: reasoningEffortExplicit })
+  // 预算余量也在这一个决策点算：effort 一旦不是 `off`，thinking 就开着，会先把
+  // 输出预算吃光（8192 被烧空、可见内容为 0，finish=max-tokens），所以这一枪实际
+  // 发出的上限是阶段解析值 × thinkingTokenHeadroom（默认 3，1 = 关闭）。`off` 原样
+  // 发出，旧行为与旧成本不变。解析值本身不动——STAGE_DEFAULTS 与 profile/override
+  // 报出来的仍是配置值，乘的只有这里（`sentMaxTokens`）。
+  const sentMaxTokens = effectiveMaxTokens(maxTokens, effort, config.thinkingTokenHeadroom ?? DEFAULT_THINKING_TOKEN_HEADROOM)
   const message: Message = createUserMessage({
     content: [{ type: 'text', text: prompt }],
     source: { kind: 'plugin', plugin: name },
@@ -425,16 +466,17 @@ async function callPluginLlm(
     provider: resolved.provider,
     model: resolved.model,
     messages: [message],
-    maxTokens,
+    maxTokens: sentMaxTokens,
     // Extraction/expansion are structured tasks: thinking spends the output cap
     // and, worse, deepseek-v4-flash spirals into unbounded reasoning on dense
     // extraction inputs, exhausting any token budget with EMPTY visible
     // output (M9 F-1; verified 8k→32k budgets). dsh maps effort 'off' to
     // wire `thinking: 'disabled'` (llm-deepseek serialize.ts); the user's
-    // main conversation is unaffected (per-call option). The default is 'off'
-    // and a prompt profile may raise it per stage for a model that needs to
-    // think in order to extract.
-    reasoningEffort: reasoningEffort as never,
+    // main conversation is unaffected (per-call option). The stage default is
+    // 'off'; `efforts.resolve` above is what decides whether that is what this
+    // route can actually dispatch — the option is omitted entirely (`undefined`)
+    // rather than named, when the route declares nothing.
+    ...effort === undefined ? {} : { reasoningEffort: effort as never },
     // Bound the call: an endpoint that stalls without erroring would
     // otherwise stall the serial extraction queue forever. 120s pairs with
     // the 8192-token budget: reasoning models either finish well within it
@@ -473,7 +515,13 @@ async function callPluginLlm(
         ...(options.job === undefined ? {} : { session: options.job.sessionId, turn: options.job.turn }),
         provider: resolved.provider,
         model: resolved.model,
-        maxTokens,
+        // 实际发出的上限（thinking 开启时已按 headroom 放大）；配置值与它不同时
+        // 一并记下，省得对着预算数字猜是配置值还是放大后的值。
+        maxTokens: sentMaxTokens,
+        ...sentMaxTokens === maxTokens ? {} : { maxTokensConfigured: maxTokens },
+        // 这一枪实际发出去的档位（`undefined` = 整个省略）。现场记录里没有它就
+        // 分不清"模型确实没产出"和"档位被适配掉了"。
+        ...effort === undefined ? {} : { reasoningEffort: effort },
         ...evidence,
       })
     }
@@ -559,6 +607,35 @@ export function apply(ctx: Context, config: Config) {
     const stageFor = (stage: PromptStage, sessionRoute: Route | undefined) =>
       promptState.registry.resolve(stage, effectiveRoute(config, sessionRoute))
 
+    /**
+     * The route's declared reasoning efforts, lowest first — `undefined` when
+     * the route exposes no model information.
+     *
+     * dsh already knows this: `ctx.llm.resolveModelInfo` answers with the
+     * adapter's own `LlmResolvedModelInfo`, whose `reasoning.efforts` is the
+     * exact list dsh validates a request against (`packages/llm/llm/src/types.ts`,
+     * `.../index.ts` `resolveCallWithInfo`). A route dsh cannot describe —
+     * unregistered provider (`NO_ADAPTER`), unknown model, or a model with no
+     * reasoning metadata at all — answers nothing here and must not turn into a
+     * failed extraction call: the resolver omits the effort instead.
+     */
+    const routeReasoningEfforts = async (route: EffortRoute): Promise<readonly string[] | undefined> => {
+      const llm = ctx.llm as { resolveModelInfo?: (provider: string, model: string) => Promise<LlmResolvedModelInfo> } | undefined
+      if (llm === undefined || typeof llm.resolveModelInfo !== 'function') return undefined
+      try {
+        const info = await llm.resolveModelInfo(route.provider, route.model)
+        return info.reasoning?.efforts.map(effort => String(effort.id))
+      } catch {
+        return undefined
+      }
+    }
+    /** One per fiber: capability lookups and "already warned" are per-route state. */
+    const effortResolver = new ReasoningEffortResolver({
+      policy: config.reasoningEffortPolicy ?? 'adapt',
+      lookup: routeReasoningEfforts,
+      onWarning: message => logger.warn(message),
+    })
+
     // Only past validation: a refused profile must not leave a half-created
     // memory directory behind, so nothing touches the data dir before here.
     const store = new MemoryStore({
@@ -627,7 +704,7 @@ export function apply(ctx: Context, config: Config) {
           // expansion). A profile may raise either bound.
           callLlm: prompt => {
             const stage = stageFor('queryExpansion', lastRoute)
-            return callPluginLlm(ctx, config, lastRoute, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort)
+            return callPluginLlm(ctx, config, effortResolver, lastRoute, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort, stage.reasoningEffortExplicit)
           },
         })
     const distillQueryLlm = config.queryExpansion === false
@@ -637,7 +714,7 @@ export function apply(ctx: Context, config: Config) {
           prompt: () => stageFor('queryDistill', lastRoute).prompt,
           callLlm: prompt => {
             const stage = stageFor('queryDistill', lastRoute)
-            return callPluginLlm(ctx, config, lastRoute, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort)
+            return callPluginLlm(ctx, config, effortResolver, lastRoute, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort, stage.reasoningEffortExplicit)
           },
         })
 
@@ -664,7 +741,7 @@ export function apply(ctx: Context, config: Config) {
           // 唯一能看到流全部 chunk 的位置：空内容时把 finish/chunks/chars 无条件
           // 拼进错误消息（失败路径本来就要抛错），debug 打开时另落一条
           // llm-empty 现场记录。查询侧不传 emptyMessage，空内容仍按原语义降级。
-          return callPluginLlm(ctx, config, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort, {
+          return callPluginLlm(ctx, config, effortResolver, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort, stage.reasoningEffortExplicit, {
             emptyMessage: EMPTY_EXTRACTION_ERROR,
             job,
             log: debugLog,
@@ -681,7 +758,7 @@ export function apply(ctx: Context, config: Config) {
             prompt: job => stageFor('entityMerge', job.route).prompt,
             callLlm: (prompt, job) => {
               const stage = stageFor('entityMerge', job.route)
-              return callPluginLlm(ctx, config, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort)
+              return callPluginLlm(ctx, config, effortResolver, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort, stage.reasoningEffortExplicit)
             },
             onLog: debugLog,
           }),
@@ -692,7 +769,7 @@ export function apply(ctx: Context, config: Config) {
             prompt: job => stageFor('supersede', job.route).prompt,
             callLlm: (prompt, job) => {
               const stage = stageFor('supersede', job.route)
-              return callPluginLlm(ctx, config, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort)
+              return callPluginLlm(ctx, config, effortResolver, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort, stage.reasoningEffortExplicit)
             },
             onLog: debugLog,
           }),
@@ -877,6 +954,15 @@ export function apply(ctx: Context, config: Config) {
       }
       lines.push('', '[prompts]')
       lines.push(`  configured: ${promptState.registry.names().join(', ')}`)
+      // 这一段回答"这一枪实际会发什么档位"：内置 off 会按路由适配，所以配置里的
+      // `effort off` 不等于线缆上的 off。策略值摆在最前面，省得对着 profile 猜。
+      lines.push(`  reasoningEffortPolicy: ${config.reasoningEffortPolicy ?? 'adapt'}`
+        + `${config.reasoningEffortPolicy === 'strict' ? ' (configured effort is sent as-is; dsh refuses what the route cannot dispatch)' : ' (built-in "off" adapts to the route; a user-set effort degrades with one warning per route)'}`)
+      // 预算余量策略。下面各阶段报的是**实际发出值**，与配置值的关系由这一行决定。
+      const headroom = config.thinkingTokenHeadroom ?? DEFAULT_THINKING_TOKEN_HEADROOM
+      lines.push(headroom > 1
+        ? `  thinking headroom: ${headroom}x when thinking is on (stage maxTokens below is the value actually sent; off effort is never multiplied)`
+        : '  thinking headroom: off (1x — every stage sends its configured maxTokens as-is)')
       lines.push(`  profiles dir: ${promptState.dir}${promptState.loaded.files.length === 0 ? ' (no profile files)' : ` — ${promptState.loaded.files.length} file(s): ${promptState.loaded.files.map(file => basename(file)).join(', ')}`}`)
       lines.push(`  route: ${lastRoute === undefined ? '(none observed yet — stages report the fallback)' : `${lastRoute.provider}/${lastRoute.model}`}`)
       if (config.extractionProvider !== undefined && config.extractionModel !== undefined) {
@@ -886,10 +972,24 @@ export function apply(ctx: Context, config: Config) {
       }
       // Resolve rather than summarize: the numbers are the point of a profile,
       // and an operator debugging output length needs the effective budget.
+      // `maxTokens` 报的是与调用点同一个决策算出的**实际发出值**（thinking 开启时
+      // 已按 headroom 放大，并在括号里给出配置值与倍数）；档位被适配掉时也一并
+      // 显示（`effort off → low`），否则会看不懂预算为什么被放大。没有路由可解析
+      // 时报配置值——那时调用本身也会因为没有路由而失败。
       for (const stage of PROMPT_STAGES) {
         const resolved = stageFor(stage, lastRoute)
-        const timeout = resolved.timeoutMs === undefined ? '' : `, timeoutMs ${resolved.timeoutMs}`
-        lines.push(`  ${stage}: profile ${resolved.profile}, maxTokens ${resolved.maxTokens}, effort ${resolved.reasoningEffort}${timeout}`)
+        const route = effectiveRoute(config, lastRoute)
+        const wireEffort = route === undefined
+          ? undefined
+          : await effortResolver.resolve(route, { effort: resolved.reasoningEffort, explicit: resolved.reasoningEffortExplicit })
+        const sent = route === undefined ? resolved.maxTokens : effectiveMaxTokens(resolved.maxTokens, wireEffort, headroom)
+        const parts = [
+          `${stage}: profile ${resolved.profile}`,
+          `maxTokens ${sent}${sent === resolved.maxTokens ? '' : ` (${resolved.maxTokens} × ${headroom} thinking headroom)`}`,
+          `effort ${resolved.reasoningEffort}${route !== undefined && wireEffort !== resolved.reasoningEffort ? ` → ${wireEffort ?? 'omitted'}` : ''}`,
+        ]
+        if (resolved.timeoutMs !== undefined) parts.push(`timeoutMs ${resolved.timeoutMs}`)
+        lines.push(`  ${parts.join(', ')}`)
       }
       lines.push('', '[data]')
       lines.push(`  graph: ${store.filePath}`)

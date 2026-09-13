@@ -74,6 +74,9 @@ describe('PromptRegistry resolution', () => {
     expect(resolved.prompt).toBe(EXTRACTION_PROMPT_TURN)
     expect(resolved.maxTokens).toBe(8192)
     expect(resolved.reasoningEffort).toBe('off')
+    // The built-in `off` is the plugin's own default, not a user's setting: the
+    // call site adapts it to the route instead of reporting a mismatch.
+    expect(resolved.reasoningEffortExplicit).toBe(false)
     expect(resolved.profile).toBe('default')
   })
 
@@ -126,12 +129,21 @@ describe('PromptRegistry resolution', () => {
     })
     const resolved = registry.resolve('extraction', { provider: 'p', model: 'm' })
     expect(resolved).toMatchObject({ prompt: 'O {turn_text}', maxTokens: 222, reasoningEffort: 'high' })
+    // A user's effort is flagged as such, which is what makes a route that
+    // cannot dispatch it worth a warning instead of a silent adaptation.
+    expect(resolved.reasoningEffortExplicit).toBe(true)
     // Overriding one field leaves the others resolved from the profile.
     const partial = new PromptRegistry({
       profiles: [{ name: 'matched', match: { model: '*' }, stages: { extraction: { prompt: 'M {turn_text}', maxTokens: 111 } } }],
       overrides: { extraction: { reasoningEffort: 'low' } },
     }).resolve('extraction', { provider: 'p', model: 'm' })
     expect(partial).toMatchObject({ prompt: 'M {turn_text}', maxTokens: 111, reasoningEffort: 'low' })
+    expect(partial.reasoningEffortExplicit).toBe(true)
+    // A profile supplying the effort counts as the user speaking too.
+    const fromProfile = new PromptRegistry({
+      profiles: [{ name: 'matched', match: { model: '*' }, stages: { extraction: { reasoningEffort: 'max' } } }],
+    }).resolve('extraction', { provider: 'p', model: 'm' })
+    expect(fromProfile).toMatchObject({ reasoningEffort: 'max', reasoningEffortExplicit: true })
   })
 
   it('reports a stage profile change once per change', () => {

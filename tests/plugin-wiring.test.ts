@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
-import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { Config } from '../src/index.js'
 import { apply } from '../src/index.js'
@@ -56,11 +56,25 @@ interface SettingsControl {
   validate: (next: SettingsValue) => void
 }
 
-/** The raw chunk stream `ctx.llm.stream` hands back; tests supply their own. */
-type StreamStub = () => AsyncIterable<StreamChunk>
+/** The raw chunk stream `ctx.llm.stream` hands back; tests supply their own and may read the request. */
+type StreamStub = (options: GenerateOptions) => AsyncIterable<StreamChunk>
+
+/**
+ * What `ctx.llm.resolveModelInfo` answers — the capability surface dsh itself
+ * validates a request against. Returns the route's declared effort ids, lowest
+ * first; a route it cannot describe must throw, as `LlmRuntime` does
+ * (`NO_ADAPTER`, unknown model).
+ */
+type ModelInfoStub = (provider: string, model: string) => { reasoning?: { efforts: readonly { id: string }[] } }
+
+/** Every ordinary reasoning route: pi-ai's escalation order, starting at `off`. */
+const DEFAULT_EFFORTS: ModelInfoStub = () => ({ reasoning: { efforts: ['off', 'low', 'high', 'max'].map(id => ({ id })) } })
 
 /** A Cordis context stub carrying exactly what this plugin touches. */
-function harness(stream: StreamStub = () => { throw new Error('boot wiring must not call the model') }): Harness {
+function harness(
+  stream: StreamStub = () => { throw new Error('boot wiring must not call the model') },
+  modelInfo: ModelInfoStub = DEFAULT_EFFORTS,
+): Harness {
   const tools = new Map<string, ToolDefinition>()
   const handlers = new Map<string, (...args: never[]) => unknown>()
   const warnings: string[] = []
@@ -122,7 +136,10 @@ function harness(stream: StreamStub = () => { throw new Error('boot wiring must 
       return () => {}
     },
     systemPrompt: { section: () => () => {} },
-    llm: { stream },
+    llm: {
+      stream,
+      resolveModelInfo: async (provider: string, model: string) => modelInfo(provider, model),
+    },
   } as unknown as Context
   const drain = async (): Promise<void> => {
     for (const disposer of disposers.splice(0)) await disposer()
@@ -136,8 +153,8 @@ function harness(stream: StreamStub = () => { throw new Error('boot wiring must 
  * by *spawning* the python sidecars — hermetic tests must not load torch, so the
  * backend rows are exercised explicitly by the tests that need them.
  */
-function boot(overrides: Partial<Config> = {}, stream?: StreamStub): Harness {
-  const h = harness(stream)
+function boot(overrides: Partial<Config> = {}, stream?: StreamStub, modelInfo?: ModelInfoStub): Harness {
+  const h = harness(stream, modelInfo)
   apply(h.ctx, { extraction: 'turn_end', dataDir: dir, nerAssist: false, embedding: false, ...overrides })
   return h
 }
@@ -224,7 +241,9 @@ describe('apply() boot wiring', () => {
     const report = await status(h)
     expect(report).toContain(`route: ${ROUTE.provider}/${ROUTE.model}`)
     expect(report).toContain('extraction: profile v41, maxTokens 8192')       // prompt from default, budget from the stage default
-    expect(report).toContain('entityMerge: profile v41, maxTokens 16384, effort high')
+    // `high` means thinking is on, so the budget actually sent is 16384 × the
+    // default 3x thinking headroom (see the "adaptive reasoning effort" suite).
+    expect(report).toContain('entityMerge: profile v41, maxTokens 49152 (16384 × 3 thinking headroom), effort high')
     expect(report).toContain('supersede: profile v41, maxTokens 4096, effort off')
     // The catch-all matches nothing here because the first match wins.
     expect(report).toContain('configured: default, v41, catch-all')
@@ -675,5 +694,205 @@ describe('empty-content evidence', () => {
     expect(emptyJson).not.toContain(leakedJwt)
     expect(emptyJson).not.toContain(leakedQueryToken)
     expect(String((empty?.['failure'] as { message?: string }).message)).toContain('***')
+  })
+})
+
+/**
+ * Adaptive reasoning effort at the call site.
+ *
+ * The built-in default is `off` for every stage, and `off` is only sendable on
+ * a route whose model declares it: dsh validates the effort against the
+ * adapter's model metadata *before* dispatch and refuses what the model does
+ * not list. On 2026-09-13 that turned every extraction call on a route
+ * declaring only `low`/`high`/`max` into a stream that errored one second in.
+ * These tests drive a real extraction call — with an injected chunk stream,
+ * never a provider — and read the request the plugin actually builds.
+ */
+describe('adaptive reasoning effort', () => {
+  /** A stream that yields nothing; the call books a failure, but its request was already built. */
+  async function* noChunks(): AsyncGenerator<StreamChunk> {}
+
+  /** Capture the request of every model call, then behave like a starved endpoint. */
+  function capture(into: GenerateOptions[]): StreamStub {
+    return options => {
+      into.push(options)
+      return noChunks()
+    }
+  }
+
+  /** The incident route: `reasoningEfforts: {low, high, max}`, no `off`. */
+  const noOff: ModelInfoStub = () => ({ reasoning: { efforts: ['low', 'high', 'max'].map(id => ({ id })) } })
+
+  /**
+   * Only the warnings this feature owns. A starved test stream still books a
+   * failed extraction round, which the queue reports like any other loss.
+   */
+  const effortWarnings = (h: Harness): string[] =>
+    h.warnings.filter(message => message.includes('reasoning effort'))
+
+  it('sends the lowest declared effort when the built-in off is unsupported', async () => {
+    const calls: GenerateOptions[] = []
+    const h = boot({ extractionMaxRetries: 0 }, capture(calls), noOff)
+    emitTurnEnd(h)
+    await h.drain()
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({ provider: 'p', model: 'm', reasoningEffort: 'low' })
+    // The default adapting to the route is not a degradation.
+    expect(effortWarnings(h)).toEqual([])
+  })
+
+  it('keeps sending off when the route declares it, and omits it when the route has no info', async () => {
+    const supported: GenerateOptions[] = []
+    const h = boot({ extractionMaxRetries: 0 }, capture(supported))
+    emitTurnEnd(h)
+    await h.drain()
+    expect(supported[0]).toMatchObject({ reasoningEffort: 'off' })
+
+    // A route dsh cannot describe (`NO_ADAPTER`, unknown model, no reasoning
+    // metadata) must not produce a request dsh can only refuse: the option is
+    // absent, not `undefined`, so dsh and the provider keep their own default.
+    const unknown: GenerateOptions[] = []
+    const other = boot({ extractionMaxRetries: 0 }, capture(unknown), () => { throw new Error('NO_ADAPTER') })
+    emitTurnEnd(other)
+    await other.drain()
+    expect(unknown).toHaveLength(1)
+    expect('reasoningEffort' in unknown[0]!).toBe(false)
+  })
+
+  it('uses a user-set effort the route declares', async () => {
+    const calls: GenerateOptions[] = []
+    const h = boot({
+      extractionMaxRetries: 0,
+      promptProfiles: [{ name: 'think', match: { model: 'm' }, stages: { extraction: { reasoningEffort: 'high' } } }],
+    }, capture(calls))
+    emitTurnEnd(h)
+    await h.drain()
+    expect(calls[0]).toMatchObject({ reasoningEffort: 'high' })
+    expect(effortWarnings(h)).toEqual([])
+  })
+
+  it('degrades a user-set effort the route cannot dispatch, and says so once', async () => {
+    const calls: GenerateOptions[] = []
+    const h = boot({
+      extractionMaxRetries: 0,
+      promptProfiles: [{ name: 'think', match: { model: 'm' }, stages: { extraction: { reasoningEffort: 'off' } } }],
+    }, capture(calls), () => ({ reasoning: { efforts: [{ id: 'low' }, { id: 'medium' }] } }))
+    emitTurnEnd(h)
+    await h.drain()
+    expect(calls[0]).toMatchObject({ reasoningEffort: 'low' })
+    const degraded = effortWarnings(h)
+    expect(degraded).toHaveLength(1)
+    expect(degraded[0]).toContain('p/m')
+    expect(degraded[0]).toContain('"off"')
+  })
+
+  it('strict is the old behaviour: the configured effort is sent as-is', async () => {
+    const calls: GenerateOptions[] = []
+    const h = boot({ extractionMaxRetries: 0, reasoningEffortPolicy: 'strict' }, capture(calls), noOff)
+    emitTurnEnd(h)
+    await h.drain()
+    // `off` on a route that does not declare it: dsh refuses this call, which
+    // is exactly what a deployment asking for `strict` wants.
+    expect(calls[0]).toMatchObject({ reasoningEffort: 'off' })
+    expect(effortWarnings(h)).toEqual([])
+  })
+
+  it('reports the effort policy in memory_status', async () => {
+    expect(await status(boot())).toContain('reasoningEffortPolicy: adapt')
+    expect(await status(boot({ reasoningEffortPolicy: 'strict' }))).toContain('reasoningEffortPolicy: strict')
+  })
+
+  /**
+   * 思考把输出预算吃光、可见内容为空（事故的下一个形态：档位不再被拒，却
+   * `finish=max-tokens`、`chars=0`）。usage/reasoningTokens 是唯一能证实的数字。
+   */
+  async function* starvedThinking(): AsyncGenerator<StreamChunk> {
+    yield { type: 'usage', usage: { inputTokens: 1_056, outputTokens: 24_576, reasoningTokens: 24_500 } }
+    yield { type: 'finish', reason: { kind: 'max-tokens' } }
+  }
+
+  it('leaves the budget alone when the wire effort is off', async () => {
+    const calls: GenerateOptions[] = []
+    const h = boot({ extractionMaxRetries: 0 }, capture(calls))
+    emitTurnEnd(h)
+    await h.drain()
+    // `off` = dsh 关掉 thinking：预算一个 token 都不放大，旧成本不变。
+    expect(calls[0]).toMatchObject({ reasoningEffort: 'off', maxTokens: 8192 })
+  })
+
+  it('multiplies the budget by the headroom when the adapted effort turns thinking on', async () => {
+    const calls: GenerateOptions[] = []
+    const h = boot({ extractionMaxRetries: 0 }, capture(calls), noOff)
+    emitTurnEnd(h)
+    await h.drain()
+    // 内置 off 在这条路由上适配成 low（thinking 开启）→ 8192 × 3。
+    expect(calls[0]).toMatchObject({ reasoningEffort: 'low', maxTokens: 24_576 })
+  })
+
+  it('multiplies a user-set thinking effort too', async () => {
+    const calls: GenerateOptions[] = []
+    const h = boot({
+      extractionMaxRetries: 0,
+      promptProfiles: [{ name: 'think', match: { model: 'm' }, stages: { extraction: { reasoningEffort: 'high' } } }],
+    }, capture(calls))
+    emitTurnEnd(h)
+    await h.drain()
+    expect(calls[0]).toMatchObject({ reasoningEffort: 'high', maxTokens: 24_576 })
+  })
+
+  it('sends the configured budget as-is when thinkingTokenHeadroom is 1', async () => {
+    const calls: GenerateOptions[] = []
+    const h = boot({ extractionMaxRetries: 0, thinkingTokenHeadroom: 1 }, capture(calls), noOff)
+    emitTurnEnd(h)
+    await h.drain()
+    // 1 = 关闭余量：档位照样适配成 low，但预算保持配置值。
+    expect(calls[0]).toMatchObject({ reasoningEffort: 'low', maxTokens: 8192 })
+  })
+
+  it('multiplies under strict too: the policy picks the effort, not the budget rule', async () => {
+    const calls: GenerateOptions[] = []
+    const h = boot({
+      extractionMaxRetries: 0,
+      reasoningEffortPolicy: 'strict',
+      promptProfiles: [{ name: 'think', match: { model: 'm' }, stages: { extraction: { reasoningEffort: 'high' } } }],
+    }, capture(calls), noOff)
+    emitTurnEnd(h)
+    await h.drain()
+    // strict 只影响档位怎么选（原样透传交给 dsh），余量照乘。
+    expect(calls[0]).toMatchObject({ reasoningEffort: 'high', maxTokens: 24_576 })
+  })
+
+  it('books the actually sent maxTokens in the llm-empty evidence', async () => {
+    const h = boot({ debug: true, extractionMaxRetries: 0 }, () => starvedThinking(), noOff)
+    emitTurnEnd(h)
+    await h.drain()
+    const empty = debugLines().find(entry => entry['kind'] === 'llm-empty')
+    // 现场记录必须能分清"配置预算"与"实际发出的预算"：只记配置值就说不清
+    // 8k 的预算为什么会报 outputTokens=24576。
+    expect(empty).toMatchObject({
+      reasoningEffort: 'low',
+      maxTokens: 24_576,
+      maxTokensConfigured: 8192,
+      finish: 'max-tokens',
+      chars: 0,
+      usage: { outputTokens: 24_576, reasoningTokens: 24_500 },
+    })
+  })
+
+  it('reports the actual budget and the headroom policy in memory_status', async () => {
+    const h = boot({}, undefined, noOff)
+    observeRoute(h)
+    const report = await status(h)
+    expect(report).toContain('thinking headroom: 3x when thinking is on')
+    // 实际发出值 + 配置值与倍数；档位被适配掉时也显示出来（off → low）。
+    expect(report).toContain('extraction: profile default, maxTokens 24576 (8192 × 3 thinking headroom), effort off → low')
+    expect(report).toContain('queryExpansion: profile default, maxTokens 3072 (1024 × 3 thinking headroom), effort off → low, timeoutMs 30000')
+
+    // headroom=1：策略行说明余量关闭，各阶段报配置值本身。
+    const off1 = boot({ thinkingTokenHeadroom: 1 }, undefined, noOff)
+    observeRoute(off1)
+    const report1 = await status(off1)
+    expect(report1).toContain('thinking headroom: off (1x')
+    expect(report1).toContain('extraction: profile default, maxTokens 8192, effort off → low')
   })
 })

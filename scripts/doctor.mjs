@@ -63,6 +63,8 @@ const DEFAULTS = {
   promptProfiles: '(none)',
   promptProfilesDir: '(default: <data-dir>/prompts)',
   promptProfile: '(auto by route, else default)',
+  reasoningEffortPolicy: 'adapt',
+  thinkingTokenHeadroom: 3,
   prompts: '(none)',
   extractionMaxTokens: 8192,
   extractionCallTimeoutMs: 120000,

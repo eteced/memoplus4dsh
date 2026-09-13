@@ -75,10 +75,17 @@ export interface StageSettings {
   /** Per-call timeout in ms; falls back to `extractionCallTimeoutMs`, then 120s. */
   timeoutMs?: number
   /**
-   * Reasoning effort for this stage's calls. The default is `off`: extraction
-   * and expansion are structured tasks where thinking spends the output cap
-   * and — verified on deepseek-v4-flash — can spiral into empty visible
-   * output (M9 F-1). A model that extracts better with thinking raises this.
+   * Reasoning effort for this stage's calls. The built-in default is `off`:
+   * extraction and expansion are structured tasks where thinking spends the
+   * output cap and — verified on deepseek-v4-flash — can spiral into empty
+   * visible output (M9 F-1). A model that extracts better with thinking raises
+   * this.
+   *
+   * The built-in `off` is a *request*, not a promise: a route whose model does
+   * not declare `off` has it adapted to that route (lowest declared effort,
+   * else no effort) at the call site, unless `reasoningEffortPolicy` is
+   * `strict`. A value set here (or in a profile) is the user's own choice and
+   * is only degraded with a warning — see `src/reasoning.ts`.
    */
   reasoningEffort?: string
 }
@@ -141,7 +148,16 @@ export interface ResolvedStage {
   prompt: string
   maxTokens: number
   timeoutMs?: number
+  /** The configured effort: the user's when {@link ResolvedStage.reasoningEffortExplicit}, else the built-in `off`. */
   reasoningEffort: string
+  /**
+   * Whether configuration or a profile supplied {@link ResolvedStage.reasoningEffort},
+   * as opposed to it falling through to {@link STAGE_DEFAULTS}. The call site
+   * resolves the effort that really goes on the wire from both fields: the
+   * built-in default adapts to the route silently, a user's value is only
+   * degraded with a warning.
+   */
+  reasoningEffortExplicit: boolean
   /** Profile that supplied the prompt — reported for logging and `memory_status`. */
   profile: string
 }
@@ -301,12 +317,16 @@ export class PromptRegistry {
       this.onResolve?.({ stage, profile: profile.name, ...route === undefined ? {} : { route } })
     }
     const timeoutMs = override?.timeoutMs ?? fromProfile?.timeoutMs ?? fallback.timeoutMs
+    // The two layers above the built-in default are the user speaking; the
+    // fallback is the plugin's own choice, which the call site adapts per route.
+    const explicitEffort = override?.reasoningEffort ?? fromProfile?.reasoningEffort
     return {
       stage,
       prompt: override?.prompt ?? fromProfile?.prompt ?? DEFAULT_PROFILE.stages![stage]!.prompt!,
       maxTokens: override?.maxTokens ?? fromProfile?.maxTokens ?? fallback.maxTokens,
       ...timeoutMs === undefined ? {} : { timeoutMs },
-      reasoningEffort: override?.reasoningEffort ?? fromProfile?.reasoningEffort ?? fallback.reasoningEffort,
+      reasoningEffort: explicitEffort ?? fallback.reasoningEffort,
+      reasoningEffortExplicit: explicitEffort !== undefined,
       profile: profile.name,
     }
   }
