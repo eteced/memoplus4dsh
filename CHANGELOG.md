@@ -229,6 +229,22 @@ MemoryAgentBench; see [docs/evaluation.md](docs/evaluation.en.md) for the full a
   pairs (+11% over the 1256 already paired), foldable into the existing supersede call
   without a new stage. This round did not build it.
 
+- **relation-merge: lexically related older events now reach the same supersede call.**
+  The entry above covers only polarity/retraction (4 slots in the whole graph), leaving
+  ordinary predicate drift (`declare`/`declares`, `has_test_count`/`has_test_result`)
+  uncovered. Rather than a new stage, candidate widening is gated on `contests()` and
+  applies **only where the exact set does not qualify today**: widening raises the
+  distinct-value count and the contested filter admits exactly two values, so widening
+  unconditionally would drop groups the exact rule already marks — trading an existing
+  capability for new coverage. The candidate decision is therefore factored into
+  `contests(predecessors, newest)`, the exact set wins whenever it qualifies, and the old
+  path is byte-for-byte unchanged (pinned by a regression test). The adjudication prompt
+  gains one bullet: different spellings that name different relations answer multi (no
+  mark); the line lists `predicate spellings` only when a group holds more than one, so
+  single-spelling groups render exactly as before. **Measured limit:** the rule catches
+  **stem/agreement drift** (`declare`/`declares`, `support`/`supports`) and **not
+  synonyms** (`contains`/`includes` share no stem).
+
 ## r2 full rerun — 2026-09-11
 
 - Full MemoryAgentBench rerun on the DeepSeek official API after the M11–M17

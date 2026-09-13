@@ -15,7 +15,7 @@
     "supersede": {
       "file": "src/supersede.ts",
       "constant": "SUPERSEDE_ADJUDICATION_PROMPT",
-      "text": "You maintain a memory graph. Each line below shows a relation (predicate) between a subject and the values observed for it at different times.\n\nDecide whether each relation is SINGLE-VALUED or MULTI-VALUED:\n- SINGLE-VALUED: holds one current value at a time; a newer value replaces the older (residence, job, position, capital, headquarters, chairperson, \"the type of X\").\n- MULTI-VALUED: can hold several current values at once; a new value adds alongside (likes, hobbies, languages spoken, children, list items).\n- When unsure, answer multi (no update is marked).\n\n{lines}\n\nAnswer one line per relation, exactly: <N>: single or <N>: multi"
+      "text": "You maintain a memory graph. Each line below shows a relation (predicate) between a subject and the values observed for it at different times.\n\nDecide whether each relation is SINGLE-VALUED or MULTI-VALUED:\n- SINGLE-VALUED: holds one current value at a time; a newer value replaces the older (residence, job, position, capital, headquarters, chairperson, \"the type of X\").\n- MULTI-VALUED: can hold several current values at once; a new value adds alongside (likes, hobbies, languages spoken, children, list items).\n- Values listed together may come from DIFFERENT predicate spellings. A spelling that names a different relation rather than the same relation under two names is not an update: answer multi.\n- When unsure, answer multi (no update is marked).\n\n{lines}\n\nAnswer one line per relation, exactly: <N>: single or <N>: multi"
     },
     "queryExpansion": {
       "file": "src/retrieval.ts",
@@ -32,6 +32,10 @@
     "extraction": {
       "decidedIn": "v0.2",
       "reason": "Negation must reach the supersede pairing key. Predicate feedback plus the polarity-in-OBJECT convention, measured at 7-8/8 paired retractions versus 0/4 for the v0.1 text."
+    },
+    "supersede": {
+      "decidedIn": "v0.2",
+      "reason": "Widened relation candidates can mix predicate spellings in one group; the adjudicator needs to reject spellings that name a different relation, and answer multi (no mark) when they do."
     }
   }
 }

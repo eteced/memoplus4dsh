@@ -167,6 +167,18 @@ memoplus4dsh 的重要修改归档，按开发里程碑组织。各里程碑的�
   → 约 139 对真同槽（相对现有 1256 对 +11%），可并入现有 supersede 那一次调用而不新增
   阶段；本轮未做。
 
+- **relation-merge：把"共享内容词"的旧事件也送进同一次 supersede 裁决。**
+  上面那条只覆盖极性/撤回（全图 4 个槽），普通谓词漂移（`declare`/`declares`、
+  `has_test_count`/`has_test_result`）仍无覆盖。做法不是新开阶段，而是在
+  `contests()` 判定的基础上**只在精确集今天本来就不成立时**放宽候选：放宽会推高
+  distinct 值数，而 contested 过滤只收恰好两个值，所以无差别放宽会成组丢掉现有
+  标记能力 —— 那是拿已有能力换新覆盖。为此把候选判定抽成 `contests(predecessors,
+  newest)`，精确集一旦成立就沿用，旧路径逐字节不变（有回归测试钉住这条）。
+  裁决 prompt 新增一条：同组内不同拼写若指向不同关系就答 multi（不标记）；
+  组内有多种拼写时才在行里列出 `predicate spellings`，单拼写组的 prompt 与改前一致。
+  **实测边界**：这条规则抓的是**词干/一致性漂移**（`declare`/`declares`、
+  `support`/`supports`），**抓不到同义词**（`contains`/`includes` 没有共享词干）。
+
 ## r2 全量重跑 — 2026-09-11
 
 - M11–M17 改进后的全量重跑（DeepSeek 官方 API）：FC-SH 89/78/90/83，

@@ -25,6 +25,7 @@ export const SUPERSEDE_ADJUDICATION_PROMPT = `You maintain a memory graph. Each 
 Decide whether each relation is SINGLE-VALUED or MULTI-VALUED:
 - SINGLE-VALUED: holds one current value at a time; a newer value replaces the older (residence, job, position, capital, headquarters, chairperson, "the type of X").
 - MULTI-VALUED: can hold several current values at once; a new value adds alongside (likes, hobbies, languages spoken, children, list items).
+- Values listed together may come from DIFFERENT predicate spellings. A spelling that names a different relation rather than the same relation under two names is not an update: answer multi.
 - When unsure, answer multi (no update is marked).
 
 {lines}
@@ -33,6 +34,13 @@ Answer one line per relation, exactly: <N>: single or <N>: multi`
 
 /** Retrieval score multiplier for superseded events (present-tense modes). */
 export const SUPERSEDED_DISCOUNT = 0.3
+
+/** Negation markers that carry polarity rather than relation identity. */
+const NEGATION_TOKENS = new Set(['not', 'no', 'never', 'none', 'without', 'cannot', 'cant', 'dont', 'doesnt', 'didnt', 'non', 'nor', 'neither'])
+/** Chinese negation characters, same role as {@link NEGATION_TOKENS}. */
+const CJK_NEGATION = /[不没无未非别莫]/g
+/** Copulas and light verbs that vary with tense/agreement, not with the relation. */
+const LIGHT_VERBS = new Set(['is', 'was', 'are', 'were', 'be', 'been', 'being', 'am', 'has', 'have', 'had', 'do', 'does', 'did', 'the', 'a', 'an', 'of', 'to'])
 
 export interface LlmSupersedeResolverOptions {
   store: MemoryStore
@@ -88,6 +96,71 @@ export class LlmSupersedeResolver {
   }
 
   /**
+   * Content tokens of a predicate: the relation's own words, with the light
+   * verbs, articles, and negation markers dropped so surface variants of one
+   * relation share them (`was_changed_to` / `changed`, `does_not_support` /
+   * `support`, `has_default` / `defaults_to`).
+   * @param predicate - Surface predicate as recorded.
+   * @returns Lowercased content tokens; empty when the predicate carries none.
+   */
+  private contentTokens(predicate: string): Set<string> {
+    const tokens = predicate
+      .replace(CJK_NEGATION, '')
+      .toLowerCase()
+      .split(/[^a-z0-9\u4e00-\u9fff]+/)
+      .filter(Boolean)
+      .filter(t => !NEGATION_TOKENS.has(t) && !LIGHT_VERBS.has(t))
+    return new Set(tokens.map(t => (t.length > 3 && t.endsWith('s') && !t.endsWith('ss') ? t.slice(0, -1) : t)))
+  }
+
+  /**
+   * Whether two predicates share a content token — the recall-oriented relation
+   * candidate rule. Shared tokens are NOT an equivalence relation, so this only
+   * ever widens ONE new event's predecessor set; the LLM adjudicator is what
+   * rejects a spelling that names a different relation (25% of these candidates
+   * are the same slot, measured on the live graph).
+   * @param a - Left predicate.
+   * @param b - Right predicate.
+   * @returns Whether the two share at least one content token.
+   */
+  private sharesContentToken(a: string, b: string): boolean {
+    const ta = this.contentTokens(a)
+    if (ta.size === 0) return false
+    const tb = this.contentTokens(b)
+    for (const t of ta) if (tb.has(t)) return true
+    return false
+  }
+
+  /**
+   * The object value the graph records for an event, lowercased; `undefined`
+   * when the relation has no object (a unary predicate).
+   * @param event - Event to read.
+   * @returns Normalized object value, or `undefined`.
+   */
+  private objectValue(event: MemoryEvent): string | undefined {
+    const id = event.objectEntityIds[0]
+    if (id === undefined) return undefined
+    return this.store.getEntity(id)?.canonicalName.trim().toLowerCase()
+  }
+
+  /**
+   * Whether one new event against a predecessor set would present exactly two
+   * competing values — the condition {@link detectAndMark} sends to the
+   * adjudicator. Widening candidates can only raise the distinct-value count,
+   * so this is what decides whether widening is additive or would displace a
+   * group the exact rule already handles.
+   * @param predecessors - Candidate older events.
+   * @param newest - The new event under consideration.
+   * @returns Whether the pair of clauses in the contested filter would hold.
+   */
+  private contests(predecessors: readonly MemoryEvent[], newest: MemoryEvent): boolean {
+    if (predecessors.length === 0) return false
+    const newestObj = this.objectValue(newest)
+    const distinct = new Set([...predecessors, newest].map(ev => this.objectValue(ev) ?? ev.normalizedText))
+    return distinct.size === 2 && predecessors.some(old => this.objectValue(old) !== newestObj)
+  }
+
+  /**
    * Find same-(subject, predicate) predecessors of the given new events and
    * LLM-adjudicate whether each new event supersedes them. Marks confirmed
    * pairs via `supersededBy`. Returns the number of links marked.
@@ -109,11 +182,7 @@ export class LlmSupersedeResolver {
    * and any existing supersede mark propagates to the repeat.
    */
   async detectAndMark(newEvents: MemoryEvent[], job: ExtractionJob): Promise<number> {
-    const normObj = (ev: MemoryEvent): string | undefined => {
-      const id = ev.objectEntityIds[0]
-      if (id === undefined) return undefined
-      return this.store.getEntity(id)?.canonicalName.trim().toLowerCase()
-    }
+    const normObj = (ev: MemoryEvent): string | undefined => this.objectValue(ev)
     // (subject, predicate) -> { events (newest-value event + predecessors), newEvent }
     const groups = new Map<string, { subjectName: string; predicate: string; predecessors: MemoryEvent[]; newest: MemoryEvent }>()
     for (const event of newEvents) {
@@ -128,8 +197,19 @@ export class LlmSupersedeResolver {
       const entityEvents = allForEntity.slice(0, eventPos === -1 ? undefined : eventPos)
         .filter(old => old.speechAct !== true)
       // 同关系 = 谓词相同 或 掩码文本相似（漂移容忍，见 textSimilar 的 docstring）
-      const predecessors = entityEvents.filter(old =>
+      let predecessors = entityEvents.filter(old =>
         old.predicate === event.predicate || this.textSimilar(old, event))
+      // m18 关系漂移：谓词字面不同但共享内容词的旧事件也算候选
+      //（`contains`/`includes`、`has_test_count`/`has_test_result` 这类，掩码文本
+      // 相似度抓不到；实测生命周期 555 个候选、抽样裁决精度 25%）。**只在精确集
+      // 今天本来就不成立时启用** —— 放宽候选会推高 distinct 值数，让原本
+      // `distinct.size === 2` 的组被 contested 过滤丢掉；那是拿已有的标记能力换
+      // 新覆盖，不是增益。所以精确集一旦成立就沿用它，旧路径逐字节不变。
+      if (!this.contests(predecessors, event)) {
+        const widened = [...new Set([...predecessors,
+          ...entityEvents.filter(old => this.sharesContentToken(old.predicate, event.predicate))])]
+        if (this.contests(widened, event)) predecessors = widened
+      }
       if (newObj !== undefined) {
         const sameValue = predecessors.filter(old => normObj(old) === newObj)
         if (sameValue.length > 0) {
@@ -158,18 +238,20 @@ export class LlmSupersedeResolver {
     // 只有"存在不同值"的组才需要裁决；≥3 个不同值的组几乎必是多值关系
     //（单值关系在一段对话里换三次值很罕见；mini-4 的 author_of 误标教训），
     // 按多值处理且不再花裁决调用。
-    const contested = [...groups.values()].filter(g => {
-      const newestObj = normObj(g.newest)
-      const distinct = new Set([...g.predecessors, g.newest].map(ev => normObj(ev) ?? ev.normalizedText))
-      return distinct.size === 2 && g.predecessors.some(old => normObj(old) !== newestObj)
-    })
+    const contested = [...groups.values()].filter(g => this.contests(g.predecessors, g.newest))
     if (contested.length === 0) return 0
 
     const lines = contested.map((g, i) => {
       const values = [...new Set(
         [...g.predecessors, g.newest].map(ev => normObj(ev) ?? ev.normalizedText),
       )].map(v => `"${v}"`).join(', ')
-      return `${i + 1}. Subject "${g.subjectName}", relation "${g.predicate}" — values over time: ${values}; latest statement: "${g.newest.normalizedText}"`
+      // Spellings are shown only when the group holds more than one, so a group
+      // the exact rule produced renders exactly as it did before m18.
+      const spellings = [...new Set([...g.predecessors, g.newest].map(ev => ev.predicate))]
+      const spelling = spellings.length > 1
+        ? ` (predicate spellings: ${spellings.map(p => `"${p}"`).join(', ')})`
+        : ''
+      return `${i + 1}. Subject "${g.subjectName}", relation "${g.predicate}"${spelling} — values over time: ${values}; latest statement: "${g.newest.normalizedText}"`
     }).join('\n')
     let raw: string
     try {
