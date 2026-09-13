@@ -199,6 +199,36 @@ MemoryAgentBench; see [docs/evaluation.md](docs/evaluation.en.md) for the full a
   entity-merge stage, which this round did not touch). Report and limits:
   [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md).
 
+- **Extraction now feeds recorded predicates back and encodes negation in OBJECT: the
+  default prompt deliberately leaves v0.1 in v0.2.** An assertion and the retraction that
+  follows it occupy one relation slot, but supersede's pairing key is `(subject, predicate)`
+  — `does_not_exist` and `exists` share no literal. The masked-text Jaccard fallback then
+  assumes the predicate carries an object, which a unary predicate plus a polarity flip
+  defeats (measured Jaccard 0.455 against a 0.8 threshold), so the LLM adjudicator was
+  **never called**: the stale fact stayed live, undiscounted in retrieval, and injectable.
+  Four assert-then-correct cases against the live route, two runs, produced a
+  counter-intuitive result: the load-bearing change is **feeding recorded predicates back,
+  not the shape of the convention** — 0/4 without it (a convention alone reaches 2/4),
+  7–8/8 with it. The root cause is that `formatKnownEntities` carries only
+  name/alias/type, so predicates were never fed back and the model could not reuse what it
+  had already written. A reverse predicate stays model-invented even with feedback
+  (`does_not_declare` is reused exactly, but the correction turn writes `does_declare`,
+  not `not_declare`), so a `not_` prefix cannot be enforced; the convention instead puts
+  **polarity in OBJECT**, which the existing `predicate equal && object differs` rule
+  pairs with **no change to the pairing code**. Shipped: `formatRecordedPredicates`
+  collects the predicates of the entities a segment names (deduped, capped at 60) into
+  `{recorded_predicates}`, and a template without that placeholder pays no graph scan.
+  This is the **first deliberate departure of the default prompt from v0.1**:
+  `tests/fixtures/v01-prompts.json` updates only the extraction entry, the other four
+  stages stay pinned byte-for-byte to v0.1, and the departure itself is recorded under the
+  fixture's `deviations` so a later silent edit meets a documented decision.
+  **Not covered yet:** ordinary predicate drift (`contains` vs `includes`,
+  `has_test_count` vs `has_test_result`). A sampled measurement puts relation-merge's
+  candidate cost near zero (92.4% of events add no candidates; median 0, p99 5) at 555
+  lifetime candidates and 25% sampled adjudication precision → roughly 139 true same-slot
+  pairs (+11% over the 1256 already paired), foldable into the existing supersede call
+  without a new stage. This round did not build it.
+
 ## r2 full rerun — 2026-09-11
 
 - Full MemoryAgentBench rerun on the DeepSeek official API after the M11–M17

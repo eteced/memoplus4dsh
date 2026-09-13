@@ -146,6 +146,27 @@ memoplus4dsh 的重要修改归档，按开发里程碑组织。各里程碑的�
   （206 次调用、200+ 条输出里 0 条：E1 在实体合并阶段，本轮没有动它）。报告与局限见
   [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md)。
 
+- **抽取阶段回喂已记录谓词，并把否定编码进 OBJECT：默认 prompt 在 v0.2 有意偏离 v0.1。**
+  断言与其后的撤回落在同一个关系槽上，但 supersede 的候选配对键是 `(主语, 谓词)`——
+  `does_not_exist` 与 `exists` 字面不同；掩码文本 Jaccard 的兜底又依赖"谓词带宾语"，
+  一元谓词加极性翻转正好把它打穿（实测 Jaccard 0.455 < 0.8 阈值），于是 LLM 裁决**一次
+  都没被调用**，旧事实留在图里、检索不打折、照样被注入。四个"先断言、后更正"case 的
+  实测（真实路由、两轮）给出一个反直觉结论：承重的**不是约定的形状，而是回喂已记录
+  谓词**——没有它 0/4（只加约定也只到 2/4），有它 7–8/8。根因是 `formatKnownEntities`
+  只收 name/alias/type，谓词从来不回喂，模型看不到自己写过什么，只能自己造。而反向
+  谓词即使回喂也仍由模型发明（`does_not_declare` 被精确复用后，撤回那轮写的是
+  `does_declare` 而不是 `not_declare`），所以 `not_` 前缀约定不可强制；改用**极性落入
+  OBJECT** 的约定后，现有 `谓词相等 && 宾语不同` 配对逻辑零改动即可命中。落地：
+  `formatRecordedPredicates` 按 segment 提到的实体收集已记录谓词（去重、上限 60），
+  随 `{recorded_predicates}` 传入；模板不含该占位符时不做全图扫描。这是**默认 prompt
+  第一次有意偏离 v0.1**：`tests/fixtures/v01-prompts.json` 只更新 extraction 一项，
+  其余四个阶段仍逐字节钉在 v0.1，偏离本身记录在 fixture 的 `deviations` 里，将来误改
+  会撞上一条有据可查的决定。**已知未覆盖**：通用谓词漂移（`contains` vs `includes`、
+  `has_test_count` vs `has_test_result`）。抽样实测 relation-merge 的候选成本近乎为零
+  （92.4% 的事件零额外候选，中位数 0、p99=5），生命周期 555 个候选、抽样裁决精度 25%
+  → 约 139 对真同槽（相对现有 1256 对 +11%），可并入现有 supersede 那一次调用而不新增
+  阶段；本轮未做。
+
 ## r2 全量重跑 — 2026-09-11
 
 - M11–M17 改进后的全量重跑（DeepSeek 官方 API）：FC-SH 89/78/90/83，

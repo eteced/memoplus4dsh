@@ -66,6 +66,18 @@ Rules:
 - ONLY output facts from this turn.
 - Write NORMALIZED_FACT and DETAILS in the same language as the conversation turn.
 
+Predicates already recorded for the entities above. PREDICATE is a reused identifier, not free prose:
+- When this turn states a relation one of these already names, copy that EXACT string into PREDICATE — same letters, same singular or plural. Do not write "supports" where the record says "support"; do not restate "exist" as "is_in" or "has". Invent a new predicate only when none of them names the relation.
+- Never record one relation under two different predicate strings across turns.
+Recorded predicates: {recorded_predicates}
+
+Negation is carried by OBJECT, never by PREDICATE:
+- Keep PREDICATE positive and identical between a fact and its negation: write "support" for both "supports" and "does not support".
+- When the relation has a target, prefix the target with "not " in OBJECT: OBJECT=image input versus OBJECT=not image input.
+- When the relation has no target (existence, installed, available, supported), put the truth value in OBJECT: OBJECT=true, or OBJECT=false for a negation.
+- Never write does_not_, cannot_, is_not_, has_no, or a Chinese negation (不/没/未/无/非) inside PREDICATE.
+- Record only what is true now. A turn that corrects an earlier statement yields one row stating the current value; never add a row describing what was previously believed.
+
 Conversation turn:
 {turn_text}
 

@@ -151,6 +151,8 @@ node scripts/prompts.mjs export --out /tmp/all.json --include-default
 
 **仓库里随包提供一份调优过的参考 profile**（`profiles/`），而且是**实测**出来的、不是声明的：`profiles/deepseek-v4.1-flash.json` **只按模型名匹配**（`match.model = "deepseek-v4.1-flash*"`，不带 `provider`——同名即同模型，谁提供这条路由都套用），承载四个候选里实测最优的抽取 prompt（收益主要在"中文轮事实句的语言一致性"，报告里明确写了它**没有**改善什么），并固定 `maxTokens: 8192` 与 `reasoningEffort: "off"`。把它拷进 `<dataDir>/prompts/`（或 `scripts/prompts.mjs import`）后重启即可。18 个真实 turn 的冻结语料（`profiles/ab-corpus.jsonl`）、候选、脚手架（`scripts/ab-extraction-prompts.mjs`）、图侧审计（`scripts/audit-literal-entities.mjs`）、全部数字，以及同样重要的——**这次 A/B 没有证明什么**——都写在 [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md)。
 
+**v0.2 起，随包默认抽取 prompt 也有意改了。** 默认 prompt 不再逐字节等于 v0.1：它现在回喂**已记录谓词**，并把否定编码进 `OBJECT` 而不是谓词。理由是断言与撤回否则配不上对 —— 详见 [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md) §8。`tests/fixtures/v01-prompts.json` 只对 extraction 一项放行，其余四个阶段仍钉在 v0.1，偏离本身记在该 fixture 的 `deviations` 里。
+
 ### 让 thinking 真的关掉：在路由上声明 `off`（推荐）
 
 抽取是结构化任务，thinking 会在任何可见正文之前先把输出预算吃光。在 `opencode-go-extra/deepseek-v4.1-flash` 这条路由（`compat.thinkingFormat: deepseek`）上，同一条抽取输入、同样 `max_tokens: 8192` 实测：thinking 开着（`reasoning_effort: low`）两次都是 `finish=length`、可见内容 0 字符、8192/8192 token 全花在思考上；thinking 关掉（`thinking: {type: disabled}`）两次都是 `finish=stop`、可见内容 2399 / 2493 字符、各 37 行、思考 0 token。**思考 token 无法从输出预算里单独排除**——`thinking.budget_tokens`、`thinking_token_budget`、`thinking_budget`、`thinking_budget_tokens` 逐个实测都被该网关忽略，思考照样吃满 `max_tokens`。真正有效的是**把 thinking 整个关掉**，那样思考 token 就是 0。

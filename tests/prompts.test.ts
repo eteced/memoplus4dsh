@@ -23,12 +23,15 @@ import { SUPERSEDE_ADJUDICATION_PROMPT } from '../src/supersede.js'
 import { renderPrompt } from '../src/text.js'
 
 describe('default profile', () => {
-  it('carries the v0.1 prompts byte for byte', () => {
+  it('carries the shipped prompts byte for byte', () => {
     // Comparing the default profile against the exported constants is vacuous:
     // both sides move together, so editing a constant would keep this green while
-    // silently changing behaviour for every deployment. The golden fixture is
-    // extracted from the released v0.1 revision, so it only changes when someone
-    // deliberately decides to change the shipped prompts.
+    // silently changing behaviour for every deployment. The golden fixture holds
+    // the text shipped by the released v0.1 revision, so it only changes when
+    // someone deliberately decides to change the shipped prompts. From v0.2 the
+    // extraction stage deviates on purpose — the fixture records why under
+    // `deviations` — and the other four stages stay pinned to v0.1, so their
+    // protection is intact.
     const golden = JSON.parse(
       readFileSync(new URL('./fixtures/v01-prompts.json', import.meta.url), 'utf8'),
     ) as { prompts: Record<string, { file: string; constant: string; text: string }> }
@@ -37,7 +40,7 @@ describe('default profile', () => {
       expect(expected, `golden fixture is missing stage "${stage}"`).toBeDefined()
       expect(
         DEFAULT_PROFILE.stages?.[stage]?.prompt,
-        `${expected.file} ${expected.constant} drifted from the released v0.1 text`,
+        `${expected.file} ${expected.constant} drifted from the released text without a recorded decision`,
       ).toBe(expected.text)
     }
   })

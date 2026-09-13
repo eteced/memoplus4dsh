@@ -361,3 +361,88 @@ opt-out.
 6. **Human-label a small soft-noise sample** (e.g. 100 output rows marked
    "legitimate subject / illegitimate literal") to promote the metric from a shape
    proxy to one with ground truth; until then entity-name noise cannot be a gate.
+
+## 8. Negation and retraction: the convention's shape is not what carries (2026-09-14)
+
+### 8.1 The symptom
+
+An assertion and the retraction that follows it occupy **one relation slot**, but
+`supersede.ts` pairs candidates by
+`old.predicate === event.predicate || textSimilar(old, event)`:
+
+| | predicate | object |
+|---|---|---|
+| old | `does_not_exist` | (empty, unary) |
+| new | `exists` | entity `true` |
+
+The predicate literals differ, and the `textSimilar` fallback must **mask the object
+first** before comparing text — but a unary predicate has no object, so the negation stays
+in the text. Computed with the plugin's own `wordsOf`: **Jaccard = 0.455 against a 0.8
+threshold**, judged a different relation, and the **LLM adjudicator was never called**.
+The stale fact stayed live with an empty `supersededBy`, undiscounted in retrieval, and
+injectable.
+
+Whole-graph reading (2774 events): **121 negative-shaped events (4.4%)**, UNARY 37 /
+BINARY 84; only **4 slots** ever carry both polarities for the same relation.
+
+### 8.2 Four cases, two runs, live route
+
+Four "assert, then correct" cases (Chinese/English × unary/binary), the second turn
+receiving the entities the first established (the same source production feeds
+`{known_entities}` from):
+
+| Variant | pairs under the existing rule | pairs under a `not_`-aware rule |
+|---|---|---|
+| P0 as-is | 0/4 | 0/4 |
+| P1 `not_` prefix convention | 0/4 | 2/4 |
+| P2 polarity-in-OBJECT convention | 2/4 | 2/4 |
+| P3 = P1 + **predicate feedback** | 0–2/4 | **4/4** |
+| P4 = P2 + **predicate feedback** | **3–4/4** | **3–4/4** |
+| P5 = feedback only, no convention | 0/4 | 0/4 |
+
+**Finding 1: a convention alone does not move it.** The failures are not
+non-compliance but two kinds of drift — **stem drift** (`not_support` → `supports`;
+`declare` → `declares`) and **relation rewrite** (`not_exist` → `is_in` / `has`).
+
+**Finding 2: feeding recorded predicates back is what carries** (0–2/4 → 7–8/8). The root
+cause is that `formatKnownEntities` takes only `canonicalName | aliases | type` —
+**predicates were never fed back**, so the model could not see what it had already
+written and had to invent. With feedback, `does_not_declare` is reused exactly.
+
+**Finding 3: a reverse predicate stays model-invented, so a `not_` prefix cannot be
+enforced.** In P5, with feedback, the correction turn wrote `does_declare`, **not**
+`not_declare`; Chinese behaves the same way. P4 is therefore the only shape that is both
+zero-code and stable — with polarity in OBJECT the existing
+`predicate equal && object differs` rule hits with no change.
+
+### 8.3 What shipped, and the limits
+
+- `formatRecordedPredicates` collects the predicates of the entities a segment names
+  (deduped, capped at 60) into `{recorded_predicates}`; a template without that
+  placeholder pays no graph scan.
+- The convention goes into **both** the default prompt and the shipped profile: the
+  profile is a full override, so changing only one of them misses half the users.
+- This is the first deliberate departure of the default prompt from v0.1;
+  `tests/fixtures/v01-prompts.json` updates only the extraction entry and the other four
+  stages stay pinned byte-for-byte to v0.1.
+- **Sample size**: 4 cases × 2 runs = 8 observations, **indicative, not conclusive**. One
+  run-2 failure was an **extraction-recall** miss (the assertion turn produced no fact row
+  at all), unrelated to the convention.
+
+### 8.4 Not covered: ordinary predicate drift, and what relation-merge would cost
+
+P4 covers only polarity/retraction (4 slots in the whole graph). Ordinary drift
+(`contains` vs `includes`, `has_test_count` vs `has_test_result`) stays uncovered, and
+that is relation-merge's job.
+
+Measured candidate cost (2336 events): **92.4% of events add no extra candidates**; mean
+0.24, median 0, p90 0, p99 5, max 17. Across the graph's life that is **555** candidates
+(same subject + shared stem + missed by the current rule — a **floor**, synonyms are not
+counted); a 24-pair adjudication sample gave **SAME 6 / DIFFERENT 18 → 25% precision**
+→ roughly **139** true same-slot pairs, **+11%** over the 1256 already paired.
+
+Because supersede already makes one batched LLM call per turn, those candidates can be
+**folded into that same call** — no new stage, no extra round trip. **The price is a
+moderate misjudgement risk**: three of four candidates are different relations and only
+the model rejects them, so the prompt has to pin "leave the group untouched when the
+relations differ" (against the mini-4 `author_of` false-mark lesson in §4).
