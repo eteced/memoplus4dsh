@@ -5,7 +5,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-tools'
-import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, LlmFailure, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
@@ -271,10 +271,27 @@ function effectiveRoute(config: Config, route: Route | undefined): Route | undef
     : route
 }
 
+/**
+ * `finish` 的 `error`/`aborted` reason 携带的失败事实（dsh-llm 的 `LlmFailure`），
+ * 已收敛成一行、scrub 过密钥的可打印形式。
+ */
+interface CallFailureEvidence {
+  /** dsh 归一化后的稳定失败码（`LlmFailure.code`）。 */
+  code: string
+  /** Provider/传输层消息（`LlmFailure.message`），压成单行并截断。 */
+  message: string
+}
+
 /** 一次插件模型调用在流上留下的现场信息，用于空内容取证。 */
 interface CallEvidence {
   /** 流里 finish chunk 的 `reason.kind`；整条流没给出 finish 时缺省。 */
   finish?: string
+  /**
+   * `finish=error`（或 `aborted`）时 dsh 归一化后附带的失败详情。它是"端点/
+   * 适配器报错"与"模型返回空"唯一的分水岭：没有它，空内容错误只能笼统说
+   * 模型没产出内容，而真实原因是 provider 侧失败。
+   */
+  failure?: CallFailureEvidence
   /** 收到的 chunk 总数，`text-delta` 之外的类型也计入。 */
   chunks: number
   /** 累积进可见文本的字符数（可能只有空白）。 */
@@ -297,13 +314,53 @@ interface PluginCallOptions {
   log?: (entry: Record<string, unknown>) => void
 }
 
+/** Provider 失败消息里可打印的最长字符数；错误消息与日志都要保持单行可读。 */
+const FAILURE_MESSAGE_MAX = 200
+
+/**
+ * Provider 的失败消息常把 Authorization 头或 query 里的凭据原样带回来（dsh 的
+ * `LlmFailure.message` 就是原样搬运）。错误消息会进 `extraction-pending.jsonl`
+ * 和日志，因此先 scrub 再截断：截断在前会把密钥切成认不出的片段而漏出去
+ * （参考 `dsh-restart-notify.py` 的 scrub 思路：任何要落地的文本先替换密钥原文）。
+ */
+function scrubSecrets(text: string): string {
+  return text
+    // Authorization 头形态：整段凭据跟着方案名走。
+    .replace(/\b(Bearer|Basic|QQBot|Bot)\s+[A-Za-z0-9._~+/=-]{6,}/gi, '$1 ***')
+    // 带前缀的 API key（sk-/ghp_/xoxb-/AKIA…）。
+    .replace(/\b(sk|rk|pk|ghp|gho|ghs|ghr|github_pat|xox[a-z]|AKIA|ASIA|AIza|hf)[-_][A-Za-z0-9_-]{6,}/g, '***')
+    // JWT：三段 base64url。
+    .replace(/\beyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/g, '***')
+    // key=value / "token": "..." 形态的凭据字段。
+    .replace(
+      /\b(api[_-]?key|access[_-]?token|auth[_-]?token|refresh[_-]?token|client[_-]?secret|app[_-]?secret|authorization|password|passwd|secret|token|key)(\s*["']?\s*[=:]\s*["']?)([A-Za-z0-9._~+/=-]{6,})/gi,
+      '$1$2***',
+    )
+    // 兜底：足够长（≥32 位）的裸不透明串按凭据处理。
+    .replace(/\b[A-Za-z0-9+/=_-]{32,}\b/g, '***')
+}
+
+/** 把 dsh 归一化的 `LlmFailure` 收敛成一行现场事实（scrub + 截断）。 */
+function describeCallFailure(failure: LlmFailure): CallFailureEvidence {
+  const code = scrubSecrets(String(failure.code ?? '')).replace(/\s+/g, ' ').trim().slice(0, 80) || 'unknown'
+  // 压单行在 scrub 之前：跨行折断的凭据合并后才能被上面的模式匹配到。
+  const raw = scrubSecrets(String(failure.message ?? '').replace(/\s+/g, ' ').trim())
+  const message = raw.length > FAILURE_MESSAGE_MAX ? `${raw.slice(0, FAILURE_MESSAGE_MAX)}…` : raw
+  return { code, message }
+}
+
 /** 现场信息排成错误消息 / 记录里的一段可读文本。 */
 function formatCallEvidence(evidence: CallEvidence): string {
   const parts = [
     `finish=${evidence.finish ?? 'none'}`,
-    `chunks=${evidence.chunks}`,
-    `chars=${evidence.chars}`,
   ]
+  // 失败详情紧跟 finish：`finish=error` 时它就是"provider/适配器报错"的证词，
+  // 让这条错误一眼区别于"模型返回空"。
+  if (evidence.failure !== undefined) {
+    const detail = evidence.failure.message.length > 0 ? `${evidence.failure.code}: ${evidence.failure.message}` : evidence.failure.code
+    parts.push(`failure=${detail}`)
+  }
+  parts.push(`chunks=${evidence.chunks}`, `chars=${evidence.chars}`)
   // dsh 的 StreamChunk 确实有 usage chunk（TokenUsage）——有就带上：思考打满
   // 预算却零可见输出时，outputTokens/reasoningTokens 是唯一能证实的数字。
   if (evidence.usage !== undefined) {
@@ -335,6 +392,7 @@ async function callPluginLlm(
   const texts = new Map<number, string>()
   let chunks = 0
   let finish: string | undefined
+  let failure: CallFailureEvidence | undefined
   let usage: TokenUsage | undefined
   const stream = ctx.llm.stream({
     provider: resolved.provider,
@@ -364,6 +422,10 @@ async function callPluginLlm(
       // 适配器把 finish 作为终止 chunk 发出（dsh-llm 的 StreamChunk 契约），
       // 它同时也是"流正常走完"的唯一标记，是空内容最硬的现场证据。
       finish = chunk.reason.kind
+      // dsh 把适配器抛出的失败归一化成终止的 `error`（客户端超时/中止则是
+      // `aborted`），两者都按 FinishReasonMap 携带 `LlmFailure`。失败详情是
+      // 端点错误唯一的证词，必须取出来，不能只记一个 finish=error。
+      if ('failure' in chunk.reason) failure = describeCallFailure(chunk.reason.failure)
     } else if (chunk.type === 'usage') {
       usage = chunk.usage
     }
@@ -372,6 +434,7 @@ async function callPluginLlm(
   if (text.trim().length === 0 && options.emptyMessage !== undefined) {
     const evidence: CallEvidence = {
       ...(finish === undefined ? {} : { finish }),
+      ...(failure === undefined ? {} : { failure }),
       chunks,
       chars: text.length,
       ...(usage === undefined ? {} : { usage }),
@@ -387,6 +450,8 @@ async function callPluginLlm(
         ...evidence,
       })
     }
+    // 失败路径无条件带上现场：`failure=` 就是在措辞上把"端点/适配器报错"与
+    // "模型确实没产出内容"区分开的标志，debug 关闭时它是唯一证据。
     throw new Error(`${options.emptyMessage} (${formatCallEvidence(evidence)})`)
   }
   return text

@@ -504,4 +504,98 @@ describe('empty-content evidence', () => {
       'extraction produced empty content (finish=max-tokens, chunks=2, chars=0, outputTokens=8192, reasoningTokens=8100)',
     )
   })
+
+  /**
+   * 端点/适配器把流以 error 结束：dsh 的 `LlmRuntime.stream()` 把这个失败归一化
+   * 成终止的 `{kind:'error', failure}` finish（types.ts FinishReasonMap），failure
+   * 的 code/message 是"provider 报错"唯一稳定的证词，插件必须读出来。
+   */
+  async function* erroredEndpoint(): AsyncGenerator<StreamChunk> {
+    yield { type: 'finish', reason: { kind: 'error', failure: { code: 'upstream_error', message: 'HTTP 502 from endpoint' } } }
+  }
+
+  /** 客户端超时被 dsh 归一化成 aborted finish，同样携带 failure。 */
+  async function* abortedEndpoint(): AsyncGenerator<StreamChunk> {
+    yield { type: 'finish', reason: { kind: 'aborted', failure: { code: 'timeout', message: 'call deadline exceeded' } } }
+  }
+
+  it('names the provider failure in the error even with debug off', async () => {
+    const h = boot({ extractionMaxRetries: 0 }, erroredEndpoint)
+    emitTurnEnd(h)
+    await h.drain()
+    // 默认 debug=false：没有现场记录，错误消息是唯一出口，也必须带上 failure。
+    expect(debugLines().some(entry => entry['kind'] === 'llm-empty')).toBe(false)
+    const failed = debugLines().find(entry => entry['kind'] === 'failed')
+    expect(failed?.['error']).toBe(
+      'extraction produced empty content (finish=error, failure=upstream_error: HTTP 502 from endpoint, chunks=1, chars=0)',
+    )
+    // 措辞上必须看得出来是端点/适配器报错，而不是笼统的"模型没产出内容"。
+    expect(failed?.['error']).toContain('failure=upstream_error')
+  })
+
+  it('reports an aborted call as a failure too, not as an empty model response', async () => {
+    const h = boot({ extractionMaxRetries: 0 }, abortedEndpoint)
+    emitTurnEnd(h)
+    await h.drain()
+    const failed = debugLines().find(entry => entry['kind'] === 'failed')
+    expect(failed?.['error']).toBe(
+      'extraction produced empty content (finish=aborted, failure=timeout: call deadline exceeded, chunks=1, chars=0)',
+    )
+  })
+
+  const leakedKey = 'sk-live-abcdef1234567890abcdef'
+  const leakedOauth = 'ghp_0123456789abcdefghij'
+  const leakedJwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c'
+  const leakedQueryToken = 'tok_z9y8x7w6v5u4'
+
+  /**
+   * Provider 的 message 原样回显请求细节：长、含换行，还把 Authorization 头、
+   * query key、JSON body 和 JWT 里的凭据带了回来。错误消息和日志都不许出现原文。
+   */
+  async function* leakingEndpoint(): AsyncGenerator<StreamChunk> {
+    yield {
+      type: 'finish',
+      reason: {
+        kind: 'error',
+        failure: {
+          code: 'unauthorized',
+          message: `Authorization: Bearer ${leakedKey}\napi_key=${leakedKey}\n`
+            + `{"access_token":"${leakedQueryToken}"}\nx-oauth: ${leakedOauth}\n`
+            + `${leakedJwt}\n${'the upstream endpoint refused this request. '.repeat(20)}`,
+        },
+      },
+    }
+  }
+
+  it('scrubs credentials, collapses lines, and truncates a long provider message', async () => {
+    const h = boot({ debug: true, extractionMaxRetries: 0 }, leakingEndpoint)
+    emitTurnEnd(h)
+    await h.drain()
+    const failed = debugLines().find(entry => entry['kind'] === 'failed')
+    const message = String(failed?.['error'])
+    expect(message).toContain('finish=error')
+    expect(message).toContain('failure=unauthorized')
+    // 密钥原文（Authorization / query / JSON body / OAuth / JWT）一处都不许出现。
+    for (const secret of [leakedKey, leakedQueryToken, leakedOauth, leakedJwt]) {
+      expect(message).not.toContain(secret)
+    }
+    expect(message).not.toContain('sk-live')
+    expect(message).not.toContain('ghp_')
+    expect(message).not.toContain('eyJ')
+    expect(message).toContain('***')
+    // 压成单行 + 截断到约 200 字。
+    expect(message).not.toContain('\n')
+    expect(message).toContain('…')
+    expect(message.length).toBeLessThan(400)
+    // debug 打开时同一条失败详情并进 llm-empty 记录，且同样已被 scrub。
+    const empty = debugLines().find(entry => entry['kind'] === 'llm-empty')
+    expect(empty?.['finish']).toBe('error')
+    expect(empty?.['failure']).toMatchObject({ code: 'unauthorized' })
+    const emptyJson = JSON.stringify(empty)
+    expect(emptyJson).not.toContain(leakedKey)
+    expect(emptyJson).not.toContain(leakedOauth)
+    expect(emptyJson).not.toContain(leakedJwt)
+    expect(emptyJson).not.toContain(leakedQueryToken)
+    expect(String((empty?.['failure'] as { message?: string }).message)).toContain('***')
+  })
 })
