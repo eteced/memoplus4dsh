@@ -580,16 +580,38 @@ export class ExtractionQueue {
   }
 }
 
+/** Abandoned records kept across compaction; oldest loss evidence is dropped first. */
+const ABANDONED_KEPT = 100
+
+/** One outstanding job plus the failure history the log holds for it. */
+export interface OutstandingJob {
+  /** The job to retry; absent when the log kept failures for a compacted-away enqueue. */
+  job?: ExtractionJob
+  sessionId: string
+  turn: number
+  /** Failure rounds survived so far; one round exhausts `extractionMaxRetries`. */
+  failures: number
+  lastError?: string
+  lastAt?: string
+}
+
 /**
- * Durable pending-job log (m8 P2): one JSONL line per enqueue and one
- * settle tombstone per terminal outcome (success or skip). On restart,
- * jobs without a tombstone were interrupted mid-flight and are requeued —
- * a crashed process no longer silently loses a turn's memories.
+ * Durable job log (m8 P2): one JSONL line per enqueue, one per exhausted
+ * retry round, and one terminal tombstone — `settled` for success,
+ * `abandoned` for a turn whose memories were given up on. On restart, jobs
+ * with neither terminal tombstone were interrupted mid-flight or failed
+ * their retries, and are requeued: a crashed process and a failing endpoint
+ * both stop silently losing a turn's memories.
  *
- * The settle tombstone is written synchronously right after the job's
- * terminal callback; the crash window between the store writes inside
- * `extractTurn` and the tombstone is tiny, and a duplicate re-extraction
- * only costs one LLM call plus duplicate rows, never corruption.
+ * A failed round is recorded rather than tombstoned so the job stays
+ * outstanding — retried on the next enqueue and on the next start — until
+ * {@link outstanding} reports the failure cap reached. `abandoned` is the
+ * only record that admits a turn's memories will never be written.
+ *
+ * Terminal records are written synchronously right after the job's terminal
+ * callback; the crash window between the store writes inside `extractTurn`
+ * and the tombstone is tiny, and a duplicate re-extraction only costs one
+ * LLM call plus duplicate rows, never corruption.
  *
  * All I/O is best-effort: persistence must never break extraction.
  */
@@ -597,41 +619,133 @@ export class PendingJobLog {
   constructor(private readonly filePath: string) {}
 
   /**
-   * Enqueued jobs without a settle tombstone — the outstanding backlog.
+   * Outstanding jobs — the backlog, failed-but-retryable rounds included.
    * Read-only, so a live process can report queue health without consuming
    * the log the way {@link loadPending} does.
    *
    * @returns Number of jobs still awaiting a terminal outcome.
    */
   countUnsettled(): number {
-    return this.readUnsettled().size
+    return this.readOutstanding().size
   }
 
-  /** Jobs enqueued but never settled; truncates the file for a fresh start. */
-  loadPending(): ExtractionJob[] {
-    const pending = this.readUnsettled()
+  /**
+   * Outstanding jobs with their failure history, in first-enqueue order.
+   * @returns One entry per job that has neither settled nor been abandoned.
+   */
+  outstanding(): OutstandingJob[] {
+    return [...this.readOutstanding().values()]
+  }
+
+  /**
+   * Failure rounds already survived by one turn.
+   * @param sessionId - Owning session.
+   * @param turn - Turn number within that session.
+   * @returns Completed failure rounds; 0 when the turn is not in the log.
+   */
+  failuresOf(sessionId: string, turn: number): number {
+    return this.readOutstanding().get(`${sessionId}:${turn}`)?.failures ?? 0
+  }
+
+  /**
+   * Turns recorded as abandoned — their memories are not in the graph.
+   * @returns Count of terminal `abandoned` records.
+   */
+  abandonedCount(): number {
+    if (!existsSync(this.filePath)) return 0
+    let abandoned = 0
     try {
-      writeFileSync(this.filePath, '', 'utf8')
+      for (const line of readFileSync(this.filePath, 'utf8').split('\n')) {
+        if (line.trim().length === 0) continue
+        try {
+          if ((JSON.parse(line) as { kind?: string }).kind === 'abandoned') abandoned++
+        } catch {
+          // Skip corrupt lines; a half-written tail line is expected after a crash.
+        }
+      }
+    } catch {
+      return 0
+    }
+    return abandoned
+  }
+
+  /** Jobs enqueued but never settled; compacts the file for a fresh start. */
+  loadPending(): ExtractionJob[] {
+    const pending = this.readOutstanding()
+    try {
+      writeFileSync(this.filePath, this.abandonedLines().join(''), 'utf8')
     } catch {
       // Truncation failure only means the next restart re-reads old lines.
     }
-    return [...pending.values()]
+    return [...pending.values()].flatMap(entry => entry.job === undefined ? [] : [entry.job])
   }
 
-  /** Replay the log into the set of jobs that never settled. */
-  private readUnsettled(): Map<string, ExtractionJob> {
+  /**
+   * Raw `abandoned` lines, newest {@link ABANDONED_KEPT} kept. These are the
+   * only record that a turn's memories will never be written, so compaction
+   * keeps them while recovering the jobs the caller re-records.
+   *
+   * @returns One JSONL line per retained abandoned record.
+   */
+  private abandonedLines(): string[] {
+    if (!existsSync(this.filePath)) return []
+    const kept: string[] = []
+    try {
+      for (const line of readFileSync(this.filePath, 'utf8').split('\n')) {
+        if (line.trim().length === 0) continue
+        try {
+          if ((JSON.parse(line) as { kind?: string }).kind === 'abandoned') kept.push(`${line}\n`)
+        } catch {
+          // Skip corrupt lines; a half-written tail line is expected after a crash.
+        }
+      }
+    } catch {
+      return []
+    }
+    return kept.slice(-ABANDONED_KEPT)
+  }
+
+  /** Replay the log into the outstanding jobs that never reached a terminal outcome. */
+  private readOutstanding(): Map<string, OutstandingJob> {
     if (!existsSync(this.filePath)) return new Map()
-    const pending = new Map<string, ExtractionJob>()
+    const outstanding = new Map<string, OutstandingJob>()
     try {
       for (const line of readFileSync(this.filePath, 'utf8').split('\n')) {
         if (line.trim().length === 0) continue
         try {
           const entry = JSON.parse(line) as
-            | { kind: 'pending'; job: ExtractionJob }
+            | { kind: 'pending'; job: ExtractionJob; failures?: number; lastError?: string; lastAt?: string }
+            | { kind: 'failed'; sessionId: string; turn: number; error?: string; at?: string; failures?: number }
             | { kind: 'settled'; sessionId: string; turn: number }
-          const key = entry.kind === 'pending' ? `${entry.job.sessionId}:${entry.job.turn}` : `${entry.sessionId}:${entry.turn}`
-          if (entry.kind === 'pending') pending.set(key, entry.job)
-          else pending.delete(key)
+            | { kind: 'abandoned'; sessionId: string; turn: number }
+          if (entry.kind === 'pending') {
+            const key = `${entry.job.sessionId}:${entry.job.turn}`
+            const prior = outstanding.get(key)
+            // A requeue carries the failure count and last failure forward, so a
+            // retried turn keeps reporting why it is being retried.
+            const lastError = entry.lastError ?? prior?.lastError
+            const lastAt = entry.lastAt ?? prior?.lastAt
+            outstanding.set(key, {
+              job: entry.job, sessionId: entry.job.sessionId, turn: entry.job.turn,
+              failures: entry.failures ?? prior?.failures ?? 0,
+              ...(lastError === undefined ? {} : { lastError }),
+              ...(lastAt === undefined ? {} : { lastAt }),
+            })
+            continue
+          }
+          const key = `${entry.sessionId}:${entry.turn}`
+          if (entry.kind === 'failed') {
+            const prior = outstanding.get(key)
+            const failures = entry.failures ?? (prior?.failures ?? 0) + 1
+            outstanding.set(key, {
+              ...(prior?.job === undefined ? {} : { job: prior.job }),
+              sessionId: entry.sessionId, turn: entry.turn, failures,
+              ...(entry.error === undefined ? {} : { lastError: entry.error }),
+              ...(entry.at === undefined ? {} : { lastAt: entry.at }),
+            })
+            continue
+          }
+          outstanding.delete(key)
         } catch {
           // Skip corrupt lines; a half-written tail line is expected after a crash.
         }
@@ -639,15 +753,45 @@ export class PendingJobLog {
     } catch {
       return new Map()
     }
-    return pending
+    return outstanding
   }
 
-  /** Append one enqueue record. */
-  recordEnqueue(job: ExtractionJob): void {
-    this.append({ kind: 'pending', job })
+  /**
+   * Append one enqueue record.
+   * @param job - Job being queued.
+   * @param carry - Failure history to keep for a requeued job, so the reason it
+   * is being retried survives the truncation a requeue follows.
+   */
+  recordEnqueue(job: ExtractionJob, carry: { failures?: number; lastError?: string; lastAt?: string } = {}): void {
+    this.append({ kind: 'pending', job, failures: carry.failures ?? 0, ...(carry.lastError === undefined ? {} : { lastError: carry.lastError }), ...(carry.lastAt === undefined ? {} : { lastAt: carry.lastAt }) })
   }
 
-  /** Append one settle tombstone (success or skip — both are terminal). */
+  /**
+   * Append one failed-round record; the job stays outstanding and retryable.
+   * @param job - Job whose retries were exhausted.
+   * @param error - Last failure message.
+   * @param failures - Completed failure rounds, this one included.
+   */
+  recordFailed(job: ExtractionJob, error: unknown, failures: number): void {
+    this.append({
+      kind: 'failed', sessionId: job.sessionId, turn: job.turn, failures,
+      error: error instanceof Error ? error.message : String(error),
+      at: new Date().toISOString(),
+    })
+  }
+
+  /**
+   * Append the terminal record for a turn whose memories will not be written.
+   * @param sessionId - Owning session.
+   * @param turn - Turn number within that session.
+   * @param error - Last failure message.
+   * @param failures - Completed failure rounds when the cap was reached.
+   */
+  recordAbandoned(sessionId: string, turn: number, error: string, failures: number): void {
+    this.append({ kind: 'abandoned', sessionId, turn, error, failures, at: new Date().toISOString() })
+  }
+
+  /** Append one settle tombstone (success is terminal). */
   recordSettled(sessionId: string, turn: number): void {
     this.append({ kind: 'settled', sessionId, turn })
   }

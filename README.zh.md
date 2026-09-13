@@ -114,7 +114,8 @@ scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 | `extractionProvider` / `extractionModel` | 会话自身路由 | 覆盖 extraction/expansion 调用使用的模型路由 |
 | `extractionMaxTokens` | `8192` | extraction 调用的输出上限（reasoning 模型需要这个余量）；等价于 `prompts.extraction.maxTokens` |
 | `extractionCallTimeoutMs` | `120000` | 单次调用超时；卡住的端点会快速失败并进入重试队列。等价于 `prompts.extraction.timeoutMs` |
-| `extractionMaxRetries` | `2` | 首次尝试之后的重试次数；超过后该 turn 被跳过并记录日志 |
+| `extractionMaxRetries` | `2` | 首次尝试之后的重试次数；用尽后进入失败轮次，该 turn 仍会保留并重抽 |
+| `extractionMaxFailureRounds` | `3` | 失败轮次上限（一轮 = 用尽一次 `extractionMaxRetries`）。未达上限的 turn 会在下一轮对话和下次启动时重抽；达上限后记入 `abandoned`，并由 `memory_status` / doctor 报告该 turn 的记忆未写入 |
 | `extractionConcurrency` | `1` | 抽取 worker 池大小；`1` 为严格串行。仅当端点能承受并发抽取调用时才调高 |
 | `snapshotThreshold` | `1000` | 两次快照压缩之间的 journal 操作数 |
 | `promptProfiles` | （无） | 具名 prompt profile，按声明顺序与**该次调用实际使用的模型**匹配。每项形如 `{ name, match: { provider?, model? }, stages: { <阶段>: { prompt, maxTokens?, timeoutMs?, reasoningEffort? } } }`，`*` 为通配。内置 `default` profile 承载 v0.1 的原始 prompt，始终兜底 |

@@ -575,3 +575,81 @@ describe('ExtractionQueue concurrency', () => {
     expect(skipped).toEqual([2])
   })
 })
+
+describe('exhausted retries stay retryable (no silent turn loss)', () => {
+  let dir: string
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'memoplus4dsh-failed-'))
+  })
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+  const path = (): string => join(dir, 'extraction-pending.jsonl')
+
+  it('keeps a failed round outstanding instead of tombstoning the turn', () => {
+    const log = new PendingJobLog(path())
+    log.recordEnqueue(makeJob({ turn: 4 }))
+    log.recordFailed(makeJob({ turn: 4 }), new Error('extraction produced empty content'), 1)
+    const revived = new PendingJobLog(path())
+    // Still outstanding: the backlog reports it, and a restart retries it.
+    expect(revived.countUnsettled()).toBe(1)
+    expect(revived.failuresOf('session-1', 4)).toBe(1)
+    const [entry] = revived.outstanding()
+    expect(entry?.lastError).toBe('extraction produced empty content')
+    expect(entry?.lastAt).toBeDefined()
+    // Read the history before loadPending(), which truncates for the fresh start.
+    expect(revived.loadPending().map(j => j.turn)).toEqual([4])
+  })
+
+  it('clears the failure when the retry succeeds', () => {
+    const log = new PendingJobLog(path())
+    log.recordEnqueue(makeJob({ turn: 5 }))
+    log.recordFailed(makeJob({ turn: 5 }), new Error('boom'), 1)
+    log.recordSettled('session-1', 5)
+    const revived = new PendingJobLog(path())
+    expect(revived.countUnsettled()).toBe(0)
+    expect(revived.outstanding()).toEqual([])
+    expect(revived.loadPending()).toEqual([])
+  })
+
+  it('carries the failure count across a requeue, so the cap is real', () => {
+    const log = new PendingJobLog(path())
+    log.recordEnqueue(makeJob({ turn: 6 }), { failures: 2 })
+    expect(new PendingJobLog(path()).failuresOf('session-1', 6)).toBe(2)
+    // A plain enqueue (fresh turn) starts a new count.
+    log.recordEnqueue(makeJob({ turn: 7 }))
+    expect(new PendingJobLog(path()).failuresOf('session-1', 7)).toBe(0)
+  })
+
+  it('records an abandoned turn as terminal and countable', () => {
+    const log = new PendingJobLog(path())
+    log.recordEnqueue(makeJob({ turn: 8 }))
+    log.recordFailed(makeJob({ turn: 8 }), new Error('boom'), 1)
+    log.recordAbandoned('session-1', 8, 'boom', 3)
+    const revived = new PendingJobLog(path())
+    expect(revived.countUnsettled()).toBe(0)
+    expect(revived.abandonedCount()).toBe(1)
+    expect(revived.loadPending()).toEqual([])
+  })
+
+  it('counts only terminal records as abandoned', () => {
+    const log = new PendingJobLog(path())
+    log.recordEnqueue(makeJob({ turn: 9 }))
+    log.recordFailed(makeJob({ turn: 9 }), new Error('boom'), 1)
+    expect(new PendingJobLog(path()).abandonedCount()).toBe(0)
+  })
+
+  it('carries the failure reason across a requeue that truncates the log', () => {
+    const log = new PendingJobLog(path())
+    log.recordEnqueue(makeJob({ turn: 10 }))
+    log.recordFailed(makeJob({ turn: 10 }), new Error('extraction produced empty content'), 1)
+    const [before] = new PendingJobLog(path()).outstanding()
+    // Requeue exactly as start-up does: read the history, truncate, re-record.
+    new PendingJobLog(path()).loadPending()
+    log.recordEnqueue(makeJob({ turn: 10 }), { failures: before?.failures, lastError: before?.lastError, lastAt: before?.lastAt })
+    const [after] = new PendingJobLog(path()).outstanding()
+    expect(after?.failures).toBe(1)
+    expect(after?.lastError).toBe('extraction produced empty content')
+    expect(after?.lastAt).toBeDefined()
+  })
+})

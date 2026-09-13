@@ -158,7 +158,8 @@ A profile prompt must keep its stage's input placeholder — `{turn_text}` for e
 | `extractionProvider` / `extractionModel` | session's own route | Override the model route used for extraction/expansion calls |
 | `extractionMaxTokens` | `8192` | Output cap for extraction calls (reasoning models need the headroom) |
 | `extractionCallTimeoutMs` | `120000` | Per-call timeout; a stalled endpoint fails fast into the retry queue |
-| `extractionMaxRetries` | `2` | Retries after the first attempt; the turn is then skipped and logged |
+| `extractionMaxRetries` | `2` | Retries after the first attempt; exhausting them starts a failure round and the turn is kept for retry |
+| `extractionMaxFailureRounds` | `3` | Failure rounds before a turn is abandoned (one round exhausts `extractionMaxRetries`). Below the cap the turn is retried on the next turn and on the next start; at the cap it is recorded as `abandoned` and reported by `memory_status` / doctor as memories not written |
 | `extractionConcurrency` | `1` | Extraction worker pool size; `1` is strict serial. Raise only when the endpoint tolerates overlapping extraction calls |
 | `snapshotThreshold` | `1000` | Journal ops between snapshot compactions |
 

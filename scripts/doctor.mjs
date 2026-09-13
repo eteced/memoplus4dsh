@@ -66,6 +66,7 @@ const DEFAULTS = {
   extractionMaxTokens: 8192,
   extractionCallTimeoutMs: 120000,
   extractionMaxRetries: 2,
+  extractionMaxFailureRounds: 3,
   extractionConcurrency: 1,
   snapshotThreshold: 1000,
 }
@@ -117,9 +118,11 @@ function countLines(file) {
   }
 }
 
-// Settle tombstones stay in extraction-pending.jsonl, so the backlog is the
-// number of `pending` records without a matching `settled` record — not the
-// line count, which stays >= 2 forever on a perfectly healthy queue.
+// Terminal records (`settled` for success, `abandoned` for a given-up turn)
+// clear a job; a `failed` round keeps it outstanding because the plugin retries
+// it on the next turn and on the next start. The backlog is therefore the number
+// of jobs without a terminal record — not the line count, which stays >= 2
+// forever on a perfectly healthy queue.
 function countUnsettledJobs(file) {
   let text
   try {
@@ -136,12 +139,33 @@ function countUnsettledJobs(file) {
         ? `${entry.job.sessionId}:${entry.job.turn}`
         : `${entry.sessionId}:${entry.turn}`
       if (entry.kind === 'pending') open.add(key)
-      else open.delete(key)
+      else if (entry.kind === 'settled' || entry.kind === 'abandoned') open.delete(key)
     } catch {
       // Half-written tail line after a crash — ignore.
     }
   }
   return open.size
+}
+
+// Turns whose extraction gave up after the failure-round cap: their memories
+// are not in the graph, and no retry will add them.
+function countAbandonedJobs(file) {
+  let text
+  try {
+    text = readFileSync(file, 'utf8')
+  } catch {
+    return 0
+  }
+  let abandoned = 0
+  for (const line of text.split('\n')) {
+    if (line.trim().length === 0) continue
+    try {
+      if (JSON.parse(line).kind === 'abandoned') abandoned++
+    } catch {
+      // Half-written tail line after a crash — ignore.
+    }
+  }
+  return abandoned
 }
 
 console.log(`memoplus4dsh doctor — profile '${PROFILE}' @ ${DSH_HOME}\n`)
@@ -251,8 +275,10 @@ if (existsSync(graph)) {
 }
 const pending = join(DATA_DIR, 'extraction-pending.jsonl')
 const pn = countUnsettledJobs(pending)
-if (pn > 0) console.log(warn(`抽取队列积压 ${pn} 条（dsh 运行后会自动补抽；持续增长说明抽取调用在失败）`))
+if (pn > 0) console.log(warn(`抽取队列积压 ${pn} 条（会在下一轮对话和下次启动时重抽；持续增长说明抽取调用在失败）`))
 else console.log(ok('抽取队列无积压'))
+const abandonedJobs = countAbandonedJobs(pending)
+if (abandonedJobs > 0) console.log(bad(`已放弃抽取 ${abandonedJobs} 个 turn（失败轮次达上限）——这些 turn 的记忆没有写入图`))
 const debug = join(DATA_DIR, 'extraction-debug.jsonl')
 if (existsSync(debug)) {
   const lines = readFileSync(debug, 'utf8').trim().split('\n').filter(Boolean)

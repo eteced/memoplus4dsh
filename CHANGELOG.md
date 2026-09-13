@@ -43,6 +43,14 @@ MemoryAgentBench; see [docs/evaluation.md](docs/evaluation.en.md) for the full a
   in hand, the profile each stage resolved to, and the live embedding model and
   dimension; profile selection and switches are written to
   `extraction-debug.jsonl`.
+- **Fixed: an extraction failure no longer drops a turn's memories silently.** A
+  turn whose retries were exhausted used to get a `settled` tombstone — terminal,
+  never retried, and visible nowhere but a log line. It now records a `failed`
+  round, stays outstanding, and is retried on the next turn and on the next start
+  until `extractionMaxFailureRounds` (default 3) rounds; only a real give-up
+  writes `abandoned`, which `memory_status` and doctor report as turns whose
+  memories are not in the graph. Compaction keeps `abandoned` records (newest
+  100), so the evidence of a loss survives restarts.
 
 ## r2 full rerun — 2026-09-11
 

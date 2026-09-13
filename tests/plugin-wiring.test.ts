@@ -8,7 +8,7 @@
  * These tests never call a model: they read the `memory_status` report and the
  * debug log, which is where the resolved configuration becomes observable.
  */
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -277,5 +277,23 @@ describe('apply() refuses a configuration that would call the model wrongly', ()
     const h = boot({ extraction: 'off' })
     expect(h.tools.size).toBe(4)
     expect(await status(h)).toContain('extraction = "off"')
+  })
+})
+
+describe('extraction failure visibility', () => {
+  it('reports turns still awaiting retry and turns whose memories were abandoned', async () => {
+    // Start-up requeues the failed turn (its history survives the requeue); the
+    // abandoned record stays as terminal evidence that memories were not written.
+    writeFileSync(join(dir, 'extraction-pending.jsonl'), [
+      JSON.stringify({ kind: 'pending', job: { sessionId: 's', turn: 3, turnText: 'User: x', mentionTime: '2026-09-13T00:00:00.000Z' } }),
+      JSON.stringify({ kind: 'failed', sessionId: 's', turn: 3, error: 'extraction produced empty content', at: '2026-09-13T00:00:01.000Z', failures: 1 }),
+      JSON.stringify({ kind: 'pending', job: { sessionId: 's', turn: 4, turnText: 'User: y', mentionTime: '2026-09-13T00:00:00.000Z' } }),
+      JSON.stringify({ kind: 'abandoned', sessionId: 's', turn: 4, error: 'boom', at: '2026-09-13T00:00:02.000Z', failures: 3 }),
+      '',
+    ].join('\n'), 'utf8')
+    // No retries: the requeued job must not leave timers running past the test.
+    const report = await status(boot({ extractionMaxRetries: 0 }))
+    expect(report).toContain('extraction failures awaiting retry: 1')
+    expect(report).toContain('ABANDONED extraction: 1 turn(s)')
   })
 })

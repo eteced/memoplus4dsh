@@ -11,7 +11,7 @@ import type {} from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { MemoryStore } from './store.js'
 import { ExtractionPipeline, ExtractionQueue, PendingJobLog } from './extraction.js'
-import type { ExtractionJob } from './extraction.js'
+import type { ExtractionJob, OutstandingJob } from './extraction.js'
 import { LlmEntityMerger } from './entity-merge.js'
 import { LlmSupersedeResolver } from './supersede.js'
 import { createNerDetector, NULL_NER } from './ner.js'
@@ -27,6 +27,12 @@ import { registerMemoryTools } from './tools.js'
 
 export const name = 'memoplus4dsh'
 
+/** Failure rounds before a turn's extraction is abandoned; see `extractionMaxFailureRounds`. */
+const DEFAULT_MAX_FAILURE_ROUNDS = 3
+
+/** Minimum gap between in-run retry passes over outstanding extraction failures. */
+const RETRY_PASS_COOLDOWN_MS = 10 * 60 * 1000
+
 export interface Config {
   /** When to run extraction: after every completed turn, or never. */
   extraction: 'turn_end' | 'off'
@@ -40,6 +46,13 @@ export interface Config {
   extractionModel?: string
   /** Retries after the first extraction attempt before a turn is skipped. */
   extractionMaxRetries?: number
+  /**
+   * Failure rounds before a turn's extraction is given up on (default 3).
+   * One round exhausts `extractionMaxRetries`; a failed turn stays outstanding
+   * and is retried on the next turn and on the next start until this cap, then
+   * recorded as abandoned — the only outcome that reports memories as lost.
+   */
+  extractionMaxFailureRounds?: number
   /**
    * Extraction worker pool size (default 1 = strict serial). >1 overlaps
    * extraction LLM calls — the main lever against write-heavy ingest wall
@@ -465,8 +478,40 @@ export function apply(ctx: Context, config: Config) {
             onLog: debugLog,
           }),
       })
-      // Durable pending log: interrupted jobs are requeued on restart (m8 P2).
+      // Durable job log: interrupted jobs, and jobs whose retry rounds failed,
+      // are requeued on restart (m8 P2).
       const pendingLog = new PendingJobLog(join(dataDir, 'extraction-pending.jsonl'))
+      const maxFailureRounds = Math.max(1, config.extractionMaxFailureRounds ?? DEFAULT_MAX_FAILURE_ROUNDS)
+      /**
+       * Requeue every outstanding job that still has failure rounds left, and
+       * record the terminal `abandoned` outcome for those that do not. Runs at
+       * start and on later turns, so an endpoint failing for a few minutes
+       * costs a delayed extraction rather than a lost turn.
+       */
+      const retryOutstanding = (entries: readonly OutstandingJob[], trigger: 'startup' | 'turn'): void => {
+        for (const entry of entries) {
+          const job = entry.job
+          if (job === undefined) continue
+          if (entry.failures >= maxFailureRounds) {
+            pendingLog.recordAbandoned(entry.sessionId, entry.turn, entry.lastError ?? 'retries exhausted', entry.failures)
+            logger.warn(
+              `extraction abandoned for session ${entry.sessionId} turn ${entry.turn} after ${entry.failures} failure rounds: ${entry.lastError ?? 'unknown error'}`
+              + ' — this turn\'s memories were not written',
+            )
+            continue
+          }
+          debugLog({ kind: 'requeue', session: job.sessionId, turn: job.turn, failures: entry.failures, trigger })
+          // Record only what the queue accepted: a job that settled while this
+          // pass ran must not be resurrected by a late pending line.
+          if (queue!.enqueue(job)) {
+            pendingLog.recordEnqueue(job, {
+              failures: entry.failures,
+              ...(entry.lastError === undefined ? {} : { lastError: entry.lastError }),
+              ...(entry.lastAt === undefined ? {} : { lastAt: entry.lastAt }),
+            })
+          }
+        }
+      }
       queue = new ExtractionQueue(job => pipeline.extractTurn(job).then(result => {
         pendingLog.recordSettled(job.sessionId, job.turn)
         debugLog({ kind: 'extracted', session: job.sessionId, turn: job.turn, ...result })
@@ -478,22 +523,30 @@ export function apply(ctx: Context, config: Config) {
           error: error instanceof Error ? error.message : String(error),
         }),
         onSkip: (job, error) => {
-          pendingLog.recordSettled(job.sessionId, job.turn)
-          debugLog({
-            kind: 'skipped', session: job.sessionId, turn: job.turn,
-            error: error instanceof Error ? error.message : String(error),
-          })
+          const message = error instanceof Error ? error.message : String(error)
+          const failures = pendingLog.failuresOf(job.sessionId, job.turn) + 1
+          if (failures >= maxFailureRounds) {
+            pendingLog.recordAbandoned(job.sessionId, job.turn, message, failures)
+            debugLog({ kind: 'abandoned', session: job.sessionId, turn: job.turn, failures, error: message })
+            logger.warn(
+              `extraction abandoned for session ${job.sessionId} turn ${job.turn} after ${failures} failure rounds: ${message}`
+              + ' — this turn\'s memories were not written',
+            )
+            return
+          }
+          pendingLog.recordFailed(job, error, failures)
+          debugLog({ kind: 'failed', session: job.sessionId, turn: job.turn, failures, error: message })
           logger.warn(
-            `extraction skipped for session ${job.sessionId} turn ${job.turn}: ${String(error)}`,
+            `extraction failed for session ${job.sessionId} turn ${job.turn} (round ${failures}/${maxFailureRounds}): ${message}`
+            + ' — retried on the next turn and on the next restart',
           )
         },
       })
-      // Requeue jobs interrupted by a previous shutdown/crash.
-      for (const job of pendingLog.loadPending()) {
-        debugLog({ kind: 'requeue', session: job.sessionId, turn: job.turn })
-        pendingLog.recordEnqueue(job)
-        queue.enqueue(job)
-      }
+      // Snapshot before loadPending() truncates the log for a fresh start.
+      const outstandingAtStart = pendingLog.outstanding()
+      pendingLog.loadPending()
+      retryOutstanding(outstandingAtStart, 'startup')
+      let lastRetryPassMs = 0
       ctx.on('session/event', (session, event) => {
         // Diagnostic trace: one line per session event. Cheap (a dozen lines
         // per turn) and settles "did the extraction listener even fire" after
@@ -520,6 +573,14 @@ export function apply(ctx: Context, config: Config) {
         }
         pendingLog.recordEnqueue(job)
         queue!.enqueue(job)
+        // A failing endpoint should cost a delayed extraction, not a lost turn:
+        // retry outstanding failures on a later turn, cooldown-gated so a burst
+        // of turns cannot hammer an endpoint that is already failing.
+        const retryPassAt = Date.now()
+        if (retryPassAt - lastRetryPassMs >= RETRY_PASS_COOLDOWN_MS) {
+          lastRetryPassMs = retryPassAt
+          retryOutstanding(pendingLog.outstanding().filter(entry => entry.lastAt !== undefined), 'turn')
+        }
       })
     }
 
@@ -606,10 +667,22 @@ export function apply(ctx: Context, config: Config) {
       lines.push('', '[data]')
       lines.push(`  graph: ${store.filePath}`)
       lines.push(`  entities: ${store.listEntities().length}, events: ${store.listEvents().length}`)
-      // Settle tombstones stay in the log, so count unsettled jobs rather than
-      // lines — a drained queue must report 0 backlog.
-      const backlog = new PendingJobLog(join(dataDir, 'extraction-pending.jsonl')).countUnsettled()
-      lines.push(`  extraction queue backlog: ${backlog}${backlog > 0 ? ' (reprocessed while dsh runs; growth means extraction calls are failing)' : ''}`)
+      // Settle/abandon tombstones stay in the log, so count outstanding jobs
+      // rather than lines — a drained queue must report 0 backlog. A failed
+      // round stays outstanding on purpose, so a caller can see both the
+      // retryable failures and the turns whose memories will never be written.
+      const pendingStatus = new PendingJobLog(join(dataDir, 'extraction-pending.jsonl'))
+      const backlog = pendingStatus.countUnsettled()
+      lines.push(`  extraction queue backlog: ${backlog}${backlog > 0 ? ' (retried on the next turn and on restart; growth means extraction calls are failing)' : ''}`)
+      const failedTurns = pendingStatus.outstanding().filter(entry => entry.lastAt !== undefined)
+      if (failedTurns.length > 0) {
+        const latest = failedTurns.reduce((left, right) => ((left.lastAt ?? '') >= (right.lastAt ?? '') ? left : right))
+        lines.push(`  extraction failures awaiting retry: ${failedTurns.length} — latest ${latest.lastAt ?? '?'} (${latest.sessionId} turn ${latest.turn}): ${(latest.lastError ?? '').slice(0, 80)}`)
+      }
+      const abandoned = pendingStatus.abandonedCount()
+      if (abandoned > 0) {
+        lines.push(`  ABANDONED extraction: ${abandoned} turn(s) — memories for those turns are not in the graph`)
+      }
       const debugFile = join(dataDir, 'extraction-debug.jsonl')
       if (existsSync(debugFile)) {
         const last = readFileSync(debugFile, 'utf8').trim().split('\n').filter(Boolean).pop()
