@@ -144,6 +144,14 @@ node scripts/prompts.mjs export --out /tmp/all.json --include-default
 
 导入前会先用 `validateProfiles` 校验（缺必需占位符、未知阶段、非正数上限都会拒绝），所以坏文件不会被写进目录。文件在 dsh 启动时读取，导入后重启生效——profile 本身是按调用解析的，不需要其它步骤。
 
+### 配置页面（Web GUI）
+
+插件在 dsh 的 settings 服务上注册 `memoplus4dsh` 命名空间，因此 **设置 → 插件 → 插件配置** 里会出现一张「memoplus4dsh 记忆插件」卡片，可编辑上面两个字段：`promptProfile`（强制指定 profile）与 `promptProfilesDir`（外部 profile 目录）。标签页只渲染「Host 服务了该命名空间」且「有卡片以该命名空间为键注册」的交集，两半都在本包里（Host 半侧 `src/settings.ts`，浏览器半侧 `src/client/`），无需改动 dsh 本身。
+
+保存后**立即生效**：插件接住新值并重建 profile 注册表，下一次调用就用新配置（`memory_status` 会立刻反映）。写错 profile 名字会被 Host 拒绝并说明原因，而不是悄悄回退到默认。其余配置项仍只由 `cordis.yml` entry 提供，卡片不接管它们。
+
+浏览器半侧是 `npm run build` 产出的 `lib/client.js`（esbuild 打包成 dsh 客户端模块系统要求的 `window.__ModuleLoader__.load({ id, factory })` 惰性工厂）。首次新增这张卡片需要重启 dsh——它启动时扫描 Loader 条目里的 `dsh.client` 声明；此后改卡片代码只需刷新页面。
+
 ```yaml
 # 自己的配置请放在 scripts/install.sh 会重写的受管块**之外**
 # （重新安装会整块替换，块内新增的内容会丢）。按 id 覆盖的 entry 会替换整个

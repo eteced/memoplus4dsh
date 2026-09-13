@@ -36,6 +36,21 @@ interface Harness {
   handlers: Map<string, (...args: never[]) => unknown>
   warnings: string[]
   infos: string[]
+  /** The settings service the Host half registers on, plus the card's save path. */
+  settings: SettingsControl
+}
+
+/** The two settings fields the Web card edits, as the settings service resolves them. */
+interface SettingsValue {
+  promptProfile?: string
+  promptProfilesDir?: string
+}
+
+interface SettingsControl {
+  /** Emulate a committed save in the settings card. */
+  push: (next: SettingsValue) => void
+  /** Run the write-time constraint the service applies before accepting a value. */
+  validate: (next: SettingsValue) => void
 }
 
 /** A Cordis context stub carrying exactly what this plugin touches. */
@@ -44,6 +59,15 @@ function harness(): Harness {
   const handlers = new Map<string, (...args: never[]) => unknown>()
   const warnings: string[] = []
   const infos: string[] = []
+  let settingsValue: SettingsValue = {}
+  let settingsHooks: { setSource: (current: () => SettingsValue) => void; onChange: () => void; validate?: (value: SettingsValue) => void } | undefined
+  const settings: SettingsControl = {
+    push: next => {
+      settingsValue = next
+      settingsHooks?.onChange()
+    },
+    validate: next => settingsHooks?.validate?.(next),
+  }
   const ctx = {
     tools: {
       register: (def: ToolDefinition) => {
@@ -65,6 +89,30 @@ function harness(): Harness {
       handlers.set(event, handler)
       return () => handlers.delete(event)
     },
+    // The settings service, stubbed to what the Host half uses: attach delivers
+    // the live source and re-judges once, exactly as the real service does.
+    inject: (names: string[], callback: (ctx: unknown) => void) => {
+      if (names.includes('settings')) {
+        callback({
+          settings: {
+            installSection: (
+              _owner: unknown,
+              _ns: string,
+              _schema: unknown,
+              entry: SettingsValue,
+              hooks: { setSource: (current: () => SettingsValue) => void; onChange: () => void; validate?: (value: SettingsValue) => void },
+            ) => {
+              settingsHooks = hooks
+              // The service resolves base + user layer, so an empty user document
+              // leaves the cordis.yml entry in force.
+              hooks.setSource(() => ({ ...entry, ...settingsValue }))
+              hooks.onChange()
+            },
+          },
+        })
+      }
+      return () => {}
+    },
     systemPrompt: { section: () => () => {} },
     llm: {
       stream: () => {
@@ -72,7 +120,7 @@ function harness(): Harness {
       },
     },
   } as unknown as Context
-  return { ctx, tools, handlers, warnings, infos }
+  return { ctx, tools, handlers, warnings, infos, settings }
 }
 
 /**
@@ -280,6 +328,38 @@ describe('apply() refuses a configuration that would call the model wrongly', ()
   })
 })
 
+describe('settings page coupling', () => {
+  it('applies a profile chosen in the settings card without a restart', async () => {
+    const h = boot({ promptProfiles: [{ name: 'alpha', match: { model: 'm' } }] })
+    observeRoute(h, { provider: 'p', model: 'other' })
+    expect(await status(h)).toContain('extraction: profile default')
+    h.settings.push({ promptProfile: 'alpha' })
+    expect(await status(h)).toContain('extraction: profile alpha')
+    h.settings.push({ promptProfile: 'default' })
+    expect(await status(h)).toContain('extraction: profile default')
+  })
+
+  it('switches the profile directory from the settings card', async () => {
+    const h = boot()
+    const alt = join(dir, 'alt')
+    mkdirSync(alt, { recursive: true })
+    writeFileSync(join(alt, 'x.json'), JSON.stringify([{ name: 'from-alt', stages: { supersede: { maxTokens: 777 } } }]), 'utf8')
+    expect(await status(h)).toContain('configured: default')
+    h.settings.push({ promptProfilesDir: alt, promptProfile: 'from-alt' })
+    const report = await status(h)
+    expect(report).toContain('configured: default, from-alt')
+    expect(report).toContain(`profiles dir: ${alt}`)
+    expect(report).toContain('supersede: profile from-alt, maxTokens 777')
+  })
+
+  it('refuses a profile name the deployment does not define', () => {
+    const h = boot({ promptProfiles: [{ name: 'alpha', match: { model: 'm' } }] })
+    expect(() => h.settings.validate({ promptProfile: 'ghost' })).toThrow(/is not defined/)
+    expect(() => h.settings.validate({ promptProfile: 'alpha' })).not.toThrow()
+    expect(() => h.settings.validate({})).not.toThrow()
+  })
+})
+
 describe('external profile files', () => {
   it('loads profiles from <dataDir>/prompts and reports the directory', async () => {
     mkdirSync(join(dir, 'prompts'), { recursive: true })
@@ -302,6 +382,31 @@ describe('external profile files', () => {
 })
 
 describe('extraction failure visibility', () => {
+  /** Minimal session carrying one completed turn, enough for the turn/end listener. */
+  const sessionStub = {
+    id: 's',
+    snapshotEvents: () => [
+      { type: 'turn/start', seq: 1, time: '2026-09-13T00:00:00.000Z', data: { turn: 2 } },
+      { type: 'user/message', seq: 2, time: '2026-09-13T00:00:00.000Z', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '下一轮' }] } },
+    ],
+    requestHeader: () => ({ config: { provider: 'p', model: 'm' } }),
+  }
+
+  it('retries an outstanding failure on the next turn, not only at start-up', () => {
+    writeFileSync(join(dir, 'extraction-pending.jsonl'), [
+      JSON.stringify({ kind: 'pending', job: { sessionId: 's', turn: 3, turnText: 'User: x', mentionTime: '2026-09-13T00:00:00.000Z' } }),
+      JSON.stringify({ kind: 'failed', sessionId: 's', turn: 3, error: 'boom', at: '2026-09-13T00:00:01.000Z', failures: 1 }),
+      '',
+    ].join('\n'), 'utf8')
+    const h = boot({ extractionMaxRetries: 0 })
+    const handler = h.handlers.get('session/event')
+    expect(handler).toBeDefined()
+    handler!(sessionStub as never, { type: 'turn/end', seq: 9, time: Date.now(), data: { reason: { kind: 'completed' }, turn: 2 } } as never)
+    // Start-up requeues carry trigger "startup"; this one proves the in-run pass.
+    const inRun = debugLines().filter(entry => entry['kind'] === 'requeue' && entry['trigger'] === 'turn')
+    expect(inRun.map(entry => entry['turn'])).toContain(3)
+  })
+
   it('reports turns still awaiting retry and turns whose memories were abandoned', async () => {
     // Start-up requeues the failed turn (its history survives the requeue); the
     // abandoned record stays as terminal evidence that memories were not written.

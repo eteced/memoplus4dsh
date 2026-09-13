@@ -134,6 +134,14 @@ node scripts/prompts.mjs export --out /tmp/all.json --include-default
 
 An import is validated with `validateProfiles` first — a missing required placeholder, an unknown stage, or a non-positive bound is refused before anything is written. Profiles are read at dsh start, so an import becomes live on restart; resolution itself is per call, so nothing else is needed.
 
+### Settings page (Web GUI)
+
+The plugin registers a `memoplus4dsh` namespace on the settings service, so **Settings → Plugins → Plugin configuration** shows a "memoplus4dsh memory plugin" card editing the two fields above: `promptProfile` (force one profile) and `promptProfilesDir` (external profile directory). The tab renders the intersection of a served namespace and a card registered on that key; both halves ship in this package (Host half `src/settings.ts`, browser half `src/client/`), with no change to dsh itself.
+
+A save takes effect immediately: the plugin takes the new value and rebuilds the prompt registry, so the next call uses it (`memory_status` reflects it right away). A mistyped profile name is refused by the Host with its reason instead of silently falling back. Every other setting still comes from the `cordis.yml` entry; the card does not take them over.
+
+The browser half is `lib/client.js`, produced by `npm run build` (esbuild into the `window.__ModuleLoader__.load({ id, factory })` lazy factory dsh's client module system requires). Adding the card for the first time needs a dsh restart, because the client bundle graph is scanned from Loader entries at start; changing card code afterwards needs only a page reload.
+
 ```yaml
 # Put your own configuration OUTSIDE the managed block that scripts/install.sh
 # rewrites (a re-install replaces that block wholesale, dropping anything you

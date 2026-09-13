@@ -22,9 +22,12 @@ import type { EmbeddingModelSpec, TextEmbedder } from './embedding.js'
 import { Retriever, createQueryDistiller, createQueryExpander } from './retrieval.js'
 import { createPreStepHandler } from './inject.js'
 import type { PromptProfile, PromptStage, StageSettings } from './prompts.js'
-import { PROMPT_STAGES, PromptRegistry } from './prompts.js'
+import { PROMPT_STAGES, PromptRegistry, DEFAULT_PROFILE_NAME } from './prompts.js'
 import { readProfileDir, resolvePromptsDir } from './prompts-file.js'
+import type { LoadedProfiles } from './prompts-file.js'
 import { registerMemoryTools } from './tools.js'
+import { installMemorySettings } from './settings.js'
+import type { MemorySettingsSection } from './settings.js'
 
 export const name = 'memoplus4dsh'
 
@@ -305,6 +308,21 @@ async function callPluginLlm(
   return [...texts.entries()].sort((a, b) => a[0] - b[0]).map(([, text]) => text).join('')
 }
 
+/**
+ * Everything derived from the two settings-driven fields. The settings page can
+ * change them at runtime, so this whole cell is replaced together — never
+ * mutated — and every reader goes through the current one.
+ */
+interface PromptState {
+  /** The values this state was built from, for change detection. */
+  settings: MemorySettingsSection
+  /** Directory profile files were read from. */
+  dir: string
+  /** Files that contributed profiles, for diagnostics. */
+  loaded: LoadedProfiles
+  registry: PromptRegistry
+}
+
 export function apply(ctx: Context, config: Config) {
   const logger = ctx.logger('memoplus4dsh')
   ctx.effect(() => {
@@ -343,15 +361,19 @@ export function apply(ctx: Context, config: Config) {
     // `promptProfiles` stay first, so an existing deployment keeps its matching
     // order and a file extends the set instead of reordering it. A broken file
     // throws here, before anything touches the data directory.
-    const profilesDir = resolvePromptsDir(dataDir, config.promptProfilesDir)
-    const loadedProfiles = readProfileDir(profilesDir)
-    const prompts = new PromptRegistry({
-      profiles: [...config.promptProfiles ?? [], ...loadedProfiles.profiles],
-      selected: config.promptProfile,
-      overrides: promptOverrides,
-      onResolve: info => debugLog({ kind: 'prompt-profile', ...info }),
-    })
-    for (const warning of prompts.warnings) logger.warn(warning)
+    const buildPrompts = (settings: MemorySettingsSection): PromptState => {
+      const dir = resolvePromptsDir(dataDir, settings.promptProfilesDir)
+      const loaded = readProfileDir(dir)
+      const registry = new PromptRegistry({
+        profiles: [...config.promptProfiles ?? [], ...loaded.profiles],
+        selected: settings.promptProfile,
+        overrides: promptOverrides,
+        onResolve: info => debugLog({ kind: 'prompt-profile', ...info }),
+      })
+      for (const warning of registry.warnings) logger.warn(warning)
+      return { settings, dir, loaded, registry }
+    }
+    let promptState = buildPrompts({ promptProfile: config.promptProfile, promptProfilesDir: config.promptProfilesDir })
 
     /**
      * Resolve one stage for a session route, through the route the call will
@@ -359,7 +381,7 @@ export function apply(ctx: Context, config: Config) {
      * matched against a model that does not run the call.
      */
     const stageFor = (stage: PromptStage, sessionRoute: Route | undefined) =>
-      prompts.resolve(stage, effectiveRoute(config, sessionRoute))
+      promptState.registry.resolve(stage, effectiveRoute(config, sessionRoute))
 
     // Only past validation: a refused profile must not leave a half-created
     // memory directory behind, so nothing touches the data dir before here.
@@ -664,8 +686,8 @@ export function apply(ctx: Context, config: Config) {
         lines.push('  ner: unavailable (extraction continues without candidate hints)')
       }
       lines.push('', '[prompts]')
-      lines.push(`  configured: ${prompts.names().join(', ')}`)
-      lines.push(`  profiles dir: ${profilesDir}${loadedProfiles.files.length === 0 ? ' (no profile files)' : ` — ${loadedProfiles.files.length} file(s): ${loadedProfiles.files.map(file => basename(file)).join(', ')}`}`)
+      lines.push(`  configured: ${promptState.registry.names().join(', ')}`)
+      lines.push(`  profiles dir: ${promptState.dir}${promptState.loaded.files.length === 0 ? ' (no profile files)' : ` — ${promptState.loaded.files.length} file(s): ${promptState.loaded.files.map(file => basename(file)).join(', ')}`}`)
       lines.push(`  route: ${lastRoute === undefined ? '(none observed yet — stages report the fallback)' : `${lastRoute.provider}/${lastRoute.model}`}`)
       if (config.extractionProvider !== undefined && config.extractionModel !== undefined) {
         // Without this line an operator cannot tell why a profile matched a model
@@ -710,6 +732,43 @@ export function apply(ctx: Context, config: Config) {
     }
 
     const disposeTools = config.tools === false ? undefined : registerMemoryTools(ctx, { store, retriever, statusReport })
+
+    // Settings page (Host half): the namespace behind the browser card. Saving in
+    // the card reaches the plugin through these hooks, and the derived prompt
+    // state is rebuilt, so an edit takes effect on the next call instead of
+    // waiting for a restart.
+    installMemorySettings(
+      ctx,
+      { promptProfile: config.promptProfile, promptProfilesDir: config.promptProfilesDir },
+      {
+        onChange: next => {
+          const current = promptState.settings
+          if (next.promptProfile === current.promptProfile && next.promptProfilesDir === current.promptProfilesDir) return
+          try {
+            promptState = buildPrompts(next)
+            logger.info(`prompt settings applied: dir ${promptState.dir}, forced profile ${next.promptProfile ?? '(auto by route)'}`)
+          } catch (error) {
+            // A refused write never reaches here (validate rejects it first); this
+            // covers a profile file that changed out of band, and keeps the last
+            // good set serving instead of taking the plugin down.
+            logger.warn(`prompt settings change ignored: ${error instanceof Error ? error.message : String(error)}`)
+          }
+        },
+        validate: value => {
+          const selected = value.promptProfile
+          if (selected === undefined || selected.trim().length === 0 || selected === DEFAULT_PROFILE_NAME) return
+          // Refuse the write rather than let the next call fall back silently:
+          // a mistyped profile name is the mistake this field invites.
+          const known = new Set([
+            ...(config.promptProfiles ?? []).map(profile => profile.name),
+            ...readProfileDir(resolvePromptsDir(dataDir, value.promptProfilesDir)).profiles.map(profile => profile.name),
+          ])
+          if (!known.has(selected)) {
+            throw new Error(`prompt profile "${selected}" is not defined (known: ${[DEFAULT_PROFILE_NAME, ...known].join(', ')})`)
+          }
+        },
+      },
+    )
 
     logger.info(`memory plugin loaded (data: ${store.filePath}, extraction: ${config.extraction})`)
 

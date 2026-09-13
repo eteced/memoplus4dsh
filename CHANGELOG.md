@@ -52,6 +52,17 @@ MemoryAgentBench; see [docs/evaluation.md](docs/evaluation.en.md) for the full a
   `export` / `init` over the same validation, so an import is refused before it
   writes anything; `memory_status` reports the directory and the files that
   contributed profiles.
+- **The Web settings page has a card, and it is wired through.** The plugin
+  registers a `memoplus4dsh` namespace on the settings service and the browser
+  half registers a card on that key in `settings.plugin.item`, so Settings →
+  Plugins → Plugin configuration edits `promptProfile` / `promptProfilesDir`
+  (Host half `src/settings.ts`, browser half `src/client/index.tsx`, bundled by
+  esbuild into the `window.__ModuleLoader__.load` factory dsh's client module
+  system requires). A save returns through `setSource` / `onChange` and rebuilds
+  the prompt registry, so it takes effect immediately with no restart; a
+  mistyped profile name is refused with its reason. Every other setting stays
+  with `cordis.yml`. Adds the runtime dependency `@deepseek-ai/schemastery` (the
+  schema library dsh ships) and the build-time `esbuild`.
 - **Fixed: an extraction failure no longer drops a turn's memories silently.** A
   turn whose retries were exhausted used to get a `settled` tombstone — terminal,
   never retried, and visible nowhere but a log line. It now records a `failed`

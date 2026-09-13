@@ -41,6 +41,15 @@ memoplus4dsh 的重要修改归档，按开发里程碑组织。各里程碑的�
   新增 `scripts/prompts.mjs`（`list` / `validate` / `import` / `export` / `init`），
   与插件共用同一套校验，导入前先验证、不写坏文件；`memory_status` 报出目录与
   参与加载的文件。
+- **Web 设置页有卡片了（可联动）。** 插件在 dsh 的 settings 服务上注册
+  `memoplus4dsh` 命名空间，浏览器半侧在 `settings.plugin.item` 上以同一命名空间为
+  键注册卡片，于是「设置 → 插件 → 插件配置」里出现可编辑 `promptProfile` /
+  `promptProfilesDir` 的卡片（Host 半侧 `src/settings.ts`，浏览器半侧
+  `src/client/index.tsx`，由 esbuild 打成 dsh 客户端模块系统要求的
+  `window.__ModuleLoader__.load` 工厂）。保存经 `setSource` / `onChange` 回到插件并
+  重建 profile 注册表，**立即生效、无需重启**；写错 profile 名字被 Host 拒绝并给出
+  原因。其余配置仍归 `cordis.yml`。新增运行时依赖 `@deepseek-ai/schemastery`
+  （dsh 自带的 schema 库）与构建期依赖 `esbuild`。
 - **修复：抽取失败不再静默丢掉一个 turn 的记忆。** 原先一轮重试用尽后直接写
   `settled` 墓碑——终态、不重试、除了日志行没有任何地方能看到。现在失败写
   `failed` 记录，该 turn 保持"未结"并在下一轮对话和下次启动时重抽，直到
