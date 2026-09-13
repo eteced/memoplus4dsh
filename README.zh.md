@@ -8,6 +8,19 @@
 
 **状态：v0.1 已实现。** 技术报告：[docs/tech-report.md](docs/tech-report.md)。介绍（方法 + 基准结果）：[docs/intro.md](docs/intro.md)。评测记录：[docs/evaluation.md](docs/evaluation.md)。修改记录：[CHANGELOG.zh.md](CHANGELOG.zh.md)。架构：[docs/design.md](docs/design.md)。已知问题：[docs/known-issues.md](docs/known-issues.md)。
 
+## 愿景 · Vision
+
+> **一个 Agent，一整份记忆——不拆散，不分割，如人的记忆一般完整连续。**
+> **One agent, one whole memory — undivided, unbroken, as memory was meant to be.**
+
+memoplus4dsh 是 deepseek-harness 的统一长期记忆插件。它把 agent 需要记住的一切——事实、偏好、日程、任务进度——存进同一张实体-时间融合的记忆图：没有按日拆散的 md 碎片，没有跨会话的遗忘。一份记忆，伴随 agent 的全部生命。
+
+memoplus4dsh is the unified long-term memory plugin for deepseek-harness. Everything your agent needs to remember — facts, preferences, schedules, task progress — lives in a single entity–time-fused memory graph. No per-day markdown shards, no forgetting between sessions. One memory, for the whole life of the agent.
+
+我们相信，agent 的记忆应该像人的记忆一样：一体、连续、会生长。不是文件系统里越积越多的日记页，不是每次会话结束就归零的暂存——而是一份从第一天写到今天的、完整的记忆。今天的 agent 记得昨天，也记得去年；它知道任务进行到了哪一步，也记得你无意中提起的喜好。当记忆成为一体，agent 才真正开始"认识"你。我们希望 memoplus4dsh 是这条路上的一块基石：简单、开放、可被检验——先把"一份完整的记忆"这一件事做好。
+
+We believe an agent's memory should work like a human's: whole, continuous, and growing. Not diary pages piling up in a filesystem, not a scratchpad wiped clean at every session's end — but one unbroken memory, written from day one to today. An agent that remembers yesterday, and last year; that knows where the task stands, and recalls the preference you mentioned in passing. When memory becomes whole, an agent truly begins to *know* you. We hope memoplus4dsh is a cornerstone on that path: simple, open, and verifiable — doing one thing well: one whole memory.
+
 ## 工作原理
 
 ```
