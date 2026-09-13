@@ -128,6 +128,19 @@ rounds of `memory_search` hopping — the direct cost of the score gains, as exp
   `recall-attribution.json`) — every answer's memory provenance is auditable.
 - Runs respected the 09:00–18:00 (Beijing) API peak-hours ban via cron-driven
   pause/resume with checkpoint restart and no duplicate spend.
+- **The guard truly blocks** (re-verified 2026-09-13): the whitelist returns deny at
+  dsh `tools/pre-execute` — the dsh core answers a denial with an error text and
+  **never dispatches the tool** (fs/network/bash never ran). r2 session tapes: 38
+  attempts (including two subagent calls to "explore the working directory / find
+  benchmark data on disk") received nothing but the denial text, then fell back to
+  memory_search.
+- **Query-phase write purity** (re-verified 2026-09-13): by design the plugin also
+  extracts at query-session turn ends (~5–25% of graph events carry
+  sourceSession=bench-q*, re-extractions of context facts). Per-question check: in
+  every CR config, **no question's injection block or memory_search results ever
+  contained an earlier question's text** (0/100 across 3 spot-checked configs);
+  answers are facts derivable from the context, so query-phase writes are not a
+  cross-question leak.
 
 ## 7. Reproduce
 

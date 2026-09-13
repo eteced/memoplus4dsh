@@ -117,6 +117,15 @@ FC-MH 均题耗时显著高于 FC-SH（~57s vs ~12s），来自多轮 `memory_se
   `recall-attribution.json`），可事后审计每条回答的记忆来源。
 - 评测期间遵守 09:00–18:00（北京）API 高峰禁跑规则，由 cron 自动暂停/恢复，
   断点续跑无重复消耗。
+- **拦截的真实性**（2026-09-13 复核）：白名单在 dsh `tools/pre-execute` 阶段返回
+  deny——dsh 核心对 deny 只回错误文本、**永不 dispatch 工具本体**（fs/网络/bash
+  均未执行）。r2 会话实录：模型 38 次尝试（含两次 subagent "探索工作目录/
+  在磁盘找 benchmark 数据"）全部只收到拒绝文本，随后回退 memory_search。
+- **查询期写入纯度**（2026-09-13 复核）：插件按设计会在查询会话的 turn 末也做
+  抽取（图中约 5–25% 事件 sourceSession=bench-q*，内容为上下文事实的再抽取）。
+  逐题验证：全部 CR config 中，**没有任何一题的注入块或 memory_search 结果里
+  出现过更早问题的文本**（0/100 × 3 config 抽验）；答案均为上下文可推导事实，
+  查询期写入不构成跨题泄漏。
 
 ## 7. 复现
 
