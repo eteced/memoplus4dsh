@@ -43,6 +43,15 @@ MemoryAgentBench; see [docs/evaluation.md](docs/evaluation.en.md) for the full a
   in hand, the profile each stage resolved to, and the live embedding model and
   dimension; profile selection and switches are written to
   `extraction-debug.jsonl`.
+- **Prompt profiles can live in external files.** `promptProfilesDir` (default
+  `<dataDir>/prompts`) reads each `*.json` as one profile, an array, or
+  `{"profiles": [...]}`, in file-name order and **after** the inline
+  `promptProfiles`, so inline entries keep their matching order and files extend
+  the set. A broken file fails at start with its path in the message instead of
+  reaching the model. `scripts/prompts.mjs` adds `list` / `validate` / `import` /
+  `export` / `init` over the same validation, so an import is refused before it
+  writes anything; `memory_status` reports the directory and the files that
+  contributed profiles.
 - **Fixed: an extraction failure no longer drops a turn's memories silently.** A
   turn whose retries were exhausted used to get a `settled` tombstone — terminal,
   never retried, and visible nowhere but a log line. It now records a `failed`

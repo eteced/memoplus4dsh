@@ -61,6 +61,7 @@ const DEFAULTS = {
   nerAssist: true,
   nerPython: 'python3',
   promptProfiles: '(none)',
+  promptProfilesDir: '(default: <data-dir>/prompts)',
   promptProfile: '(auto by route, else default)',
   prompts: '(none)',
   extractionMaxTokens: 8192,

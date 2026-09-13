@@ -8,7 +8,7 @@
  * These tests never call a model: they read the `memory_status` report and the
  * debug log, which is where the resolved configuration becomes observable.
  */
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -277,6 +277,27 @@ describe('apply() refuses a configuration that would call the model wrongly', ()
     const h = boot({ extraction: 'off' })
     expect(h.tools.size).toBe(4)
     expect(await status(h)).toContain('extraction = "off"')
+  })
+})
+
+describe('external profile files', () => {
+  it('loads profiles from <dataDir>/prompts and reports the directory', async () => {
+    mkdirSync(join(dir, 'prompts'), { recursive: true })
+    writeFileSync(join(dir, 'prompts', 'models.json'), JSON.stringify([
+      { name: 'from-file', match: { model: 'file-model' }, stages: { entityMerge: { maxTokens: 2048 } } },
+    ]), 'utf8')
+    const h = boot()
+    observeRoute(h, { provider: 'p', model: 'file-model' })
+    const report = await status(h)
+    expect(report).toContain('configured: default, from-file')
+    expect(report).toContain(`profiles dir: ${join(dir, 'prompts')}`)
+    expect(report).toContain('models.json')
+    expect(report).toContain('entityMerge: profile from-file, maxTokens 2048')
+  })
+
+  it('refuses to boot on an invalid profile file instead of calling the model with it', () => {
+    writeFileSync(join(dir, 'broken.json'), JSON.stringify({ name: 'broken', stages: { extraction: { prompt: 'no placeholder' } } }), 'utf8')
+    expect(() => boot({ promptProfilesDir: '.' })).toThrow(/required placeholder/)
   })
 })
 

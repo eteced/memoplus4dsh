@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { join, resolve, basename } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent'
@@ -23,6 +23,7 @@ import { Retriever, createQueryDistiller, createQueryExpander } from './retrieva
 import { createPreStepHandler } from './inject.js'
 import type { PromptProfile, PromptStage, StageSettings } from './prompts.js'
 import { PROMPT_STAGES, PromptRegistry } from './prompts.js'
+import { readProfileDir, resolvePromptsDir } from './prompts-file.js'
 import { registerMemoryTools } from './tools.js'
 
 export const name = 'memoplus4dsh'
@@ -149,6 +150,13 @@ export interface Config {
    * The built-in `default` profile (the v0.1 prompts) is always the fallback.
    */
   promptProfiles?: PromptProfile[]
+  /**
+   * Directory profile files are loaded from (default `<dataDir>/prompts`).
+   * Each `*.json` file holds one profile, an array, or `{"profiles": [...]}`;
+   * files load in name order, after the inline `promptProfiles`. Use
+   * `scripts/prompts.mjs` to list, validate, import, and export them.
+   */
+  promptProfilesDir?: string
   /** Force one profile by name, disabling route matching (default: match, then `default`). */
   promptProfile?: string
   /**
@@ -331,8 +339,14 @@ export function apply(ctx: Context, config: Config) {
         ...config.prompts?.extraction,
       },
     }
+    // External profile files are the reviewable form of a profile set. Inline
+    // `promptProfiles` stay first, so an existing deployment keeps its matching
+    // order and a file extends the set instead of reordering it. A broken file
+    // throws here, before anything touches the data directory.
+    const profilesDir = resolvePromptsDir(dataDir, config.promptProfilesDir)
+    const loadedProfiles = readProfileDir(profilesDir)
     const prompts = new PromptRegistry({
-      profiles: config.promptProfiles,
+      profiles: [...config.promptProfiles ?? [], ...loadedProfiles.profiles],
       selected: config.promptProfile,
       overrides: promptOverrides,
       onResolve: info => debugLog({ kind: 'prompt-profile', ...info }),
@@ -651,6 +665,7 @@ export function apply(ctx: Context, config: Config) {
       }
       lines.push('', '[prompts]')
       lines.push(`  configured: ${prompts.names().join(', ')}`)
+      lines.push(`  profiles dir: ${profilesDir}${loadedProfiles.files.length === 0 ? ' (no profile files)' : ` — ${loadedProfiles.files.length} file(s): ${loadedProfiles.files.map(file => basename(file)).join(', ')}`}`)
       lines.push(`  route: ${lastRoute === undefined ? '(none observed yet — stages report the fallback)' : `${lastRoute.provider}/${lastRoute.model}`}`)
       if (config.extractionProvider !== undefined && config.extractionModel !== undefined) {
         // Without this line an operator cannot tell why a profile matched a model

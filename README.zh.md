@@ -119,6 +119,7 @@ scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 | `extractionConcurrency` | `1` | 抽取 worker 池大小；`1` 为严格串行。仅当端点能承受并发抽取调用时才调高 |
 | `snapshotThreshold` | `1000` | 两次快照压缩之间的 journal 操作数 |
 | `promptProfiles` | （无） | 具名 prompt profile，按声明顺序与**该次调用实际使用的模型**匹配。每项形如 `{ name, match: { provider?, model? }, stages: { <阶段>: { prompt, maxTokens?, timeoutMs?, reasoningEffort? } } }`，`*` 为通配。内置 `default` profile 承载 v0.1 的原始 prompt，始终兜底 |
+| `promptProfilesDir` | `<dataDir>/prompts` | 外部 profile 文件目录。每个 `*.json` 可放一个 profile、一个数组或 `{"profiles": [...]}`；文件名序加载，**排在内联 `promptProfiles` 之后**（内联先匹配，文件只做扩展）。坏文件在启动时即报错，不会带着它去调用模型 |
 | `promptProfile` | （自动） | 强制使用某个 profile，跳过路由匹配 |
 | `prompts` | （无） | 阶段级覆盖，优先级高于所有 profile：`extraction` / `entityMerge` / `supersede` / `queryExpansion` / `queryDistill` |
 
@@ -129,6 +130,19 @@ scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 「实际使用的模型」在配置了 `extractionProvider` + `extractionModel` 时尤其重要：这两个键会替换**所有**辅助调用的路由，所以 profile 是按**覆盖后的路由**匹配的，而不是按输入框里选的那个模型。`memory_status` 会同时打印会话路由与这个覆盖项，就是为了让你能看出 profile 究竟匹配到了哪个。
 
 优先级从高到低：`prompts.<阶段>` → 选中的 profile（`promptProfile`，否则第一个 `match` 命中的 `promptProfiles` 条目）→ 内置 `default`。`extractionMaxTokens` / `extractionCallTimeoutMs` 等价于 `prompts.extraction` 的对应项。`memory_status` 会报出每个阶段当前用的 profile。
+
+**profile 也可以放在外部文件里**——便于评审、进版本库、换机器。默认目录 `<dataDir>/prompts`（即 `~/.dsh/memoplus4dsh/prompts`），可用 `promptProfilesDir` 改。`scripts/prompts.mjs` 提供与插件同一套校验的导入导出：
+
+```sh
+npm run build                                             # CLI 复用构建产物
+node scripts/prompts.mjs init --name my-models            # 生成示例文件
+node scripts/prompts.mjs list                             # 列出目录里的 profile（含文件名）
+node scripts/prompts.mjs validate ./team-profiles.json    # 只校验，不改动任何东西
+node scripts/prompts.mjs import ./team-profiles.json --name team
+node scripts/prompts.mjs export --out /tmp/all.json --include-default
+```
+
+导入前会先用 `validateProfiles` 校验（缺必需占位符、未知阶段、非正数上限都会拒绝），所以坏文件不会被写进目录。文件在 dsh 启动时读取，导入后重启生效——profile 本身是按调用解析的，不需要其它步骤。
 
 ```yaml
 # 自己的配置请放在 scripts/install.sh 会重写的受管块**之外**

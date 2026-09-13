@@ -34,6 +34,13 @@ memoplus4dsh 的重要修改归档，按开发里程碑组织。各里程碑的�
 - **可观测：** `memory_status` 报出已配置的 profile、当前路由、每阶段解析到的
   profile，以及实际使用的 embedding 模型与维度；profile 选择与切换写入
   `extraction-debug.jsonl`。
+- **Prompt profile 可放外部文件。** 新增 `promptProfilesDir`（默认
+  `<dataDir>/prompts`）：每个 `*.json` 可放一个 profile、一个数组或
+  `{"profiles": [...]}`，文件名序加载并排在内联 `promptProfiles` 之后（内联保持
+  原有匹配顺序，文件只做扩展）。坏文件在启动时按文件名报错，不会带着它调用模型。
+  新增 `scripts/prompts.mjs`（`list` / `validate` / `import` / `export` / `init`），
+  与插件共用同一套校验，导入前先验证、不写坏文件；`memory_status` 报出目录与
+  参与加载的文件。
 - **修复：抽取失败不再静默丢掉一个 turn 的记忆。** 原先一轮重试用尽后直接写
   `settled` 墓碑——终态、不重试、除了日志行没有任何地方能看到。现在失败写
   `failed` 记录，该 turn 保持"未结"并在下一轮对话和下次启动时重抽，直到

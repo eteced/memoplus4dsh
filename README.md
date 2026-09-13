@@ -105,6 +105,7 @@ Set under the plugin's `config:` in the profile's `cordis.patch.yml`:
 | `hfBaseUrl` | `https://huggingface.co` | Mirror base URL for the embedding model download |
 | `queryExpansion` | `true` | LLM query expansion during retrieval + verbatim-quote query distillation for injection (1024-token/30s bounded calls, results cached on disk per query) |
 | `promptProfiles` | (none) | Named prompt profiles, tried in declaration order against the model each call actually runs on. Each is `{ name, match: { provider?, model? }, stages: { <stage>: { prompt, maxTokens?, timeoutMs?, reasoningEffort? } } }`; `*` is a wildcard. The built-in `default` profile holds the v0.1 prompts and is always the fallback |
+| `promptProfilesDir` | `<dataDir>/prompts` | Directory of external profile files. Each `*.json` holds one profile, an array, or `{"profiles": [...]}`; files load in name order **after** the inline `promptProfiles`, so inline entries keep their matching order and files extend the set. A broken file fails at start instead of reaching the model |
 | `promptProfile` | (auto) | Force one profile by name instead of matching the route |
 | `prompts` | (none) | Per-stage overrides that beat every profile: `extraction` / `entityMerge` / `supersede` / `queryExpansion` / `queryDistill` |
 | `entityMergeLlm` | `true` | LLM-adjudicated entity merge at extraction (embedding candidates + one bounded call per turn; only explicit `sure` merges) |
@@ -119,6 +120,19 @@ Every stage that calls a model owns a prompt plus its output cap, per-call timeo
 "Actually runs on" matters when `extractionProvider` + `extractionModel` are set: those override the session's route for every auxiliary call, so profiles are matched on the **override**, not on the model in the composer. `memory_status` prints both the session route and the override, precisely so you can tell which one a profile matched.
 
 Resolution order, highest first: `prompts.<stage>` → the selected profile (`promptProfile`, else the first `promptProfiles` entry whose `match` accepts that route) → the built-in `default`. `extractionMaxTokens` and `extractionCallTimeoutMs` are shorthand for the `prompts.extraction` entries. `memory_status` reports which profile each stage is using.
+
+**Profiles can also live in external files**, which is what makes a profile set reviewable, versioned, and portable. The default directory is `<dataDir>/prompts` (`~/.dsh/memoplus4dsh/prompts`); `promptProfilesDir` moves it. `scripts/prompts.mjs` imports and exports with the same validation the plugin applies:
+
+```sh
+npm run build                                            # the CLI reuses the built loader
+node scripts/prompts.mjs init --name my-models           # write an example file
+node scripts/prompts.mjs list                            # profiles in the directory, with their files
+node scripts/prompts.mjs validate ./team-profiles.json   # validate only, write nothing
+node scripts/prompts.mjs import ./team-profiles.json --name team
+node scripts/prompts.mjs export --out /tmp/all.json --include-default
+```
+
+An import is validated with `validateProfiles` first — a missing required placeholder, an unknown stage, or a non-positive bound is refused before anything is written. Profiles are read at dsh start, so an import becomes live on restart; resolution itself is per call, so nothing else is needed.
 
 ```yaml
 # Put your own configuration OUTSIDE the managed block that scripts/install.sh
