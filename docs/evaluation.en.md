@@ -21,6 +21,7 @@ session archives, and per-question attribution data are kept locally under
 | Fairness guards | tool whitelist (no fs/network tools), per-context session archiving, abort memorize on zero extraction events |
 | r1 date | 2026-09-03 (M9 run-2; run-1 invalidated by audit) |
 | r2 date | 2026-09-09 ~ 09-11 (full rerun after M11–M17) |
+| r2 plugin code | commit `497db0e` (dsh 0.1.5-alpha.2 + Session V3 adaptation); commits up to 0a20c5e after that touch docs/attribution scripts only and do not change plugin behavior |
 
 ## 2. Headline results (r1 → r2)
 
