@@ -22,6 +22,7 @@ function harness(fail = false): {
   ctx: Context
   sections: Section[]
   warnings: string[]
+  infos: string[]
   deps: () => string[] | undefined
   /** Emulate the settings service committing a new value, as a card save does. */
   push: (next: MemorySettingsSection) => void
@@ -30,6 +31,7 @@ function harness(fail = false): {
 } {
   const sections: Section[] = []
   const warnings: string[] = []
+  const infos: string[] = []
   let deps: string[] | undefined
   let resolved: MemorySettingsSection = {}
   let hooks: { onChange: () => void; validate?: (value: MemorySettingsSection) => void } = { onChange: () => {} }
@@ -57,10 +59,10 @@ function harness(fail = false): {
       callback(settingsCtx)
       return () => {}
     },
-    logger: () => ({ warn: (message: string) => warnings.push(message) }),
+    logger: () => ({ info: (message: string) => infos.push(message), warn: (message: string) => warnings.push(message) }),
   } as unknown as Context
   return {
-    ctx, sections, warnings, deps: () => deps,
+    ctx, sections, warnings, infos, deps: () => deps,
     push: next => { resolved = next; hooks.onChange() },
     validate: next => hooks.validate?.(next),
   }
@@ -120,5 +122,12 @@ describe('installMemorySettings', () => {
     expect(() => { installMemorySettings(h.ctx, {}, { onChange: () => {} }) }).not.toThrow()
     expect(h.warnings).toHaveLength(1)
     expect(h.warnings[0]).toContain(MEMOPLUS_NAMESPACE)
+  })
+
+  it('records a positive trace, so the log alone answers whether the card registered', () => {
+    const h = harness()
+    installMemorySettings(h.ctx, {}, { onChange: () => {} })
+    expect(h.infos.join(' ')).toContain(MEMOPLUS_NAMESPACE)
+    expect(h.warnings).toEqual([])
   })
 })

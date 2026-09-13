@@ -63,6 +63,9 @@ export function installMemorySettings(ctx: Context, base: MemorySettingsSection,
         onChange: () => { hooks.onChange(source()) },
         ...hooks.validate === undefined ? {} : { validate: (value: MemorySettingsSection) => { hooks.validate!(value) } },
       })
+      // Positive trace: the settings page shows this card only when the namespace
+      // is served, so "did it register" must be answerable from the log alone.
+      ctx.logger('memoplus4dsh').info(`settings namespace "${MEMOPLUS_NAMESPACE}" registered (Web: 设置 → 插件 → 插件配置)`)
     } catch (error) {
       ctx.logger('memoplus4dsh').warn(
         `settings namespace "${MEMOPLUS_NAMESPACE}" unavailable: ${String(error)}`,
