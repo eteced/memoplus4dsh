@@ -133,6 +133,48 @@ function parsePipeRow(parts: string[]): ExtractedRow | null {
  * Parse pipe-separated model output into entity and event rows. Fault
  * tolerant: blank lines, headers, and malformed rows are skipped.
  */
+/**
+ * Distinct predicates already recorded for the entities this segment names.
+ *
+ * Predicates were never fed back — only entity names were — so the extraction
+ * model could not reuse one it had already produced, and free-form predicate
+ * drift was structural rather than a compliance failure. Measured on retraction
+ * turns: with this list present both the `not_`-prefix and the polarity-in-
+ * OBJECT conventions reached 7-8/8 paired retractions; without it, 2/4. The
+ * load-bearing change is the reuse, not the convention.
+ *
+ * Only entities the segment mentions contribute, so the block stays bounded by
+ * the turn rather than by the graph.
+ * @param store - Graph the recorded predicates come from.
+ * @param entities - Entities the caller already resolved for this segment.
+ * @param contextText - The segment whose mentions select contributing entities.
+ * @returns Comma-separated predicates, or `(none yet)` when nothing applies.
+ */
+export function formatRecordedPredicates(
+  store: MemoryStore,
+  entities: readonly Entity[],
+  contextText: string,
+): string {
+  const lower = contextText.toLowerCase()
+  const predicates = new Set<string>()
+  for (const entity of entities) {
+    const names = [entity.canonicalName, ...entity.aliases]
+    if (!names.some(name => name.length > 1 && lower.includes(name.toLowerCase()))) continue
+    for (const event of store.eventsForEntity(entity.id)) {
+      if (event.predicate.length > 0) predicates.add(event.predicate)
+    }
+  }
+  if (predicates.size === 0) return '(none yet)'
+  return [...predicates].slice(0, RECORDED_PREDICATE_LIMIT).join(', ')
+}
+
+/**
+ * Cap on fed-back predicates per segment. One long-lived entity can carry
+ * hundreds; the block is prompt text paid on every turn, and the point is
+ * reuse of the recent vocabulary, not a full dictionary.
+ */
+export const RECORDED_PREDICATE_LIMIT = 60
+
 export function parseExtractionOutput(text: string): ParsedExtraction {
   const entities = new Map<string, { type: EntityType; canonical: string; aliases: string[] }>()
   const events: ExtractedRow[] = []
@@ -371,7 +413,14 @@ export class ExtractionPipeline {
     // and the rows are merged.
     const rows: ExtractedRow[] = []
     for (const segment of segmentTurnText(turnText)) {
-      const known = formatKnownEntities(this.store.listEntities(), segment)
+      const template = this.promptFor(job)
+      const entities = this.store.listEntities()
+      const known = formatKnownEntities(entities, segment)
+      // A prompt that carries no such block pays no graph scan for it: the
+      // default profile is frozen at v0.1 and does not mention the placeholder.
+      const recorded = template.includes('{recorded_predicates}')
+        ? formatRecordedPredicates(this.store, entities, segment)
+        : ''
       // m12: NER 候选区（检测器不可用 → 无候选，与旧行为一致）
       const mentions = await this.ner.detect(segment)
       const candidateMentions = mentions === null || mentions.length === 0
@@ -379,10 +428,11 @@ export class ExtractionPipeline {
         : mentions.map(m => `${m.text} (${m.type})`).join(', ')
       // One-pass substitution: an inserted turn text is never rescanned, so a
       // turn that literally contains a placeholder name stays literal.
-      const prompt = renderPrompt(this.promptFor(job), {
+      const prompt = renderPrompt(template, {
         '{turn_text}': segment,
         '{known_entities}': known,
         '{candidate_mentions}': candidateMentions,
+        '{recorded_predicates}': recorded,
       })
       const raw = (await this.callLlm(prompt, job)).trim()
       // 这条守卫兜住不走 callPluginLlm 的调用方（直接装配 pipeline 的场景）；

@@ -55,11 +55,12 @@ export const REQUIRED_PLACEHOLDERS: Readonly<Record<PromptStage, readonly string
 
 /**
  * Placeholders a prompt may drop. Extraction still runs without the entity
- * checklist or the NER candidates — the model is simply told less — so a
- * profile that omits them is warned about at load, not refused.
+ * checklist, the NER candidates, or the recorded-predicate list — the model is
+ * simply told less — so a profile that omits them is warned about at load, not
+ * refused.
  */
 export const OPTIONAL_PLACEHOLDERS: Readonly<Record<PromptStage, readonly string[]>> = {
-  extraction: ['{known_entities}', '{candidate_mentions}'],
+  extraction: ['{known_entities}', '{candidate_mentions}', '{recorded_predicates}'],
   entityMerge: [],
   supersede: [],
   queryExpansion: [],
