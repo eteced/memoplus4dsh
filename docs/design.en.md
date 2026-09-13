@@ -69,6 +69,20 @@ One graph, three node types + dual time anchors:
 - Zero new keys: the LLM goes through dsh's credentials seam; the embedding model is downloaded from a public HuggingFace address (mirror configurable)
 - Public-repo constraint: `.gitignore` covers the data directory / model cache / any credentials; no API key appears anywhere in the repo
 
+### 2.7 Model-dependent surfaces as configuration (v0.2)
+
+The two surfaces that decide quality most — **each stage's prompt** and **the embedding model** — were literals tuned for one model family, so changing the model meant changing source. v0.2 makes them configuration, resolved **per call**.
+
+- **Prompt profiles**: `{ name, match: { provider?, model? }, stages }`, with `*` wildcards in `match`. Precedence: `prompts.<stage>` (explicit override) → the selected profile (`promptProfile`, else the first match in declaration order) → the built-in `default`. Five stages: extraction / entityMerge / supersede / queryExpansion / queryDistill.
+- **Per call, because the route is per call**: the write path follows `ExtractionJob.route` (the route that turn was recorded with), the query side follows the session's latest request header. Switching the model in the Models page therefore takes effect on the **next turn**, with no plugin reload.
+- **The default is v0.1**: the built-in `default` profile references the original five prompt constants (asserted byte-for-byte by a test), the numeric defaults and `reasoningEffort: 'off'` are preserved verbatim, and `extractionMaxTokens` / `extractionCallTimeoutMs` fold into the highest-precedence `prompts.extraction` overrides — the layer they occupied before — so an existing configuration needs no edit.
+- **Validation fails loud**: an unknown stage name, an empty prompt, a non-positive bound, or a missing required placeholder refuses the load (extraction needs `{turn_text}`, both adjudication stages need `{lines}`, both query-side stages need `{query}`); a missing `{known_entities}` / `{candidate_mentions}` only warns. Refusing to start beats handing the model a prompt with no input.
+- **`reasoningEffort` is configurable too**: it was hardcoded to `'off'` (the M9 F-1 workaround for deepseek-v4-flash spiralling into empty output on dense extraction inputs). A model that extracts better with thinking can raise it to `low`/`high`/`max`.
+- **Embedding is a seam as well**: `embeddingModel` resolves by name (built-ins plus a deployment's `embeddingModels` table; an unknown name is refused at load), and `embeddingSidecarModel` / `embeddingSidecarQueryPrompt` select the sidecar model and its query instruction. **The dimension the sidecar reports at handshake is now honoured** (it was hardcoded to 1024), without which retrieving with a non-1024-dim model would treat every stored vector as stale and re-embed on every query.
+- **Observability**: `memory_status` reports the configured profiles, the route in hand, each stage's effective `profile/maxTokens/effort/timeoutMs`, and the live embedding model and dimension; profile selection and switches are written to `extraction-debug.jsonl` (one entry per change).
+
+Supporting module: `src/prompts.ts`. Each stage component receives its prompt through a constructor option, defaulting to the original constant, so their existing tests needed no change.
+
 ## 3. Project Structure
 
 ```
@@ -77,16 +91,25 @@ memoplus4dsh/
 ├── tsconfig.json
 ├── src/
 │   ├── index.ts            # plugin entry: name/inject/apply + Config interface, assembles the modules
+│   ├── prompts.ts          # prompt-profile registry: stages, per-route resolution, load-time validation (v0.2)
 │   ├── store.ts            # memory graph storage: JSONL append + in-memory index + snapshots
-│   ├── extraction.ts       # turn/end async extraction (LLM prompt + pipe parsing)
-│   ├── embedding.ts        # onnxruntime-node MiniLM; falls back to pure keyword on failure
+│   ├── extraction.ts       # turn/end async extraction (LLM prompt + pipe parsing + segmentation)
+│   ├── entity-merge.ts     # LLM-adjudicated entity merge (M11)
+│   ├── supersede.ts        # LLM-adjudicated supersede detection: single/multi cardinality (M11 P1-B)
+│   ├── embedding.ts        # ONNX encoder (with the preset registry); falls back to pure keyword on failure
+│   ├── embed-sidecar.ts    # harrier embedding sidecar bridge + backend fallback
+│   ├── ner.ts / ner-sidecar.ts  # NER candidate-hint detector chain (ONNX → PyTorch sidecar) (M12)
 │   ├── retrieval.ts        # hybrid scoring + dual-anchor time filtering + entity expansion + MMR
 │   ├── temporal.ts         # temporal expression parsing (relative time / last year / recently etc.)
 │   ├── inject.ts           # systemPrompt section + agent/pre-step dynamic injection
-│   ├── tools.ts            # memory_search / memory_remember tools
-│   └── bridges.ts          # bridge goal/todo/schedule/plan progress events into the memory graph (M8)
+│   ├── tools.ts            # memory_search / memory_remember / memory_status / memory_visualize
+│   ├── visualize.ts        # interactive HTML memory graph (M10)
+│   ├── bridges.ts          # bridge goal/todo/schedule/plan progress events into the memory graph (M8)
+│   └── text.ts             # shared tokenizer + single-pass placeholder substitution
 ├── scripts/
 │   ├── install.sh / uninstall.sh    # dsh plugin add wrapper + default config (bash, Linux/macOS)
+│   ├── setup-python.sh     # optional: full python env (sentence-transformers + torch/gliner/stanza)
+│   ├── doctor.mjs          # install / config / component / data self-check
 │   └── test-harness/       # local test dsh instance management (see §4)
 ├── tests/                  # vitest unit tests
 ├── docs/                   # this file + milestone records + test reports

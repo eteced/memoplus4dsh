@@ -69,6 +69,20 @@ ETMS 的核心**算法**用 TS 重新实现（都是轻量逻辑）；重依赖�
 - 零新增密钥：LLM 走 dsh 的 credentials seam；embedding 模型从 HuggingFace 公开地址下载（可配置镜像）
 - 公开仓库约束：`.gitignore` 覆盖数据目录/模型缓存/任何 credentials；仓库内不出现任何 API key
 
+### 2.7 模型依赖面可配置化（v0.2）
+
+效果最依赖模型的两处——**各阶段 prompt** 与 **embedding 模型**——原先都写死成单一模型族的调参，换模型要改源码。v0.2 把它们变成配置，且**按调用解析**。
+
+- **prompt profile**：`{ name, match: { provider?, model? }, stages }`，`match` 支持 `*` 通配。优先级：`prompts.<阶段>`（显式覆盖）→ 选中 profile（`promptProfile`，否则按声明顺序取首个命中）→ 内置 `default`。五个阶段：extraction / entityMerge / supersede / queryExpansion / queryDistill。
+- **按调用解析，因为路由按调用**：写路径用 `ExtractionJob.route`（该 turn 记录的路由），查询侧用会话最近的 request header。因此在 Models 页面切模型后，**下一个 turn 即生效，无需重载插件**。
+- **默认等于 v0.1**：内置 `default` profile 直接引用原五个 prompt 常量（有逐字节相等的测试断言），数值默认与 `reasoningEffort: 'off'` 原值保留；`extractionMaxTokens` / `extractionCallTimeoutMs` 折算为最高优先级的 `prompts.extraction` 覆盖项，即它们原本的层级——既有配置无需改动。
+- **校验 fail loud**：未知阶段名、空 prompt、非正数上限、必填占位符缺失一律拒绝加载（extraction 需 `{turn_text}`，两个裁决阶段需 `{lines}`，两个查询侧需 `{query}`）；`{known_entities}` / `{candidate_mentions}` 缺失仅告警。宁可拒绝启动，也不让模型收到没有输入的 prompt。
+- **`reasoningEffort` 也可配置**：原为写死的 `'off'`（M9 F-1 的规避——deepseek-v4-flash 在密集抽取输入上失控推理、烧空预算且输出为空）。需要思考才抽得好的模型可提高到 `low/high/max`。
+- **embedding 也是接缝**：`embeddingModel` 按名字解析（内置 + 用户 `embeddingModels` 表，未知名字加载期拒绝）；`embeddingSidecarModel` / `embeddingSidecarQueryPrompt` 选择 sidecar 模型与其查询指令。**sidecar 握手报出的真实维度现在被采纳**（此前硬编码 1024），否则换非 1024 维模型后，检索的「维度不符即过期」判定会每次查询都重嵌入一次。
+- **可观测**：`memory_status` 报出已配置 profile、当前路由、每阶段生效的 `profile/maxTokens/effort/timeoutMs`，以及实际 embedding 模型与维度；profile 选择与切换写入 `extraction-debug.jsonl`（每次变化一条）。
+
+配套模块 `src/prompts.ts`；各阶段组件通过构造参数接收 prompt（默认仍为原常量），因此它们的既有单测无需改动。
+
 ## 3. 项目结构
 
 ```
@@ -77,16 +91,25 @@ memoplus4dsh/
 ├── tsconfig.json
 ├── src/
 │   ├── index.ts            # 插件入口：name/inject/apply + Config 接口，组装各模块
+│   ├── prompts.ts          # prompt profile 注册表：阶段定义、按路由解析、加载期校验（v0.2）
 │   ├── store.ts            # 记忆图存储：JSONL 追加 + 内存索引 + 快照
-│   ├── extraction.ts       # turn/end 异步抽取（LLM prompt + pipe 解析）
-│   ├── embedding.ts        # onnxruntime-node MiniLM；失败降级纯关键词
+│   ├── extraction.ts       # turn/end 异步抽取（LLM prompt + pipe 解析 + 分段）
+│   ├── entity-merge.ts     # LLM 裁决的实体合并（M11）
+│   ├── supersede.ts        # LLM 裁决的取代检测：单值/多值基数（M11 P1-B）
+│   ├── embedding.ts        # ONNX 编码器（含预设注册表）；失败降级纯关键词
+│   ├── embed-sidecar.ts    # harrier embedding sidecar 桥接 + 后端回退
+│   ├── ner.ts / ner-sidecar.ts  # NER 候选提示检测链（ONNX → PyTorch sidecar）（M12）
 │   ├── retrieval.ts        # 混合打分 + 双锚时间过滤 + 实体扩展 + MMR
 │   ├── temporal.ts         # 时间表达式解析（相对时间/last year/recently 等）
 │   ├── inject.ts           # systemPrompt section + agent/pre-step 动态注入
-│   ├── tools.ts            # memory_search / memory_remember 工具
-│   └── bridges.ts          # goal/todo/schedule/plan 进度事件桥接进记忆图（M8 实现）
+│   ├── tools.ts            # memory_search / memory_remember / memory_status / memory_visualize
+│   ├── visualize.ts        # 记忆图交互式 HTML（M10）
+│   ├── bridges.ts          # goal/todo/schedule/plan 进度事件桥接进记忆图（M8）
+│   └── text.ts             # 共享分词 + 单遍占位符替换
 ├── scripts/
 │   ├── install.sh / uninstall.sh    # dsh plugin add 封装 + 默认配置（bash，Linux/macOS）
+│   ├── setup-python.sh     # 可选：完整版 python 环境（sentence-transformers + torch/gliner/stanza）
+│   ├── doctor.mjs          # 安装/配置/组件/数据 四块自检
 │   └── test-harness/       # 本地测试 dsh 实例管理（见 §4）
 ├── tests/                  # vitest 单测
 ├── docs/                   # 本文件 + 各里程碑记录 + 测试报告

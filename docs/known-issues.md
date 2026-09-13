@@ -29,10 +29,16 @@
 
 ## F2 — dsh 0.1.5 默认 maxTokens=256000 被部分网关拒绝（外部，评测侧已规避）
 
-**现象**：dsh `llm-deepseek` 0.1.5 起默认每个请求携带 `max_tokens: 256000`；OpenCode Go
+**现象**（2026-09-10 记录）：dsh `llm-deepseek` 0.1.5 起默认每个请求携带 `max_tokens: 256000`；OpenCode Go
 网关对 deepseek-v4-flash 只接受 ≤128000，超限返回 HTTP 400 `INVALID_REQUEST`，整个 turn
 以 `reason.kind: error` 结束。由于插件的 turn_end 抽取按设计跳过错误 turn（没有内容可抽），
 ingest 会"正常"跑完但记忆图为空——查询阶段在零记忆上空转。
+
+> **2026-09-13 复验：该限制现在已不成立。** 直连 `POST https://opencode.ai/zen/go/v1/chat/completions`
+> （模型 `deepseek-v4.1-flash`）实测：`max_tokens: 256000` → **HTTP 200**，`384000` → **HTTP 200**，
+> 只有 `1000000` 被拒（HTTP 400 `invalid_request_error`）。因此 F2 的 128000 上限描述对当前网关
+> 已过时；下面的规避措施保留作为历史记录与端点回归时的参考。若走 pi-ai 路由，per-model
+> `maxTokens` 即请求默认值，可显式设定。
 
 **规避**（已应用于 benchmark profile）：在 `cordis.patch.yml` 给 `llm-deepseek` 加
 `config.maxTokens: 65536`。评测侧另有双保险（2026-09-10 起）：
@@ -43,6 +49,30 @@ ingest 会"正常"跑完但记忆图为空——查询阶段在零记忆上空�
 ## S5 — 日程/待办/目标事件桥接（已于 M8 实现）
 
 `src/bridges.ts` 在 M8 落地：goal/change、todo/write、schedule/change、plan/mode 全部投影为记忆事件（详见 docs/m8-progress-memory-eval.md）。检索层对状态族事件做"同实体同族只留最新"去重，历史仍完整保留在图中。
+
+## E1 — 实体合并的「过并」（LLM 判定质量，随模型漂移）
+
+**状态**：⚠️ 未修复 —— v0.2 提供的是**修它的手段**（prompt profile），不是修复本身。
+
+`src/entity-merge.ts` 的裁决 prompt 第 3 条已明确写着 "Merely sharing or resembling a word is NOT enough"、第 6 条 "When unsure, answer 0"，并要求理由必须引用上下文证据。但实测模型会**违反自己收到的指令**，典型是**部分-整体混淆**：
+
+```json
+{"kind":"entity-merge","mention":"opencode-go-extra","into":"opencode-go",
+ "reason":"opencode-go-extra is a profile/router entry FOR the opencode-go provider."}
+```
+
+理由自己说的是 "for"（属于/用于），即不同的指称对象，却仍被判为同一实体。同一轮（真实数据 turn 10）7 条合并里至少 4 条是错的，最严重的一条把 9 个无关模型名合并进 `DeepSeek V4.1 Flash` 实体，理由 "Both refer to the DeepSeek V4.1 Flash model family in catalog." —— 之后问 V4.1 Flash 会连带召回 glm/grok/kimi 等。
+
+**为什么会污染「当前状态」**：合并让两个不同主体的 `(subject, predicate)` 归一，随后 supersede 判定把仍然为真的旧值标记 `supersededBy`（例：`opencode-go 有 27 个模型` 被 `opencode-go-extra 有 1 个模型` 取代）。注意 supersede 机制本身是**设计如此**（历史保留；只在 present-tense 模式降权 0.3，显式过去区间不打折），错的是**判定**，不是机制。
+
+**为什么现在能改**：判定质量与「用哪个模型 + 什么 prompt」强相关，这正是 v0.2 把 prompt 变成 profile 的动机。补救方向（尚未验证）：
+1. 在 merge prompt 里显式加入部分-整体/命名后缀（`X` vs `X-extra`）的反例；
+2. 提高判定阈值/要求引用具体证据片段（当前 reason 已有 15 词上限，但未被校验）；
+3. 给一类明显的「下位命名」加结构性护栏。
+
+**需要补的验证**：真实 A/B —— 同一批 turn 在两个 profile 下各跑一遍，对比错并数。建议先把本条记录里的既有污染清干净再跑（journal 支持 `entity.delete` / `entity.upsert` / `event.delete` / `event.add`，但必须在 dsh 停止时改，否则会被内存快照覆盖）。
+
+**可观测**：每条确认合并都带 `reason` 记入 `<dataDir>/extraction-debug.jsonl`（`kind: entity-merge`），错并可事后审计。
 
 ## 其他
 

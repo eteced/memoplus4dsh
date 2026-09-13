@@ -52,7 +52,7 @@ Two key points:
 - **FC-MH is a "death task" where all official agents score ≤7%**; we scored 51.5, still 54.0 at 262k — the only memory system that doesn't collapse on long-context multi-hop forgetting (o4-mini collapses to 14.0 at just 32k). Multi-hop + state updates happen to be exactly the design targets of entity-graph one-hop expansion + state dedup; the r2 multi-hop gains come mainly from system-prompt-guided iterative `memory_search` (attribution: mh_64k injection covers only 22.2%, active search lifts recall to 85.9%).
 - The entire evaluation ran under tool-whitelist isolation + per-context auditing — our first-round results were once voided and re-run because the model's "detective mode" peeked at dataset answers; the results above are the clean numbers after hardening (audit details in [docs/m9-benchmark.md](m9-benchmark.en.md) §0).
 
-Also passed human-scenario tests (cross-session goal progress, todo evolution, SIGKILL crash recovery, etc.); 173 unit tests all green.
+Also passed human-scenario tests (cross-session goal progress, todo evolution, SIGKILL crash recovery, etc.); 216 unit tests all green.
 
 **Known weaknesses**: LME multi-session 58.7 (integrating cross-session temporal chains is a structural weakness of retrieval-based memory — still our lowest r2 question type, though up from 42.7 in r1); never-recalled LME questions are mostly write-chain losses (extraction misses), making extraction recall the top next-iteration direction; ingest cost is higher than embed-based approaches (LLM extraction vs vectorization).
 

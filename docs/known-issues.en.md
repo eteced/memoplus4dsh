@@ -31,11 +31,18 @@ and never rewrites payloads).
 
 ## F2 — dsh 0.1.5's default maxTokens=256000 rejected by some gateways (external, mitigated on the benchmark side)
 
-**Symptom**: since 0.1.5, dsh `llm-deepseek` sends `max_tokens: 256000` on every request by default;
+**Symptom** (recorded 2026-09-10): since 0.1.5, dsh `llm-deepseek` sends `max_tokens: 256000` on every request by default;
 the OpenCode Go gateway accepts at most 128000 for deepseek-v4-flash and returns HTTP 400
 `INVALID_REQUEST` beyond that, ending the whole turn with `reason.kind: error`. Because the plugin's
 turn_end extraction deliberately skips errored turns (nothing to extract), ingest appears to run
 normally while the memory graph stays empty — and the query phase then spins on zero memories.
+
+> **Re-verified 2026-09-13: this limit no longer holds.** Calling
+> `POST https://opencode.ai/zen/go/v1/chat/completions` directly (model `deepseek-v4.1-flash`):
+> `max_tokens: 256000` → **HTTP 200**, `384000` → **HTTP 200**, and only `1000000` is rejected
+> (HTTP 400 `invalid_request_error`). The 128000 ceiling in F2 is therefore stale for the current
+> gateway; the mitigations below are kept as history and as a reference if the endpoint regresses.
+> On a pi-ai route a per-model `maxTokens` becomes the request default, so it can be set explicitly.
 
 **Mitigation** (applied to the benchmark profiles): set `config.maxTokens: 65536` on `llm-deepseek`
 in `cordis.patch.yml`. The benchmark side also has two fail-safes (since 2026-09-10):
@@ -48,6 +55,30 @@ in `cordis.patch.yml`. The benchmark side also has two fail-safes (since 2026-09
 ## S5 — Schedule/Todo/Goal Event Bridging (implemented in M8)
 
 `src/bridges.ts` landed in M8: goal/change, todo/write, schedule/change, and plan/mode are all projected as memory events (see docs/m8-progress-memory-eval.md). The retrieval layer dedups state-family events as "only the latest for the same entity and family", while full history remains in the graph.
+
+## E1 — Entity over-merging (LLM adjudication quality, drifts with the model)
+
+**Status**: ⚠️ not fixed — v0.2 ships the *means* to fix it (prompt profiles), not a fix.
+
+The adjudication prompt in `src/entity-merge.ts` already states rule 3 ("Merely sharing or resembling a word is NOT enough"), rule 6 ("When unsure, answer 0"), and requires the reason to cite contextual evidence. The model nevertheless **violates the instruction it was given**, typically through **part-whole confusion**:
+
+```json
+{"kind":"entity-merge","mention":"opencode-go-extra","into":"opencode-go",
+ "reason":"opencode-go-extra is a profile/router entry FOR the opencode-go provider."}
+```
+
+The stated reason itself says "for" — a distinct referent — yet the pair was merged. In one real turn (turn 10) at least 4 of 7 merges were wrong; the worst merged nine unrelated model names into the `DeepSeek V4.1 Flash` entity with the reason "Both refer to the DeepSeek V4.1 Flash model family in catalog." — after which asking about V4.1 Flash also surfaces glm/grok/kimi.
+
+**Why it pollutes the *current* state**: merging normalizes `(subject, predicate)` across two different subjects, and the supersede adjudicator then marks a still-true older value `supersededBy` (e.g. `opencode-go has 27 models` replaced by `opencode-go-extra has 1 model`). The supersede *mechanism* is by design (history preserved; discounted 0.3 in present-tense modes only, never in explicit past ranges); the **verdict** is what is wrong.
+
+**Why it is now addressable**: verdict quality depends strongly on which model runs it and with what prompt — exactly the motivation for making prompts profiles in v0.2. Candidate remedies (unverified):
+1. add explicit part-whole / name-suffix counterexamples (`X` vs `X-extra`) to the merge prompt;
+2. raise the confidence bar or require a verbatim evidence span (the reason field is capped at 15 words but never validated);
+3. add a structural guard for one obvious class of "subordinate naming".
+
+**Verification still owed**: a real A/B — replay the same turns under two profiles and compare the wrong-merge count. Clean the existing pollution recorded above first (the journal supports `entity.delete` / `entity.upsert` / `event.delete` / `event.add`, but only while dsh is stopped — otherwise the in-memory snapshot overwrites the edit).
+
+**Observability**: every confirmed merge records its `reason` in `<dataDir>/extraction-debug.jsonl` (`kind: entity-merge`), so over-merges are auditable after the fact.
 
 ## Others
 
