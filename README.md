@@ -134,12 +134,16 @@ Resolution order, highest first: `prompts.<stage>` → the selected profile (`pr
             stages:
               extraction: { prompt: '<your template with {turn_text}>' }
         embeddingModels:
-          bge-m3: { repo: BAAI/bge-m3, dim: 1024, maxFileBytes: 2147483648 }
-        embeddingModel: bge-m3
-        embeddingSidecarModel: BAAI/bge-m3    # sidecar path reports its own dimension
+          multilingual-mpnet: { repo: sentence-transformers/paraphrase-multilingual-mpnet-base-v2, dim: 768, maxFileBytes: 2147483648 }
+        embeddingModel: multilingual-mpnet
+        embeddingSidecarModel: sentence-transformers/paraphrase-multilingual-mpnet-base-v2
 ```
 
 A profile prompt must keep its stage's input placeholder — `{turn_text}` for extraction, `{lines}` for both adjudication stages, `{query}` for both query-side stages (checked at load, refuses the profile otherwise). `{known_entities}` and `{candidate_mentions}` are optional in the extraction prompt and only warned about.
+
+> **Embedding-upgrade limits, stated honestly.** The sidecar applies the query instruction through sentence-transformers' `prompt_name`, i.e. a *named preset defined by the model*. Models that instead require a **text prefix** (`intfloat/multilingual-e5-*` wants `query: ` / `passage: `, `BAAI/bge-*` wants a similar instruction) have no such preset, so with those the query side embeds bare — it still works, but without the prefix the model was trained with. Prefer a model that needs no prefix (`sentence-transformers/paraphrase-multilingual-mpnet-base-v2` is a drop-in stronger option at 768 dims). Text-prefix support is not implemented; it is tracked as a follow-up.
+>
+> The sidecar path also downloads whatever the model needs on first use, and a model swap re-embeds the stored vectors lazily — expect the first retrieval after a swap to be slower.
 
 > The plugin resolves `python3` from the **dsh process** PATH — when dsh is launched from your shell it inherits that environment, so an interpreter that already has the packages works with zero configuration. If yours does not, `scripts/setup-python.sh` creates a dedicated venv (sentence-transformers + torch/gliner/stanza) and prints the exact `nerPython` / `embedPython` lines to paste into `cordis.patch.yml`.
 | `dataDir` | `<dsh-home>/memoplus4dsh` | Plugin data directory (journal, snapshots, model cache, expansion cache) |
@@ -147,6 +151,7 @@ A profile prompt must keep its stage's input placeholder — `{turn_text}` for e
 | `extractionMaxTokens` | `8192` | Output cap for extraction calls (reasoning models need the headroom) |
 | `extractionCallTimeoutMs` | `120000` | Per-call timeout; a stalled endpoint fails fast into the retry queue |
 | `extractionMaxRetries` | `2` | Retries after the first attempt; the turn is then skipped and logged |
+| `extractionConcurrency` | `1` | Extraction worker pool size; `1` is strict serial. Raise only when the endpoint tolerates overlapping extraction calls |
 | `snapshotThreshold` | `1000` | Journal ops between snapshot compactions |
 
 Extraction consumes your configured model's API quota — set `extraction: off` to opt out.

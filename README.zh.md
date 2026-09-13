@@ -113,6 +113,7 @@ scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 | `extractionMaxTokens` | `8192` | extraction 调用的输出上限（reasoning 模型需要这个余量）；等价于 `prompts.extraction.maxTokens` |
 | `extractionCallTimeoutMs` | `120000` | 单次调用超时；卡住的端点会快速失败并进入重试队列。等价于 `prompts.extraction.timeoutMs` |
 | `extractionMaxRetries` | `2` | 首次尝试之后的重试次数；超过后该 turn 被跳过并记录日志 |
+| `extractionConcurrency` | `1` | 抽取 worker 池大小；`1` 为严格串行。仅当端点能承受并发抽取调用时才调高 |
 | `snapshotThreshold` | `1000` | 两次快照压缩之间的 journal 操作数 |
 | `promptProfiles` | （无） | 具名 prompt profile，按声明顺序与会话路由匹配。每项形如 `{ name, match: { provider?, model? }, stages: { <阶段>: { prompt, maxTokens?, timeoutMs?, reasoningEffort? } } }`，`*` 为通配。内置 `default` profile 承载 v0.1 的原始 prompt，始终兜底 |
 | `promptProfile` | （自动） | 强制使用某个 profile，跳过路由匹配 |
@@ -142,12 +143,16 @@ scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
             stages:
               extraction: { prompt: '<你的模板，保留 {turn_text}>' }
         embeddingModels:
-          bge-m3: { repo: BAAI/bge-m3, dim: 1024, maxFileBytes: 2147483648 }
-        embeddingModel: bge-m3
-        embeddingSidecarModel: BAAI/bge-m3    # sidecar 会报出自己的维度
+          multilingual-mpnet: { repo: sentence-transformers/paraphrase-multilingual-mpnet-base-v2, dim: 768, maxFileBytes: 2147483648 }
+        embeddingModel: multilingual-mpnet
+        embeddingSidecarModel: sentence-transformers/paraphrase-multilingual-mpnet-base-v2
 ```
 
 profile 的 prompt 必须保留该阶段的输入占位符——extraction 是 `{turn_text}`，两个裁决阶段是 `{lines}`，两个查询侧阶段是 `{query}`（加载时校验，不满足直接拒绝该 profile）。extraction prompt 中的 `{known_entities}` / `{candidate_mentions}` 是可选的，缺失只告警。
+
+> **embedding 升级的边界，如实说明。** sidecar 是通过 sentence-transformers 的 `prompt_name` 施加查询指令的，也就是**模型自己定义的具名预设**。而要求**文本前缀**的模型（`intfloat/multilingual-e5-*` 需要 `query: ` / `passage: `，`BAAI/bge-*` 也有类似要求）没有这种预设，所以用它们时查询侧是按裸文本嵌入的——仍然能用，但少了模型训练时的前缀。建议选不需要前缀的模型（`sentence-transformers/paraphrase-multilingual-mpnet-base-v2` 是 768 维的现成更强选项）。**文本前缀尚未支持**，作为后续项跟踪。
+>
+> sidecar 路径首次使用会下载模型所需文件；换模型后已存向量会惰性重嵌入——切换后的第一次检索会明显变慢，属预期。
 
 Extraction 会消耗你配置的模型的 API 配额——设置 `extraction: off` 可退出。
 
