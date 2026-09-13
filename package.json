@@ -17,7 +17,8 @@
     }
   },
   "files": [
-    "lib"
+    "lib",
+    "profiles"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/build-client.mjs",
