@@ -8,7 +8,7 @@
  * These tests never call a model: they read the `memory_status` report and the
  * debug log, which is where the resolved configuration becomes observable.
  */
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -227,6 +227,14 @@ describe('apply() refuses a configuration that would call the model wrongly', ()
     expect(() => boot({ embeddingModel: 'ghost' })).toThrow(/unknown embeddingModel "ghost"/)
     expect(() => boot({ embeddingModel: 'ghost', embeddingModels: { mine: { repo: 'r', dim: 1, maxFileBytes: 1 } } }))
       .toThrow(/multilingual, english, mine/)
+  })
+
+  it('leaves the data directory untouched when it refuses to load', () => {
+    // Validation runs before the store exists, so a refused configuration
+    // leaves no half-created memory directory to clean up by hand.
+    expect(() => boot({ promptProfiles: [{ name: 'bad', match: {}, stages: { extraction: { prompt: 'nope' } } }] }))
+      .toThrow(/required placeholder/)
+    expect(readdirSync(dir)).toEqual([])
   })
 
   it('boots with extraction off, exposing no extraction pipeline but still serving status', async () => {

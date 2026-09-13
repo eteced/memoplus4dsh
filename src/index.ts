@@ -272,10 +272,6 @@ export function apply(ctx: Context, config: Config) {
   const logger = ctx.logger('memoplus4dsh')
   ctx.effect(() => {
     const dataDir = config.dataDir ?? defaultDataDir()
-    const store = new MemoryStore({
-      dir: dataDir,
-      snapshotThreshold: config.snapshotThreshold,
-    })
     // Route of the most recently observed session; extraction jobs carry
     // their own, this cell serves query expansion at injection time.
     let lastRoute: Route | undefined
@@ -313,6 +309,13 @@ export function apply(ctx: Context, config: Config) {
       onResolve: info => debugLog({ kind: 'prompt-profile', ...info }),
     })
     for (const warning of prompts.warnings) logger.warn(warning)
+
+    // Only past validation: a refused profile must not leave a half-created
+    // memory directory behind, so nothing touches the data dir before here.
+    const store = new MemoryStore({
+      dir: dataDir,
+      snapshotThreshold: config.snapshotThreshold,
+    })
 
     ctx.systemPrompt.section({
       name: 'memoplus4dsh',
