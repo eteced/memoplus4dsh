@@ -281,9 +281,11 @@ npm test
 
 ## 致谢与声明
 
-本项目与 Kimi K3 Thinking (high) 协作完成（co-author）。
+本项目与 Kimi K3 Thinking (high)、DeepSeek V4.1 Flash 协作完成（co-author）。
 
 声明：本项目仅使用 Kimi K3 作为开发助手，与月之暗面（Moonshot AI）无任何隶属、背书或合作关系。
+
+声明：本项目使用 DeepSeek V4.1 Flash 完成 prompt 调优（实测报告见 [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md)），与深度求索（DeepSeek）无任何隶属、背书或合作关系。
 
 ## 许可证
 
