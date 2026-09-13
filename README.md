@@ -184,6 +184,7 @@ A profile prompt must keep its stage's input placeholder — `{turn_text}` for e
 | `extractionMaxFailureRounds` | `3` | Failure rounds before a turn is abandoned (one round exhausts `extractionMaxRetries`). Below the cap the turn is retried on the next turn and on the next start; at the cap it is recorded as `abandoned` and reported by `memory_status` / doctor as memories not written |
 | `extractionConcurrency` | `1` | Extraction worker pool size; `1` is strict serial. Raise only when the endpoint tolerates overlapping extraction calls |
 | `snapshotThreshold` | `1000` | Journal ops between snapshot compactions |
+| `debug` | `false` | Diagnostic switch. Writes a `listener-saw` trace per session event and an `llm-empty` record for empty-content calls into `extraction-debug.jsonl` (~1000 lines/day even when healthy). **Off by default and never enabled for users**; turning it off does not affect the loss ledger (`failed` / `abandoned` / `requeue` stay unconditional) |
 
 Extraction consumes your configured model's API quota — set `extraction: off` to opt out.
 

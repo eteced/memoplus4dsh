@@ -5,12 +5,12 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-tools'
-import type { ContentBlock, Message } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { MemoryStore } from './store.js'
-import { ExtractionPipeline, ExtractionQueue, PendingJobLog } from './extraction.js'
+import { EMPTY_EXTRACTION_ERROR, ExtractionPipeline, ExtractionQueue, PendingJobLog } from './extraction.js'
 import type { ExtractionJob, OutstandingJob } from './extraction.js'
 import { LlmEntityMerger } from './entity-merge.js'
 import { LlmSupersedeResolver } from './supersede.js'
@@ -163,6 +163,16 @@ export interface Config {
   /** Force one profile by name, disabling route matching (default: match, then `default`). */
   promptProfile?: string
   /**
+   * 诊断开关，**默认 false**。打开后把详细诊断写进
+   * `<dataDir>/extraction-debug.jsonl`：每个 session 事件的 `listener-saw`
+   * 轨迹，以及空内容调用的 `llm-empty` 现场记录。日志量显著增加（正常运行
+   * 也能到每天近千行），只在排查事件流 / 抽取空内容时开。
+   *
+   * 关掉它不影响损失账本：`failed` / `abandoned` / `requeue` / `enqueue` /
+   * `extracted` / `prompt-profile` 这些记录与失败路径上的错误消息都无条件写。
+   */
+  debug?: boolean
+  /**
    * Per-stage prompt and model-parameter overrides that beat every profile.
    * `extractionMaxTokens` and `extractionCallTimeoutMs` are shorthand for this
    * layer's `extraction` entries.
@@ -261,6 +271,48 @@ function effectiveRoute(config: Config, route: Route | undefined): Route | undef
     : route
 }
 
+/** 一次插件模型调用在流上留下的现场信息，用于空内容取证。 */
+interface CallEvidence {
+  /** 流里 finish chunk 的 `reason.kind`；整条流没给出 finish 时缺省。 */
+  finish?: string
+  /** 收到的 chunk 总数，`text-delta` 之外的类型也计入。 */
+  chunks: number
+  /** 累积进可见文本的字符数（可能只有空白）。 */
+  chars: number
+  /** 流给出的用量计数；没有 usage chunk 时缺省。 */
+  usage?: TokenUsage
+}
+
+/** `callPluginLlm` 的可选取证参数。 */
+interface PluginCallOptions {
+  /** 这次调用属于哪个 turn；只有抽取路径拿得到，用于给现场记录定位。 */
+  job?: ExtractionJob
+  /**
+   * 传了它就声明"空内容即失败"：累积文本（trim 后）为空时抛
+   * `${emptyMessage} (现场信息)`。现场信息无条件带上——失败路径本来就要抛错，
+   * 不算日志噪声。不传则保持原语义（返回空串，调用方自行降级）。
+   */
+  emptyMessage?: string
+  /** `llm-empty` 记录的落盘通道；只在 `debug` 打开时被调用。 */
+  log?: (entry: Record<string, unknown>) => void
+}
+
+/** 现场信息排成错误消息 / 记录里的一段可读文本。 */
+function formatCallEvidence(evidence: CallEvidence): string {
+  const parts = [
+    `finish=${evidence.finish ?? 'none'}`,
+    `chunks=${evidence.chunks}`,
+    `chars=${evidence.chars}`,
+  ]
+  // dsh 的 StreamChunk 确实有 usage chunk（TokenUsage）——有就带上：思考打满
+  // 预算却零可见输出时，outputTokens/reasoningTokens 是唯一能证实的数字。
+  if (evidence.usage !== undefined) {
+    parts.push(`outputTokens=${evidence.usage.outputTokens}`)
+    if (evidence.usage.reasoningTokens !== undefined) parts.push(`reasoningTokens=${evidence.usage.reasoningTokens}`)
+  }
+  return parts.join(', ')
+}
+
 /** One auxiliary model call (extraction/expansion) through the user's own route. */
 async function callPluginLlm(
   ctx: Context,
@@ -270,6 +322,7 @@ async function callPluginLlm(
   maxTokens: number,
   timeoutMs?: number,
   reasoningEffort = 'off',
+  options: PluginCallOptions = {},
 ): Promise<string> {
   const resolved = effectiveRoute(config, route)
   if (resolved === undefined) {
@@ -280,6 +333,9 @@ async function callPluginLlm(
     source: { kind: 'plugin', plugin: name },
   })
   const texts = new Map<number, string>()
+  let chunks = 0
+  let finish: string | undefined
+  let usage: TokenUsage | undefined
   const stream = ctx.llm.stream({
     provider: resolved.provider,
     model: resolved.model,
@@ -301,11 +357,39 @@ async function callPluginLlm(
     signal: AbortSignal.timeout(timeoutMs ?? config.extractionCallTimeoutMs ?? 120_000),
   })
   for await (const chunk of stream) {
+    chunks++
     if (chunk.type === 'text-delta') {
       texts.set(chunk.index, (texts.get(chunk.index) ?? '') + chunk.text)
+    } else if (chunk.type === 'finish') {
+      // 适配器把 finish 作为终止 chunk 发出（dsh-llm 的 StreamChunk 契约），
+      // 它同时也是"流正常走完"的唯一标记，是空内容最硬的现场证据。
+      finish = chunk.reason.kind
+    } else if (chunk.type === 'usage') {
+      usage = chunk.usage
     }
   }
-  return [...texts.entries()].sort((a, b) => a[0] - b[0]).map(([, text]) => text).join('')
+  const text = [...texts.entries()].sort((a, b) => a[0] - b[0]).map(([, value]) => value).join('')
+  if (text.trim().length === 0 && options.emptyMessage !== undefined) {
+    const evidence: CallEvidence = {
+      ...(finish === undefined ? {} : { finish }),
+      chunks,
+      chars: text.length,
+      ...(usage === undefined ? {} : { usage }),
+    }
+    if (config.debug === true) {
+      options.log?.({
+        kind: 'llm-empty',
+        // session/turn 只有抽取路径给得出（job）；拿不到就不带，不编。
+        ...(options.job === undefined ? {} : { session: options.job.sessionId, turn: options.job.turn }),
+        provider: resolved.provider,
+        model: resolved.model,
+        maxTokens,
+        ...evidence,
+      })
+    }
+    throw new Error(`${options.emptyMessage} (${formatCallEvidence(evidence)})`)
+  }
+  return text
 }
 
 /**
@@ -485,7 +569,14 @@ export function apply(ctx: Context, config: Config) {
         prompt: job => stageFor('extraction', job.route).prompt,
         callLlm: (prompt, job) => {
           const stage = stageFor('extraction', job.route)
-          return callPluginLlm(ctx, config, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort)
+          // 唯一能看到流全部 chunk 的位置：空内容时把 finish/chunks/chars 无条件
+          // 拼进错误消息（失败路径本来就要抛错），debug 打开时另落一条
+          // llm-empty 现场记录。查询侧不传 emptyMessage，空内容仍按原语义降级。
+          return callPluginLlm(ctx, config, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort, {
+            emptyMessage: EMPTY_EXTRACTION_ERROR,
+            job,
+            log: debugLog,
+          })
         },
         ner: nerDetector,
         entityMerger: config.entityMergeLlm === false
@@ -584,16 +675,18 @@ export function apply(ctx: Context, config: Config) {
       retryOutstanding(outstandingAtStart, 'startup')
       let lastRetryPassMs = 0
       ctx.on('session/event', (session, event) => {
-        // Diagnostic trace: one line per session event. Cheap (a dozen lines
-        // per turn) and settles "did the extraction listener even fire" after
-        // the fact — the 2026-09-10 r2 incident (empty graph after memorize)
-        // was only diagnosable at this level.
-        try {
-          appendFileSync(join(dataDir, 'extraction-debug.jsonl'),
-            JSON.stringify({ at: new Date().toISOString(), kind: 'listener-saw', eventType: event.type,
-              reason: event.type === 'turn/end' ? (event.data as { reason?: unknown }).reason : undefined,
-              session: session.id }) + '\n', 'utf8')
-        } catch { /* never break */ }
+        // 事件流诊断：一个 session 事件一行。2026-09-10 r2 事故（memorize 后
+        // 图是空的）当时只有这一层能回答"监听器到底有没有被触发"，所以留着；
+        // 但它无条件写时一天近千行，信噪比太低——默认关（debug: false），
+        // 排查事件流时再开。
+        if (config.debug === true) {
+          debugLog({
+            kind: 'listener-saw',
+            eventType: event.type,
+            reason: event.type === 'turn/end' ? (event.data as { reason?: unknown }).reason : undefined,
+            session: session.id,
+          })
+        }
         if (event.type !== 'turn/end' || event.data.reason.kind !== 'completed') return
         const header = session.requestHeader()
         if (header !== undefined) lastRoute = { provider: header.config.provider, model: header.config.model }
@@ -648,6 +741,9 @@ export function apply(ctx: Context, config: Config) {
       const lines: string[] = ['memoplus4dsh status', '', '[config]']
       const shown: [string, unknown][] = [
         ['extraction', config.extraction ?? 'turn_end'],
+        // 诊断开关默认 false：只有显式 `debug: true` 才算打开，其余值（未配、
+        // false、别的东西）都按关闭处理。
+        ['debug', config.debug === true],
         ['injection', config.injection !== false],
         ['tools', config.tools !== false],
         ['progressBridge', config.progressBridge !== false],

@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
+import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 import type { Config } from '../src/index.js'
 import { apply } from '../src/index.js'
@@ -38,6 +39,8 @@ interface Harness {
   infos: string[]
   /** The settings service the Host half registers on, plus the card's save path. */
   settings: SettingsControl
+  /** Run the plugin's disposer, which drains the extraction queue. */
+  drain: () => Promise<void>
 }
 
 /** The two settings fields the Web card edits, as the settings service resolves them. */
@@ -53,12 +56,16 @@ interface SettingsControl {
   validate: (next: SettingsValue) => void
 }
 
+/** The raw chunk stream `ctx.llm.stream` hands back; tests supply their own. */
+type StreamStub = () => AsyncIterable<StreamChunk>
+
 /** A Cordis context stub carrying exactly what this plugin touches. */
-function harness(): Harness {
+function harness(stream: StreamStub = () => { throw new Error('boot wiring must not call the model') }): Harness {
   const tools = new Map<string, ToolDefinition>()
   const handlers = new Map<string, (...args: never[]) => unknown>()
   const warnings: string[] = []
   const infos: string[] = []
+  const disposers: (() => unknown)[] = []
   let settingsValue: SettingsValue = {}
   let settingsHooks: { setSource: (current: () => SettingsValue) => void; onChange: () => void; validate?: (value: SettingsValue) => void } | undefined
   const settings: SettingsControl = {
@@ -82,7 +89,8 @@ function harness(): Harness {
     }),
     // Cordis runs the effect body and keeps its returned disposer.
     effect: (body: () => unknown) => {
-      body()
+      const disposer = body()
+      if (typeof disposer === 'function') disposers.push(disposer as () => unknown)
       return () => {}
     },
     on: (event: string, handler: (...args: never[]) => unknown) => {
@@ -114,13 +122,12 @@ function harness(): Harness {
       return () => {}
     },
     systemPrompt: { section: () => () => {} },
-    llm: {
-      stream: () => {
-        throw new Error('boot wiring must not call the model')
-      },
-    },
+    llm: { stream },
   } as unknown as Context
-  return { ctx, tools, handlers, warnings, infos, settings }
+  const drain = async (): Promise<void> => {
+    for (const disposer of disposers.splice(0)) await disposer()
+  }
+  return { ctx, tools, handlers, warnings, infos, settings, drain }
 }
 
 /**
@@ -129,8 +136,8 @@ function harness(): Harness {
  * by *spawning* the python sidecars — hermetic tests must not load torch, so the
  * backend rows are exercised explicitly by the tests that need them.
  */
-function boot(overrides: Partial<Config> = {}): Harness {
-  const h = harness()
+function boot(overrides: Partial<Config> = {}, stream?: StreamStub): Harness {
+  const h = harness(stream)
   apply(h.ctx, { extraction: 'turn_end', dataDir: dir, nerAssist: false, embedding: false, ...overrides })
   return h
 }
@@ -157,6 +164,25 @@ const debugLines = (): Record<string, unknown>[] =>
   existsSync(join(dir, 'extraction-debug.jsonl'))
     ? readFileSync(join(dir, 'extraction-debug.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as Record<string, unknown>)
     : []
+
+/** Minimal session carrying one completed turn, enough for the turn/end listener. */
+const turnSession = {
+  id: 's',
+  snapshotEvents: () => [
+    { type: 'turn/start', seq: 1, time: '2026-09-13T00:00:00.000Z', data: { turn: 2 } },
+    { type: 'user/message', seq: 2, time: '2026-09-13T00:00:00.000Z', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '下一轮' }] } },
+  ],
+  requestHeader: () => ({ config: { provider: 'p', model: 'm' } }),
+}
+
+/** Fire the listener's completed-turn path; the job runs on the queue. */
+function emitTurnEnd(h: Harness, turn = 2): void {
+  const handler = h.handlers.get('session/event')
+  expect(handler).toBeDefined()
+  handler!(turnSession as never, {
+    type: 'turn/end', seq: 9, time: Date.now(), data: { reason: { kind: 'completed' }, turn },
+  } as never)
+}
 
 describe('apply() boot wiring', () => {
   it('registers the four memory tools and both session hooks', () => {
@@ -382,16 +408,6 @@ describe('external profile files', () => {
 })
 
 describe('extraction failure visibility', () => {
-  /** Minimal session carrying one completed turn, enough for the turn/end listener. */
-  const sessionStub = {
-    id: 's',
-    snapshotEvents: () => [
-      { type: 'turn/start', seq: 1, time: '2026-09-13T00:00:00.000Z', data: { turn: 2 } },
-      { type: 'user/message', seq: 2, time: '2026-09-13T00:00:00.000Z', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '下一轮' }] } },
-    ],
-    requestHeader: () => ({ config: { provider: 'p', model: 'm' } }),
-  }
-
   it('retries an outstanding failure on the next turn, not only at start-up', () => {
     writeFileSync(join(dir, 'extraction-pending.jsonl'), [
       JSON.stringify({ kind: 'pending', job: { sessionId: 's', turn: 3, turnText: 'User: x', mentionTime: '2026-09-13T00:00:00.000Z' } }),
@@ -399,9 +415,7 @@ describe('extraction failure visibility', () => {
       '',
     ].join('\n'), 'utf8')
     const h = boot({ extractionMaxRetries: 0 })
-    const handler = h.handlers.get('session/event')
-    expect(handler).toBeDefined()
-    handler!(sessionStub as never, { type: 'turn/end', seq: 9, time: Date.now(), data: { reason: { kind: 'completed' }, turn: 2 } } as never)
+    emitTurnEnd(h)
     // Start-up requeues carry trigger "startup"; this one proves the in-run pass.
     const inRun = debugLines().filter(entry => entry['kind'] === 'requeue' && entry['trigger'] === 'turn')
     expect(inRun.map(entry => entry['turn'])).toContain(3)
@@ -421,5 +435,73 @@ describe('extraction failure visibility', () => {
     const report = await status(boot({ extractionMaxRetries: 0 }))
     expect(report).toContain('extraction failures awaiting retry: 1')
     expect(report).toContain('ABANDONED extraction: 1 turn(s)')
+  })
+})
+
+describe('empty-content evidence', () => {
+  /**
+   * 端点一个 chunk 都没给：chunks=0、流里也没有 finish。这就是"流被饿死"的
+   * 形态，也是唯一没有 finish 证据可达的路径。
+   */
+  async function* starvedEmpty(): AsyncGenerator<StreamChunk> {}
+
+  /**
+   * 思考打满输出预算却零可见输出（M9 F-1 现场的形态）：只有 usage 和 finish，
+   * 没有 text-delta。usage/reasoningTokens 是这种失败唯一能证实的数字。
+   */
+  async function* starvedReasoning(): AsyncGenerator<StreamChunk> {
+    yield { type: 'usage', usage: { inputTokens: 1_056, outputTokens: 8_192, reasoningTokens: 8_100 } }
+    yield { type: 'finish', reason: { kind: 'max-tokens' } }
+  }
+
+  it('keeps both diagnostics off by default, and still books the loss', async () => {
+    const h = boot({ extractionMaxRetries: 0 }, starvedEmpty)
+    emitTurnEnd(h)
+    await h.drain()
+    const kinds = debugLines().map(entry => entry['kind'])
+    // 默认 false：事件流轨迹和空内容记录都不得出现。
+    expect(kinds).not.toContain('listener-saw')
+    expect(kinds).not.toContain('llm-empty')
+    // 损失账本无条件：failed 记录照写，且错误消息已经带上流现场。
+    const failed = debugLines().find(entry => entry['kind'] === 'failed')
+    expect(failed?.['error']).toBe('extraction produced empty content (finish=none, chunks=0, chars=0)')
+  })
+
+  it('stays off when the key is explicitly false', async () => {
+    const h = boot({ debug: false, extractionMaxRetries: 0 }, starvedEmpty)
+    expect(await status(h)).toContain('debug = false')
+    emitTurnEnd(h)
+    await h.drain()
+    expect(debugLines().some(entry => entry['kind'] === 'listener-saw')).toBe(false)
+    expect(debugLines().some(entry => entry['kind'] === 'llm-empty')).toBe(false)
+  })
+
+  it('records each streamed event and the empty call while debug is on', async () => {
+    const h = boot({ debug: true, extractionMaxRetries: 0 }, starvedReasoning)
+    expect(await status(h)).toContain('debug = true')
+    emitTurnEnd(h)
+    await h.drain()
+    const saw = debugLines().filter(entry => entry['kind'] === 'listener-saw')
+    expect(saw.map(entry => entry['eventType'])).toEqual(['turn/end'])
+    expect(saw[0]?.['session']).toBe('s')
+    // 现场记录：at 由 debugLog 补，session/turn 来自 job，其余来自这一条流。
+    const empty = debugLines().find(entry => entry['kind'] === 'llm-empty')
+    expect(empty).toMatchObject({
+      session: 's',
+      turn: 2,
+      provider: 'p',
+      model: 'm',
+      maxTokens: 8192,
+      finish: 'max-tokens',
+      chunks: 2,
+      chars: 0,
+      usage: { inputTokens: 1_056, outputTokens: 8_192, reasoningTokens: 8_100 },
+    })
+    expect(typeof empty?.['at']).toBe('string')
+    // debug 关掉时错误消息是唯一证据，所以它也必须带着同样的现场。
+    const failed = debugLines().find(entry => entry['kind'] === 'failed')
+    expect(failed?.['error']).toBe(
+      'extraction produced empty content (finish=max-tokens, chunks=2, chars=0, outputTokens=8192, reasoningTokens=8100)',
+    )
   })
 })

@@ -63,6 +63,7 @@ MemoryAgentBench; see [docs/evaluation.md](docs/evaluation.en.md) for the full a
   mistyped profile name is refused with its reason. Every other setting stays
   with `cordis.yml`. Adds the runtime dependency `@deepseek-ai/schemastery` (the
   schema library dsh ships) and the build-time `esbuild`.
+- **Diagnostics are off by default, and an empty-content failure carries its own evidence.** The new `debug` (**default false**) gates the per-session-event `listener-saw` trace (previously unconditional at ~1000 lines/day) and an `llm-empty` record for empty-content calls (`provider`/`model`/`maxTokens`/`chunks`/`chars`/`finish`/`usage`, fields taken from `@deepseek-ai/dsh-llm`'s `StreamChunk`). **On the failure path the evidence is unconditional**: the thrown error reads `extraction produced empty content (finish=…, chunks=…, chars=…)`, so a default deployment can still diagnose it. The loss ledger (`failed`/`abandoned`/`requeue`) stays unconditional.
 - **Fixed: an extraction failure no longer drops a turn's memories silently.** A
   turn whose retries were exhausted used to get a `settled` tombstone — terminal,
   never retried, and visible nowhere but a log line. It now records a `failed`

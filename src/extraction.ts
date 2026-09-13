@@ -217,6 +217,16 @@ export function formatKnownEntities(
   return result
 }
 
+/**
+ * 抽取调用没有产出任何可见文本时的错误前缀。
+ *
+ * 放在这里是为了让"空内容"只有一个字面量来源：`ExtractionPipeline` 直接装配
+ * 时抛它；线上装配（`src/index.ts` 的 `callPluginLlm`）用同一个字面量抛出，
+ * 并在后面无条件补上流现场（finish/chunks/chars）——只有那一层看得到全部
+ * chunk，是唯一能取证的位置。
+ */
+export const EMPTY_EXTRACTION_ERROR = 'extraction produced empty content'
+
 /** Minimal fact length below which a row is dropped as too weak. */
 export const MIN_FACT_LENGTH = 12
 
@@ -374,7 +384,10 @@ export class ExtractionPipeline {
         '{candidate_mentions}': candidateMentions,
       })
       const raw = (await this.callLlm(prompt, job)).trim()
-      if (raw.length === 0) throw new Error('extraction produced empty content')
+      // 这条守卫兜住不走 callPluginLlm 的调用方（直接装配 pipeline 的场景）；
+      // 线上装配在 callPluginLlm 里就地抛错，那里能带上流现场信息，见
+      // `src/index.ts` 的 EMPTY_EXTRACTION_ERROR 用法。
+      if (raw.length === 0) throw new Error(EMPTY_EXTRACTION_ERROR)
       const parsed = parseExtractionOutput(raw)
       coerceSpeakerTypes(parsed, speakers)
       rows.push(...parsed.events.filter(row => row.fact.length >= MIN_FACT_LENGTH))

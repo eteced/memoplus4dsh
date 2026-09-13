@@ -118,6 +118,7 @@ scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 | `extractionMaxFailureRounds` | `3` | 失败轮次上限（一轮 = 用尽一次 `extractionMaxRetries`）。未达上限的 turn 会在下一轮对话和下次启动时重抽；达上限后记入 `abandoned`，并由 `memory_status` / doctor 报告该 turn 的记忆未写入 |
 | `extractionConcurrency` | `1` | 抽取 worker 池大小；`1` 为严格串行。仅当端点能承受并发抽取调用时才调高 |
 | `snapshotThreshold` | `1000` | 两次快照压缩之间的 journal 操作数 |
+| `debug` | `false` | 诊断开关。打开后把每个 session 事件的 `listener-saw` 轨迹与空内容调用的 `llm-empty` 现场记录写进 `extraction-debug.jsonl`（正常也能到每天近千行）。**默认关闭，不要给用户默认打开**；关掉不影响损失账本（`failed` / `abandoned` / `requeue` 等仍无条件写） |
 | `promptProfiles` | （无） | 具名 prompt profile，按声明顺序与**该次调用实际使用的模型**匹配。每项形如 `{ name, match: { provider?, model? }, stages: { <阶段>: { prompt, maxTokens?, timeoutMs?, reasoningEffort? } } }`，`*` 为通配。内置 `default` profile 承载 v0.1 的原始 prompt，始终兜底 |
 | `promptProfilesDir` | `<dataDir>/prompts` | 外部 profile 文件目录。每个 `*.json` 可放一个 profile、一个数组或 `{"profiles": [...]}`；文件名序加载，**排在内联 `promptProfiles` 之后**（内联先匹配，文件只做扩展）。坏文件在启动时即报错，不会带着它去调用模型 |
 | `promptProfile` | （自动） | 强制使用某个 profile，跳过路由匹配 |

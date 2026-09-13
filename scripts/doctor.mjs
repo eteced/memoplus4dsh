@@ -70,6 +70,7 @@ const DEFAULTS = {
   extractionMaxFailureRounds: 3,
   extractionConcurrency: 1,
   snapshotThreshold: 1000,
+  debug: false,
 }
 
 const ok = s => `✅ ${s}`
