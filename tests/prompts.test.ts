@@ -4,6 +4,7 @@
  * and the configuration validation that keeps a broken profile from reaching
  * the model.
  */
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { MERGE_ADJUDICATION_PROMPT } from '../src/entity-merge.js'
 import { EXTRACTION_PROMPT_TURN } from '../src/extraction.js'
@@ -23,6 +24,25 @@ import { renderPrompt } from '../src/text.js'
 
 describe('default profile', () => {
   it('carries the v0.1 prompts byte for byte', () => {
+    // Comparing the default profile against the exported constants is vacuous:
+    // both sides move together, so editing a constant would keep this green while
+    // silently changing behaviour for every deployment. The golden fixture is
+    // extracted from the released v0.1 revision, so it only changes when someone
+    // deliberately decides to change the shipped prompts.
+    const golden = JSON.parse(
+      readFileSync(new URL('./fixtures/v01-prompts.json', import.meta.url), 'utf8'),
+    ) as { prompts: Record<string, { file: string; constant: string; text: string }> }
+    for (const stage of PROMPT_STAGES) {
+      const expected = golden.prompts[stage]
+      expect(expected, `golden fixture is missing stage "${stage}"`).toBeDefined()
+      expect(
+        DEFAULT_PROFILE.stages?.[stage]?.prompt,
+        `${expected.file} ${expected.constant} drifted from the released v0.1 text`,
+      ).toBe(expected.text)
+    }
+  })
+
+  it('wires each default prompt from its own module constant', () => {
     expect(DEFAULT_PROFILE.stages?.extraction?.prompt).toBe(EXTRACTION_PROMPT_TURN)
     expect(DEFAULT_PROFILE.stages?.entityMerge?.prompt).toBe(MERGE_ADJUDICATION_PROMPT)
     expect(DEFAULT_PROFILE.stages?.supersede?.prompt).toBe(SUPERSEDE_ADJUDICATION_PROMPT)

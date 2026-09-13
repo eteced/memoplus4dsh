@@ -2,9 +2,20 @@
  * Embedding-preset resolution and sidecar-model configuration: the two seams
  * that let a deployment upgrade the embedding model without patching source.
  */
-import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { DEFAULT_SIDECAR_MODEL, DEFAULT_SIDECAR_QUERY_PROMPT, HarrierEmbedder } from '../src/embed-sidecar.js'
 import { EMBEDDING_MODELS, resolveEmbeddingModel } from '../src/embedding.js'
+
+let dir: string
+beforeAll(() => {
+  dir = mkdtempSync(join(tmpdir(), 'memoplus4dsh-embed-'))
+})
+afterAll(() => {
+  rmSync(dir, { recursive: true, force: true })
+})
 
 describe('resolveEmbeddingModel', () => {
   it('resolves the shipped presets by name', () => {
@@ -50,5 +61,30 @@ describe('HarrierEmbedder configuration', () => {
   it('reports the expected dimension until the sidecar handshake corrects it', () => {
     expect(new HarrierEmbedder({ expectedDim: 768 }).dim).toBe(768)
     expect(new HarrierEmbedder().dim).toBe(1024)
+  })
+
+  it('adopts the dimension the sidecar actually reports', async () => {
+    // The claim under test: a swapped embedding model must not be described as
+    // 1024-dim, or retrieval treats every stored vector as stale and re-embeds on
+    // every query. A stub interpreter stands in for the model so this stays local
+    // and fast; the bridge's protocol is what is being checked, not the model.
+    const stub = join(dir, 'fake-python.sh')
+    writeFileSync(stub, [
+      '#!/bin/sh',
+      `echo '{"ready": true, "model": "stub", "dim": 768}'`,
+      'while IFS= read -r line; do',
+      `  id=$(printf '%s' "$line" | sed -n 's/.*"id":\\([0-9]*\\).*/\\1/p')`,
+      `  echo "{\\"id\\": $id, \\"vectors\\": [[0.1, 0.2, 0.3]]}"`,
+      'done',
+    ].join('\n') + '\n', { mode: 0o755 })
+
+    const embedder = new HarrierEmbedder({ python: stub, model: 'stub/other-model', expectedDim: 1024 })
+    expect(await embedder.available()).toBe(true)
+    expect(embedder.dim).toBe(768)
+    const vectors = await embedder.embed(['anything'])
+    expect(vectors).toHaveLength(1)
+    expect(vectors?.[0]).toHaveLength(3)
+    // A model with its own preset name gets no harrier instruction by default.
+    expect(embedder.queryPrompt).toBeNull()
   })
 })

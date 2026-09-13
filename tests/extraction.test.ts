@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, appendFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, appendFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -311,6 +311,56 @@ describe('PendingJobLog', () => {
 
   it('returns empty when the file does not exist', () => {
     expect(new PendingJobLog(join(dir, 'nope.jsonl')).loadPending()).toEqual([])
+  })
+
+  describe('countUnsettled', () => {
+    it('counts settled work as zero, not as a line count', () => {
+      // The bug this method exists for: the log keeps one `settled` tombstone per
+      // finished job, so counting lines reports a permanent backlog on a queue
+      // that is in fact empty — and the diagnostics read "growth means extraction
+      // is failing".
+      const path = join(dir, 'pending.jsonl')
+      const log = new PendingJobLog(path)
+      log.recordEnqueue(makeJob({ turn: 1 }))
+      log.recordSettled('session-1', 1)
+      log.recordEnqueue(makeJob({ turn: 2 }))
+      log.recordSettled('session-1', 2)
+      expect(new PendingJobLog(path).countUnsettled()).toBe(0)
+      expect(readFileSync(path, 'utf8').trim().split('\n')).toHaveLength(4)
+    })
+
+    it('counts only the jobs still awaiting a terminal outcome', () => {
+      const path = join(dir, 'pending.jsonl')
+      const log = new PendingJobLog(path)
+      log.recordEnqueue(makeJob({ turn: 1 }))
+      log.recordEnqueue(makeJob({ turn: 2 }))
+      log.recordEnqueue(makeJob({ turn: 3 }))
+      log.recordSettled('session-1', 1)
+      expect(new PendingJobLog(path).countUnsettled()).toBe(2)
+    })
+
+    it('is read-only, so a live queue keeps its crash-recovery log', () => {
+      // loadPending() truncates the file. Reporting queue health must not consume
+      // the log: a drained queue whose log was truncated cannot be requeued after
+      // a crash. This is the contract that keeps countUnsettled separate.
+      const path = join(dir, 'pending.jsonl')
+      const log = new PendingJobLog(path)
+      log.recordEnqueue(makeJob({ turn: 7 }))
+      const before = readFileSync(path, 'utf8')
+      expect(new PendingJobLog(path).countUnsettled()).toBe(1)
+      expect(readFileSync(path, 'utf8')).toBe(before)
+      // And the jobs are still there for an actual recovery.
+      expect(new PendingJobLog(path).loadPending().map(j => j.turn)).toEqual([7])
+    })
+
+    it('tolerates a corrupt tail line and a missing file', () => {
+      const path = join(dir, 'pending.jsonl')
+      const log = new PendingJobLog(path)
+      log.recordEnqueue(makeJob({ turn: 3 }))
+      appendFileSync(path, '{"kind":"pending","job":{"sess', 'utf8')
+      expect(new PendingJobLog(path).countUnsettled()).toBe(1)
+      expect(new PendingJobLog(join(dir, 'nope.jsonl')).countUnsettled()).toBe(0)
+    })
   })
 })
 
