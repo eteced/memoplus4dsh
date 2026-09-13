@@ -140,7 +140,7 @@ function countUnsettledJobs(file) {
         ? `${entry.job.sessionId}:${entry.job.turn}`
         : `${entry.sessionId}:${entry.turn}`
       if (entry.kind === 'pending') open.add(key)
-      else if (entry.kind === 'settled' || entry.kind === 'abandoned') open.delete(key)
+      else if (entry.kind !== 'failed') open.delete(key)
     } catch {
       // Half-written tail line after a crash — ignore.
     }
