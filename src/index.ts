@@ -219,6 +219,24 @@ interface Route {
   model: string
 }
 
+/**
+ * The route a plugin call actually runs on.
+ *
+ * `extractionProvider` + `extractionModel` replace the session's route for every
+ * auxiliary call (extraction, adjudication, expansion). Prompt profiles key off
+ * *this* route, never the session's: matching them on the session's model would
+ * pick the wrong prompt for a deployment that overrides its memory model.
+ *
+ * @param config - plugin configuration.
+ * @param route - the session's route, when one has been observed.
+ * @returns The configured override when both halves are set, else the session route.
+ */
+function effectiveRoute(config: Config, route: Route | undefined): Route | undefined {
+  return config.extractionProvider !== undefined && config.extractionModel !== undefined
+    ? { provider: config.extractionProvider, model: config.extractionModel }
+    : route
+}
+
 /** One auxiliary model call (extraction/expansion) through the user's own route. */
 async function callPluginLlm(
   ctx: Context,
@@ -229,9 +247,7 @@ async function callPluginLlm(
   timeoutMs?: number,
   reasoningEffort = 'off',
 ): Promise<string> {
-  const resolved = config.extractionProvider !== undefined && config.extractionModel !== undefined
-    ? { provider: config.extractionProvider, model: config.extractionModel }
-    : route
+  const resolved = effectiveRoute(config, route)
   if (resolved === undefined) {
     throw new Error('no provider/model route available for the memory plugin call')
   }
@@ -310,6 +326,14 @@ export function apply(ctx: Context, config: Config) {
     })
     for (const warning of prompts.warnings) logger.warn(warning)
 
+    /**
+     * Resolve one stage for a session route, through the route the call will
+     * really use. Every stage goes through here so a profile can never be
+     * matched against a model that does not run the call.
+     */
+    const stageFor = (stage: PromptStage, sessionRoute: Route | undefined) =>
+      prompts.resolve(stage, effectiveRoute(config, sessionRoute))
+
     // Only past validation: a refused profile must not leave a half-created
     // memory directory behind, so nothing touches the data dir before here.
     const store = new MemoryStore({
@@ -371,13 +395,13 @@ export function apply(ctx: Context, config: Config) {
       ? undefined
       : createQueryExpander({
           cachePath: join(dataDir, 'query-expansion-cache.json'),
-          prompt: () => prompts.resolve('queryExpansion', lastRoute).prompt,
+          prompt: () => stageFor('queryExpansion', lastRoute).prompt,
           // Expansion output is ≤12 short lines: the default 1024 tokens cover
           // a reasoning model's thinking for that, and 30s keeps the pre-step
           // critical path responsive when the endpoint degrades (failure → no
           // expansion). A profile may raise either bound.
           callLlm: prompt => {
-            const stage = prompts.resolve('queryExpansion', lastRoute)
+            const stage = stageFor('queryExpansion', lastRoute)
             return callPluginLlm(ctx, config, lastRoute, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort)
           },
         })
@@ -385,9 +409,9 @@ export function apply(ctx: Context, config: Config) {
       ? undefined
       : createQueryDistiller({
           cachePath: join(dataDir, 'query-distill-cache.json'),
-          prompt: () => prompts.resolve('queryDistill', lastRoute).prompt,
+          prompt: () => stageFor('queryDistill', lastRoute).prompt,
           callLlm: prompt => {
-            const stage = prompts.resolve('queryDistill', lastRoute)
+            const stage = stageFor('queryDistill', lastRoute)
             return callPluginLlm(ctx, config, lastRoute, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort)
           },
         })
@@ -409,9 +433,9 @@ export function apply(ctx: Context, config: Config) {
       // without a reload.
       const pipeline = new ExtractionPipeline({
         store,
-        prompt: job => prompts.resolve('extraction', job.route).prompt,
+        prompt: job => stageFor('extraction', job.route).prompt,
         callLlm: (prompt, job) => {
-          const stage = prompts.resolve('extraction', job.route)
+          const stage = stageFor('extraction', job.route)
           return callPluginLlm(ctx, config, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort)
         },
         ner: nerDetector,
@@ -422,9 +446,9 @@ export function apply(ctx: Context, config: Config) {
             embedder,
             // Adjudication output is a few "N: M" lines; the default 4096-token
             // budget plus the shared call timeout keep a turn's write path bounded.
-            prompt: job => prompts.resolve('entityMerge', job.route).prompt,
+            prompt: job => stageFor('entityMerge', job.route).prompt,
             callLlm: (prompt, job) => {
-              const stage = prompts.resolve('entityMerge', job.route)
+              const stage = stageFor('entityMerge', job.route)
               return callPluginLlm(ctx, config, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort)
             },
             onLog: debugLog,
@@ -433,9 +457,9 @@ export function apply(ctx: Context, config: Config) {
           ? undefined
           : new LlmSupersedeResolver({
             store,
-            prompt: job => prompts.resolve('supersede', job.route).prompt,
+            prompt: job => stageFor('supersede', job.route).prompt,
             callLlm: (prompt, job) => {
-              const stage = prompts.resolve('supersede', job.route)
+              const stage = stageFor('supersede', job.route)
               return callPluginLlm(ctx, config, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort)
             },
             onLog: debugLog,
@@ -567,10 +591,15 @@ export function apply(ctx: Context, config: Config) {
       lines.push('', '[prompts]')
       lines.push(`  configured: ${prompts.names().join(', ')}`)
       lines.push(`  route: ${lastRoute === undefined ? '(none observed yet — stages report the fallback)' : `${lastRoute.provider}/${lastRoute.model}`}`)
+      if (config.extractionProvider !== undefined && config.extractionModel !== undefined) {
+        // Without this line an operator cannot tell why a profile matched a model
+        // other than the session's: the override decides the route stages run on.
+        lines.push(`  extraction override: ${config.extractionProvider}/${config.extractionModel} — stages above are matched on this route`)
+      }
       // Resolve rather than summarize: the numbers are the point of a profile,
       // and an operator debugging output length needs the effective budget.
       for (const stage of PROMPT_STAGES) {
-        const resolved = prompts.resolve(stage, lastRoute)
+        const resolved = stageFor(stage, lastRoute)
         const timeout = resolved.timeoutMs === undefined ? '' : `, timeoutMs ${resolved.timeoutMs}`
         lines.push(`  ${stage}: profile ${resolved.profile}, maxTokens ${resolved.maxTokens}, effort ${resolved.reasoningEffort}${timeout}`)
       }

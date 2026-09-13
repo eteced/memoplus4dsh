@@ -115,13 +115,15 @@ scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 | `extractionMaxRetries` | `2` | 首次尝试之后的重试次数；超过后该 turn 被跳过并记录日志 |
 | `extractionConcurrency` | `1` | 抽取 worker 池大小；`1` 为严格串行。仅当端点能承受并发抽取调用时才调高 |
 | `snapshotThreshold` | `1000` | 两次快照压缩之间的 journal 操作数 |
-| `promptProfiles` | （无） | 具名 prompt profile，按声明顺序与会话路由匹配。每项形如 `{ name, match: { provider?, model? }, stages: { <阶段>: { prompt, maxTokens?, timeoutMs?, reasoningEffort? } } }`，`*` 为通配。内置 `default` profile 承载 v0.1 的原始 prompt，始终兜底 |
+| `promptProfiles` | （无） | 具名 prompt profile，按声明顺序与**该次调用实际使用的模型**匹配。每项形如 `{ name, match: { provider?, model? }, stages: { <阶段>: { prompt, maxTokens?, timeoutMs?, reasoningEffort? } } }`，`*` 为通配。内置 `default` profile 承载 v0.1 的原始 prompt，始终兜底 |
 | `promptProfile` | （自动） | 强制使用某个 profile，跳过路由匹配 |
 | `prompts` | （无） | 阶段级覆盖，优先级高于所有 profile：`extraction` / `entityMerge` / `supersede` / `queryExpansion` / `queryDistill` |
 
 ### Prompt profile 与 embedding 升级
 
-每个会调用模型的阶段都同时拥有「prompt + 输出上限 + 单次超时 + reasoning effort」。这些原先写死成单一模型族的调参，现在由 profile 配置，并且**按会话实际路由逐次解析**——在 Models 页面切模型后，下一个 turn 就用上新 prompt，无需重载。
+每个会调用模型的阶段都同时拥有「prompt + 输出上限 + 单次超时 + reasoning effort」。这些原先写死成单一模型族的调参，现在由 profile 配置，并且**按该次调用实际使用的模型逐次解析**——在 Models 页面切模型后，下一个 turn 就用上新 prompt，无需重载。
+
+「实际使用的模型」在配置了 `extractionProvider` + `extractionModel` 时尤其重要：这两个键会替换**所有**辅助调用的路由，所以 profile 是按**覆盖后的路由**匹配的，而不是按输入框里选的那个模型。`memory_status` 会同时打印会话路由与这个覆盖项，就是为了让你能看出 profile 究竟匹配到了哪个。
 
 优先级从高到低：`prompts.<阶段>` → 选中的 profile（`promptProfile`，否则第一个 `match` 命中的 `promptProfiles` 条目）→ 内置 `default`。`extractionMaxTokens` / `extractionCallTimeoutMs` 等价于 `prompts.extraction` 的对应项。`memory_status` 会报出每个阶段当前用的 profile。
 

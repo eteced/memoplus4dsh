@@ -11,7 +11,8 @@ memoplus4dsh 的重要修改归档，按开发里程碑组织。各里程碑的�
 - **Prompt profile。** 五个阶段的 prompt（抽取、实体合并、supersede 判定、
   查询扩展、查询蒸馏）以及随之绑定的模型参数（输出上限、单次超时、reasoning
   effort）不再是字面量。一个 profile 形如 `{ name, match: { provider?, model? },
-  stages }`，**按会话实际路由逐次解析**——在 Models 页面切模型后，下一个 turn
+  stages }`，**按该次调用实际使用的模型逐次解析**（配置了 `extractionProvider` /
+  `extractionModel` 时按覆盖后的路由匹配）——在 Models 页面切模型后，下一个 turn
   即生效，无需重载。优先级：`prompts.<阶段>` → 选中的 profile（`promptProfile`，
   否则第一个命中的 `promptProfiles`）→ 内置 `default`。内置 default 逐字节承载
   v0.1 的原始 prompt，且 `extractionMaxTokens` / `extractionCallTimeoutMs` 仍等价

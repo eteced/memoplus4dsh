@@ -102,7 +102,7 @@ Set under the plugin's `config:` in the profile's `cordis.patch.yml`:
 | `embedPython` | (nerPython or python3) | Python executable for the harrier embedding sidecar |
 | `hfBaseUrl` | `https://huggingface.co` | Mirror base URL for the embedding model download |
 | `queryExpansion` | `true` | LLM query expansion during retrieval + verbatim-quote query distillation for injection (1024-token/30s bounded calls, results cached on disk per query) |
-| `promptProfiles` | (none) | Named prompt profiles, tried in declaration order against the session's route. Each is `{ name, match: { provider?, model? }, stages: { <stage>: { prompt, maxTokens?, timeoutMs?, reasoningEffort? } } }`; `*` is a wildcard. The built-in `default` profile holds the v0.1 prompts and is always the fallback |
+| `promptProfiles` | (none) | Named prompt profiles, tried in declaration order against the model each call actually runs on. Each is `{ name, match: { provider?, model? }, stages: { <stage>: { prompt, maxTokens?, timeoutMs?, reasoningEffort? } } }`; `*` is a wildcard. The built-in `default` profile holds the v0.1 prompts and is always the fallback |
 | `promptProfile` | (auto) | Force one profile by name instead of matching the route |
 | `prompts` | (none) | Per-stage overrides that beat every profile: `extraction` / `entityMerge` / `supersede` / `queryExpansion` / `queryDistill` |
 | `entityMergeLlm` | `true` | LLM-adjudicated entity merge at extraction (embedding candidates + one bounded call per turn; only explicit `sure` merges) |
@@ -112,9 +112,11 @@ Set under the plugin's `config:` in the profile's `cordis.patch.yml`:
 
 ### Prompt profiles and embedding upgrades
 
-Every stage that calls a model owns a prompt plus its output cap, per-call timeout, and reasoning effort. They were hardcoded to one model family's tuning; a profile makes them configuration, and the profile is chosen per call from the session's actual route — so switching the model in the Models page changes the prompts the *next* turn uses, with no reload.
+Every stage that calls a model owns a prompt plus its output cap, per-call timeout, and reasoning effort. They were hardcoded to one model family's tuning; a profile makes them configuration, and the profile is chosen per call from the model that call actually runs on — so switching the model in the Models page changes the prompts the *next* turn uses, with no reload.
 
-Resolution order, highest first: `prompts.<stage>` → the selected profile (`promptProfile`, else the first `promptProfiles` entry whose `match` accepts the route) → the built-in `default`. `extractionMaxTokens` and `extractionCallTimeoutMs` are shorthand for the `prompts.extraction` entries. `memory_status` reports which profile each stage is using.
+"Actually runs on" matters when `extractionProvider` + `extractionModel` are set: those override the session's route for every auxiliary call, so profiles are matched on the **override**, not on the model in the composer. `memory_status` prints both the session route and the override, precisely so you can tell which one a profile matched.
+
+Resolution order, highest first: `prompts.<stage>` → the selected profile (`promptProfile`, else the first `promptProfiles` entry whose `match` accepts that route) → the built-in `default`. `extractionMaxTokens` and `extractionCallTimeoutMs` are shorthand for the `prompts.extraction` entries. `memory_status` reports which profile each stage is using.
 
 ```yaml
 - insert:

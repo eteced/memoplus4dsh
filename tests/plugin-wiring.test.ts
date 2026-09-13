@@ -180,6 +180,42 @@ describe('apply() boot wiring', () => {
     )
   })
 
+  it('matches profiles on the route the call actually uses, not the session route', async () => {
+    // `extractionProvider` + `extractionModel` replace the session's route for
+    // every auxiliary call. A profile matched on the session's model would be the
+    // wrong prompt for a deployment that pins its memory model — which is the
+    // whole point of "apply by the request's actual model".
+    const h = boot({
+      extractionProvider: 'memory-host',
+      extractionModel: 'small-8b',
+      promptProfiles: [
+        { name: 'for-session-model', match: { model: 'session-*' }, stages: { extraction: { maxTokens: 111 } } },
+        { name: 'for-memory-model', match: { model: 'small-*' }, stages: { extraction: { maxTokens: 222 } } },
+      ],
+    })
+    observeRoute(h, { provider: 'chat-host', model: 'session-large' })
+    const report = await status(h)
+    expect(report).toContain('route: chat-host/session-large')
+    expect(report).toContain('extraction override: memory-host/small-8b — stages above are matched on this route')
+    // Every stage follows the override, including the write path and query side.
+    expect(report).toContain('extraction: profile for-memory-model, maxTokens 222')
+    expect(report).toContain('entityMerge: profile for-memory-model')
+    expect(report).toContain('queryExpansion: profile for-memory-model')
+    // The session's profile is configured but must not be selected by any stage.
+    expect(report).toContain('configured: default, for-session-model, for-memory-model')
+    expect(report).not.toContain('profile for-session-model')
+  })
+
+  it('follows the session route when no override is configured', async () => {
+    const h = boot({
+      promptProfiles: [{ name: 'by-session', match: { model: 'session-*' }, stages: { extraction: { maxTokens: 333 } } }],
+    })
+    observeRoute(h, { provider: 'chat-host', model: 'session-large' })
+    const report = await status(h)
+    expect(report).toContain('extraction: profile by-session, maxTokens 333')
+    expect(report).not.toContain('extraction override')
+  })
+
   it('warns about an optional placeholder instead of refusing to boot', () => {
     const h = boot({ promptProfiles: [{ name: 'lean', match: {}, stages: { extraction: { prompt: 'only {turn_text}' } } }] })
     expect(h.tools.size).toBe(4)

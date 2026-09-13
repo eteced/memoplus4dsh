@@ -12,8 +12,10 @@ MemoryAgentBench; see [docs/evaluation.md](docs/evaluation.en.md) for the full a
   supersede, query expansion, query distillation) and the model parameters that
   travel with them — output cap, per-call timeout, reasoning effort — are no
   longer literals. A profile is `{ name, match: { provider?, model? }, stages }`,
-  resolved per call from the session's actual route, so switching the model in
-  the Models page changes what the next turn uses without a reload. Precedence:
+  resolved per call from the model that call actually runs on — including
+  `extractionProvider` / `extractionModel` when those override the session's
+  route — so switching the model in the Models page changes what the next turn
+  uses without a reload. Precedence:
   `prompts.<stage>` → selected profile (`promptProfile`, else the first
   `promptProfiles` match) → built-in `default`. The built-in default carries the
   v0.1 prompts byte for byte, and `extractionMaxTokens` /
