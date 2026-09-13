@@ -68,6 +68,8 @@ git pull && npm run build
 
 No reinstall needed: the profile links this checkout via a `file:` dependency, so rebuilding `lib/` is the whole update — then **restart dsh** to pick it up. (dsh's live reload is config-only: edits to `cordis.patch.yml` apply without a restart, plugin code does not.) Rerun `scripts/install.sh` (idempotent, also builds) only when the mount block or the install script itself changed. Memory data under `<dsh-home>/memoplus4dsh/` is untouched either way.
 
+> **Keep your own configuration outside the managed block.** `scripts/install.sh` rewrites the `# >>> memoplus4dsh` block wholesale, so anything you add *inside* it is lost on the next re-install. Put your additions in a separate patch entry targeting `id: memoplus4dsh` (see the example under [Prompt profiles](#prompt-profiles-and-embedding-upgrades)); because such an entry replaces the row's entire `config`, restate the keys you still want. Memory data is never affected.
+
 **Verify the install**: `node scripts/doctor.mjs [--profile <name>] [--dsh-home <path>]` prints the mount status, the effective config (defaults vs your overrides), component probes (harrier/ONNX embedding chain, NER chain, model caches), and memory-data status (graph size, extraction queue, last extraction activity) — including hints for enabling the full-featured backends.
 
 
@@ -119,26 +121,30 @@ Every stage that calls a model owns a prompt plus its output cap, per-call timeo
 Resolution order, highest first: `prompts.<stage>` → the selected profile (`promptProfile`, else the first `promptProfiles` entry whose `match` accepts that route) → the built-in `default`. `extractionMaxTokens` and `extractionCallTimeoutMs` are shorthand for the `prompts.extraction` entries. `memory_status` reports which profile each stage is using.
 
 ```yaml
-- insert:
-    - id: memoplus4dsh
-      name: 'memoplus4dsh'
-      config:
-        promptProfile: deepseek-flash          # force one, or omit to match by route
-        promptProfiles:
-          - name: deepseek-flash
-            match: { model: 'deepseek-*' }
-            stages:
-              entityMerge:
-                maxTokens: 8192
-                reasoningEffort: 'off'
-          - name: glm
-            match: { provider: 'opencode-go*', model: 'glm-*' }
-            stages:
-              extraction: { prompt: '<your template with {turn_text}>' }
-        embeddingModels:
-          multilingual-mpnet: { repo: sentence-transformers/paraphrase-multilingual-mpnet-base-v2, dim: 768, maxFileBytes: 2147483648 }
-        embeddingModel: multilingual-mpnet
-        embeddingSidecarModel: sentence-transformers/paraphrase-multilingual-mpnet-base-v2
+# Put your own configuration OUTSIDE the managed block that scripts/install.sh
+# rewrites (a re-install replaces that block wholesale, dropping anything you
+# added inside it). A patch entry targeting an existing id replaces the whole
+# `config`, so restate the keys you still want alongside your additions.
+- id: memoplus4dsh
+  config:
+    extraction: turn_end                   # restated: the managed block's keys
+    injectTopK: 8
+    promptProfile: deepseek-flash          # force one, or omit to match by route
+    promptProfiles:
+      - name: deepseek-flash
+        match: { model: 'deepseek-*' }
+        stages:
+          entityMerge:
+            maxTokens: 8192
+            reasoningEffort: 'off'
+      - name: glm
+        match: { provider: 'opencode-go*', model: 'glm-*' }
+        stages:
+          extraction: { prompt: '<your template with {turn_text}>' }
+    embeddingModels:
+      multilingual-mpnet: { repo: sentence-transformers/paraphrase-multilingual-mpnet-base-v2, dim: 768, maxFileBytes: 2147483648 }
+    embeddingModel: multilingual-mpnet
+    embeddingSidecarModel: sentence-transformers/paraphrase-multilingual-mpnet-base-v2
 ```
 
 A profile prompt must keep its stage's input placeholder — `{turn_text}` for extraction, `{lines}` for both adjudication stages, `{query}` for both query-side stages (checked at load, refuses the profile otherwise). `{known_entities}` and `{candidate_mentions}` are optional in the extraction prompt and only warned about.

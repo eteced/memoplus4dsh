@@ -103,3 +103,4 @@ ingest 会"正常"跑完但记忆图为空——查询阶段在零记忆上空�
 - **单实例假设**：同一 `dataDir` 只应由一个 dsh 实例使用。两个实例同时跑同一数据目录时，后做快照的一方会覆盖另一方的 journal 增量（M6 审查 M4）。插件热重载已排空队列，进程内场景安全。
 - **embedding 初始化失败被缓存到进程重启**：首次检索时若模型下载失败（网络抖动），本次进程生命周期内一直走关键词降级（M6 审查 minor）。重启 dsh 即恢复重试。
 - **大模型 API 不可达 HuggingFace 时**：用 `hfBaseUrl` 配置镜像（如 `https://hf-mirror.com`）。
+- **`install.sh` 会整块重写受管块，块内自定义配置会丢**：`scripts/_patch_yml.py add` 对同 marker 的既有块是"替换"而非"合并"（设计如此，保证幂等）。v0.2 之后用户会往 `config` 里放 `promptProfiles` / `prompts` / `embeddingModels` 等，若写在受管块**内**，下次重跑 `install.sh`（README 的 Update 一节、以及 `test-harness/start-test.sh` 每次启动都会跑）就静默丢失。请写在另一条 `id: memoplus4dsh` 的 patch entry 里（已用真实加载器 `dsh web --dump-config` 验证：这种 entry 会**替换整行 config**，所以需重述仍要保留的键）。记忆数据不受影响。**改进方向（未做）**：让 `install.sh` 合并而不是替换受管块内的 `config`。

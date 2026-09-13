@@ -68,6 +68,8 @@ git pull && npm run build
 
 不需要重装：profile 通过 `file:` 依赖符号链接到这个 checkout，重新构建 `lib/` 就是更新的全部——然后**重启 dsh** 生效。（dsh 的 live reload 只覆盖配置：`cordis.patch.yml` 的修改即时生效，插件代码不会热替换。）只有挂载块或安装脚本本身发生变化时才需要重跑 `scripts/install.sh`（幂等，会顺便构建）。`<dsh-home>/memoplus4dsh/` 下的记忆数据不受影响。
 
+> **自己的配置请放在受管块之外。** `scripts/install.sh` 会整块重写 `# >>> memoplus4dsh` 标记块，所以**加在块内**的内容会在下次重装时丢失。请把自定义项写成另一条 `id: memoplus4dsh` 的 patch entry（见「Prompt profile 与 embedding 升级」里的示例）；由于这种 entry 会替换整行的 `config`，需要把仍要保留的键一并重述。记忆数据不受任何影响。
+
 **验证安装**：`node scripts/doctor.mjs [--profile <name>] [--dsh-home <path>]` 输出挂载状态、生效配置（默认值 vs 你的覆盖）、组件探测（harrier/ONNX 嵌入链、NER 检测链、模型缓存）和记忆数据状态（图规模、抽取队列、最近抽取活动）——并给出启用完整版后端的提示。
 
 
@@ -128,26 +130,29 @@ scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 优先级从高到低：`prompts.<阶段>` → 选中的 profile（`promptProfile`，否则第一个 `match` 命中的 `promptProfiles` 条目）→ 内置 `default`。`extractionMaxTokens` / `extractionCallTimeoutMs` 等价于 `prompts.extraction` 的对应项。`memory_status` 会报出每个阶段当前用的 profile。
 
 ```yaml
-- insert:
-    - id: memoplus4dsh
-      name: 'memoplus4dsh'
-      config:
-        promptProfile: deepseek-flash          # 强制指定；省略则按路由匹配
-        promptProfiles:
-          - name: deepseek-flash
-            match: { model: 'deepseek-*' }
-            stages:
-              entityMerge:
-                maxTokens: 8192
-                reasoningEffort: 'off'
-          - name: glm
-            match: { provider: 'opencode-go*', model: 'glm-*' }
-            stages:
-              extraction: { prompt: '<你的模板，保留 {turn_text}>' }
-        embeddingModels:
-          multilingual-mpnet: { repo: sentence-transformers/paraphrase-multilingual-mpnet-base-v2, dim: 768, maxFileBytes: 2147483648 }
-        embeddingModel: multilingual-mpnet
-        embeddingSidecarModel: sentence-transformers/paraphrase-multilingual-mpnet-base-v2
+# 自己的配置请放在 scripts/install.sh 会重写的受管块**之外**
+# （重新安装会整块替换，块内新增的内容会丢）。按 id 覆盖的 entry 会替换整个
+# `config`，所以要把仍需要的键与新增项一起重述。
+- id: memoplus4dsh
+  config:
+    extraction: turn_end                   # 重述受管块里的键
+    injectTopK: 8
+    promptProfile: deepseek-flash          # 强制指定；省略则按路由匹配
+    promptProfiles:
+      - name: deepseek-flash
+        match: { model: 'deepseek-*' }
+        stages:
+          entityMerge:
+            maxTokens: 8192
+            reasoningEffort: 'off'
+      - name: glm
+        match: { provider: 'opencode-go*', model: 'glm-*' }
+        stages:
+          extraction: { prompt: '<你的模板，保留 {turn_text}>' }
+    embeddingModels:
+      multilingual-mpnet: { repo: sentence-transformers/paraphrase-multilingual-mpnet-base-v2, dim: 768, maxFileBytes: 2147483648 }
+    embeddingModel: multilingual-mpnet
+    embeddingSidecarModel: sentence-transformers/paraphrase-multilingual-mpnet-base-v2
 ```
 
 profile 的 prompt 必须保留该阶段的输入占位符——extraction 是 `{turn_text}`，两个裁决阶段是 `{lines}`，两个查询侧阶段是 `{query}`（加载时校验，不满足直接拒绝该 profile）。extraction prompt 中的 `{known_entities}` / `{candidate_mentions}` 是可选的，缺失只告警。
