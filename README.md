@@ -180,8 +180,10 @@ A profile prompt must keep its stage's input placeholder — `{turn_text}` for e
 | `extractionProvider` / `extractionModel` | session's own route | Override the model route used for extraction/expansion calls |
 | `extractionMaxTokens` | `8192` | Output cap for extraction calls (reasoning models need the headroom) |
 | `extractionCallTimeoutMs` | `120000` | Per-call timeout; a stalled endpoint fails fast into the retry queue |
-| `extractionMaxRetries` | `2` | Retries after the first attempt; exhausting them starts a failure round and the turn is kept for retry |
-| `extractionMaxFailureRounds` | `3` | Failure rounds before a turn is abandoned (one round exhausts `extractionMaxRetries`). Below the cap the turn is retried on the next turn and on the next start; at the cap it is recorded as `abandoned` and reported by `memory_status` / doctor as memories not written |
+| `extractionMaxRetries` | `4` | Retries after the first attempt (5 attempts per round); exhausting them starts a failure round and the turn is kept for retry |
+| `extractionRetryDelayMs` | `[15000,60000,180000,600000]` | Wait between attempts inside one round (last entry repeats, ±20% jitter). It was hardcoded `[5s,30s]` — too dense to outlast a provider outage lasting tens of seconds |
+| `extractionJobIntervalMs` | `3000` | Minimum gap between job **starts** (`0` disables). This is what prevents a start-up burst: 14 queued jobs spread over 0s/3s/.../39s instead of firing back to back into a failing window |
+| `extractionMaxFailureRounds` | `10` | Failure rounds before a turn is abandoned (one round exhausts `extractionMaxRetries`). Below the cap the turn is retried on the next turn and on the next start; at the cap it is recorded as `abandoned` and reported by `memory_status` / doctor as memories not written |
 | `extractionConcurrency` | `1` | Extraction worker pool size; `1` is strict serial. Raise only when the endpoint tolerates overlapping extraction calls |
 | `snapshotThreshold` | `1000` | Journal ops between snapshot compactions |
 | `debug` | `false` | Diagnostic switch. Writes a `listener-saw` trace per session event and an `llm-empty` record for empty-content calls into `extraction-debug.jsonl` (~1000 lines/day even when healthy). **Off by default and never enabled for users**; turning it off does not affect the loss ledger (`failed` / `abandoned` / `requeue` stay unconditional) |

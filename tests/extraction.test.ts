@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, appendFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   EXTRACTION_PROMPT_TURN,
   ExtractionPipeline,
@@ -11,6 +11,7 @@ import {
   coerceSpeakerTypes,
   extractSpeakers,
   formatKnownEntities,
+  jitterRetryDelay,
   parseExtractionOutput,
   segmentTurnText,
   resolveEventTime,
@@ -208,13 +209,15 @@ describe('ExtractionQueue', () => {
   it('runs jobs serially and in order', async () => {
     const order: number[] = []
     const inFlight: number[] = []
+    // jobIntervalMs: 0: these unit tests are not rate-limited, and the pacing
+    // default is 3000ms; spacing itself is covered by the pacing tests below.
     const queue = new ExtractionQueue(async job => {
       inFlight.push(job.turn)
       expect(inFlight).toHaveLength(1)
       await new Promise(r => setTimeout(r, 5))
       inFlight.pop()
       order.push(job.turn)
-    })
+    }, { jobIntervalMs: 0 })
     queue.enqueue(makeJob({ turn: 0 }))
     queue.enqueue(makeJob({ turn: 1 }))
     queue.enqueue(makeJob({ turn: 2 }))
@@ -227,7 +230,7 @@ describe('ExtractionQueue', () => {
     const queue = new ExtractionQueue(async () => {
       calls++
       await new Promise(r => setTimeout(r, 5))
-    })
+    }, { jobIntervalMs: 0 })
     expect(queue.enqueue(makeJob({ turn: 3 }))).toBe(true)
     expect(queue.enqueue(makeJob({ turn: 3 }))).toBe(false)
     expect(queue.enqueue(makeJob({ sessionId: 'session-2', turn: 3 }))).toBe(true)
@@ -240,7 +243,7 @@ describe('ExtractionQueue', () => {
     const queue = new ExtractionQueue(async () => {
       attempts++
       if (attempts < 3) throw new Error('boom')
-    }, { maxRetries: 2, retryDelayMs: [0] })
+    }, { maxRetries: 2, retryDelayMs: [0], jobIntervalMs: 0 })
     queue.enqueue(makeJob())
     await queue.whenIdle()
     expect(attempts).toBe(3)
@@ -259,6 +262,7 @@ describe('ExtractionQueue', () => {
       {
         maxRetries: 1,
         retryDelayMs: [0],
+        jobIntervalMs: 0,
         onSkip: job => skipped.push(job),
         onAttemptFailed: (_job, attempt) => failedAttempts.push(attempt),
       },
@@ -544,7 +548,7 @@ describe('ExtractionQueue concurrency', () => {
     const q = new ExtractionQueue(async job => {
       order.push(job.turn)
       await new Promise(r => setTimeout(r, 5))
-    }, { concurrency: 1 })
+    }, { concurrency: 1, jobIntervalMs: 0 })
     for (const t of [1, 2, 3]) q.enqueue(j(t))
     await q.whenIdle()
     expect(order).toEqual([1, 2, 3])
@@ -558,7 +562,7 @@ describe('ExtractionQueue concurrency', () => {
       maxActive = Math.max(maxActive, active)
       await new Promise(r => setTimeout(r, 20))
       active--
-    }, { concurrency: 3 })
+    }, { concurrency: 3, jobIntervalMs: 0 })
     const t0 = Date.now()
     for (const t of [1, 2, 3, 4, 5, 6, 1]) q.enqueue(j(t))  // 1 是重复，应被去重
     await q.whenIdle()
@@ -569,10 +573,222 @@ describe('ExtractionQueue concurrency', () => {
     const skipped: number[] = []
     const q2 = new ExtractionQueue(async job => {
       if (job.turn === 2) throw new Error('boom')
-    }, { concurrency: 2, maxRetries: 1, retryDelayMs: [1], onSkip: job => { skipped.push(job.turn) } })
+    }, { concurrency: 2, maxRetries: 1, retryDelayMs: [1], jobIntervalMs: 0, onSkip: job => { skipped.push(job.turn) } })
     for (const t of [1, 2, 3]) q2.enqueue(j(t))
     await q2.whenIdle()
     expect(skipped).toEqual([2])
+  })
+})
+
+describe('ExtractionQueue pacing, retry delays, and defaults', () => {
+  // Fake timers keep these exact without dragging the suite: the retry and
+  // pacing delays under test are seconds-to-minutes long, and the injection
+  // points (random) make the jittered numbers deterministic.
+  const withFakeTimers = async (body: () => Promise<void>): Promise<void> => {
+    vi.useFakeTimers({ now: 0 })
+    try {
+      await body()
+    } finally {
+      vi.useRealTimers()
+    }
+  }
+
+  it('waits the configured retry delay before retrying, not a hard-coded one', async () => {
+    await withFakeTimers(async () => {
+      const starts: number[] = []
+      const queue = new ExtractionQueue(async () => {
+        starts.push(Date.now())
+        throw new Error('boom')
+      }, { maxRetries: 2, retryDelayMs: [100, 250], random: () => 0.5, jobIntervalMs: 0 })
+      queue.enqueue(makeJob())
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(starts).toHaveLength(1) // first attempt immediate
+      await vi.advanceTimersByTimeAsync(99)
+      expect(starts).toHaveLength(1) // 100ms is the configured delay, not 5s/30s
+      await vi.advanceTimersByTimeAsync(1)
+      expect(starts).toEqual([0, 100])
+      await vi.advanceTimersByTimeAsync(250)
+      expect(starts).toEqual([0, 100, 350])
+      await idle
+      expect(queue.skipped).toBe(1)
+    })
+  })
+
+  it('keeps the configured minimum interval between adjacent job starts', async () => {
+    await withFakeTimers(async () => {
+      const starts: number[] = []
+      const queue = new ExtractionQueue(async () => { starts.push(Date.now()) }, { jobIntervalMs: 500 })
+      queue.enqueue(makeJob({ turn: 0 }))
+      queue.enqueue(makeJob({ turn: 1 }))
+      queue.enqueue(makeJob({ turn: 2 }))
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(starts).toEqual([0])
+      await vi.advanceTimersByTimeAsync(499)
+      expect(starts).toEqual([0]) // the second job may not start early
+      await vi.advanceTimersByTimeAsync(1)
+      expect(starts).toEqual([0, 500])
+      await vi.advanceTimersByTimeAsync(500)
+      expect(starts).toEqual([0, 500, 1000])
+      await idle
+    })
+  })
+
+  it('spreads a start-up backlog of N jobs instead of firing it as one burst', async () => {
+    await withFakeTimers(async () => {
+      const starts: number[] = []
+      const queue = new ExtractionQueue(async () => { starts.push(Date.now()) }, { jobIntervalMs: 100 })
+      // Exactly how start-up requeue enqueues: one synchronous loop over the backlog.
+      for (let turn = 0; turn < 14; turn++) queue.enqueue(makeJob({ turn }))
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(starts).toEqual([0]) // only the first job goes out immediately
+      await vi.advanceTimersByTimeAsync(13 * 100)
+      expect(starts).toEqual(Array.from({ length: 14 }, (_, i) => i * 100))
+      await idle
+    })
+  })
+
+  it('whenIdle waits for a job still queued behind the start interval', async () => {
+    await withFakeTimers(async () => {
+      const settled: number[] = []
+      const queue = new ExtractionQueue(async job => { settled.push(job.turn) }, { jobIntervalMs: 1_000 })
+      queue.enqueue(makeJob({ turn: 0 }))
+      queue.enqueue(makeJob({ turn: 1 }))
+      let idleResolved = false
+      const idle = queue.whenIdle().then(() => { idleResolved = true })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(settled).toEqual([0])
+      expect(idleResolved).toBe(false) // turn 1 is queued, waiting for its slot
+      await vi.advanceTimersByTimeAsync(999)
+      expect(idleResolved).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      await idle
+      expect(settled).toEqual([0, 1])
+      expect(idleResolved).toBe(true)
+    })
+  })
+
+  it('still enforces the concurrency cap while pacing starts, and dedupes', async () => {
+    await withFakeTimers(async () => {
+      let active = 0
+      let maxActive = 0
+      const queue = new ExtractionQueue(async () => {
+        active++
+        maxActive = Math.max(maxActive, active)
+        await new Promise(r => setTimeout(r, 200))
+        active--
+      }, { concurrency: 2, jobIntervalMs: 100 })
+      for (const turn of [0, 1, 2, 3, 4, 5, 0]) queue.enqueue(makeJob({ turn })) // turn 0 repeats
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(2_000)
+      await idle
+      expect(maxActive).toBe(2) // never more than the cap, pacing or not
+      expect(vi.getTimerCount()).toBe(0) // nothing left on the event loop
+    })
+  })
+
+  it('close() cancels the pending start timer, drains unthrottled, and refuses new jobs', async () => {
+    await withFakeTimers(async () => {
+      const done: number[] = []
+      const queue = new ExtractionQueue(async job => { done.push(job.turn) }, { jobIntervalMs: 10_000 })
+      queue.enqueue(makeJob({ turn: 0 }))
+      queue.enqueue(makeJob({ turn: 1 }))
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(done).toEqual([0])
+      expect(vi.getTimerCount()).toBe(1) // turn 1 waits out the 10s interval
+      queue.close()
+      expect(vi.getTimerCount()).toBe(0) // dispose must not leave a dangling timer
+      await idle // and must still drain what was queued
+      expect(done).toEqual([0, 1])
+      expect(queue.enqueue(makeJob({ turn: 2 }))).toBe(false)
+    })
+  })
+
+  it('close() interrupts a minutes-long backoff instead of waiting it out', async () => {
+    await withFakeTimers(async () => {
+      let attempts = 0
+      const onSkip = vi.fn()
+      const queue = new ExtractionQueue(async () => {
+        attempts++
+        throw new Error('boom')
+      }, { maxRetries: 4, retryDelayMs: [600_000], random: () => 0.5, jobIntervalMs: 0, onSkip })
+      queue.enqueue(makeJob())
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(attempts).toBe(1) // the retry is 600s away
+      queue.close()
+      await idle // resolves now, not ten minutes later
+      expect(attempts).toBe(1)
+      // The round is not booked failed: the durable log still has the job, so
+      // the next start retries it with its previous failure count.
+      expect(queue.skipped).toBe(0)
+      expect(onSkip).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(0)
+    })
+  })
+
+  it('jitters retry delays by ±20%, so lockstep failures desynchronize', async () => {
+    expect(jitterRetryDelay(1_000, () => 0.5)).toBe(1_000)
+    expect(jitterRetryDelay(1_000, () => 0)).toBe(800)
+    expect(jitterRetryDelay(1_000, () => 1)).toBe(1_200)
+    await withFakeTimers(async () => {
+      const starts: number[] = []
+      const queue = new ExtractionQueue(async () => {
+        starts.push(Date.now())
+        throw new Error('boom')
+      }, { maxRetries: 1, retryDelayMs: [1_000], random: () => 0 })
+      queue.enqueue(makeJob())
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(799)
+      expect(starts).toHaveLength(1) // the low end of the band is 800ms
+      await vi.advanceTimersByTimeAsync(1)
+      expect(starts).toHaveLength(2)
+      await idle
+    })
+  })
+
+  it('applies the new defaults: 4 retries with 15s/60s/180s/600s backoff', async () => {
+    await withFakeTimers(async () => {
+      const starts: number[] = []
+      const queue = new ExtractionQueue(async () => {
+        starts.push(Date.now())
+        throw new Error('boom')
+      }, { random: () => 0.5 }) // pin jitter to the nominal delay
+      queue.enqueue(makeJob())
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(starts).toHaveLength(1)
+      // 4 retries => 5 attempts, at exactly the shipped default delays.
+      for (const [index, delay] of [15_000, 60_000, 180_000, 600_000].entries()) {
+        await vi.advanceTimersByTimeAsync(delay - 1)
+        expect(starts).toHaveLength(index + 1)
+        await vi.advanceTimersByTimeAsync(1)
+        expect(starts).toHaveLength(index + 2)
+      }
+      await idle
+      expect(queue.skipped).toBe(1) // the round is booked failed after 5 attempts
+    })
+  })
+
+  it('applies the default 3000ms start interval', async () => {
+    await withFakeTimers(async () => {
+      const starts: number[] = []
+      const queue = new ExtractionQueue(async () => { starts.push(Date.now()) })
+      queue.enqueue(makeJob({ turn: 0 }))
+      queue.enqueue(makeJob({ turn: 1 }))
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(starts).toEqual([0])
+      await vi.advanceTimersByTimeAsync(2_999)
+      expect(starts).toEqual([0])
+      await vi.advanceTimersByTimeAsync(1)
+      expect(starts).toEqual([0, 3_000])
+      await idle
+    })
   })
 })
 

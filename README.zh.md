@@ -114,8 +114,10 @@ scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 | `extractionProvider` / `extractionModel` | 会话自身路由 | 覆盖 extraction/expansion 调用使用的模型路由 |
 | `extractionMaxTokens` | `8192` | extraction 调用的输出上限（reasoning 模型需要这个余量）；等价于 `prompts.extraction.maxTokens` |
 | `extractionCallTimeoutMs` | `120000` | 单次调用超时；卡住的端点会快速失败并进入重试队列。等价于 `prompts.extraction.timeoutMs` |
-| `extractionMaxRetries` | `2` | 首次尝试之后的重试次数；用尽后进入失败轮次，该 turn 仍会保留并重抽 |
-| `extractionMaxFailureRounds` | `3` | 失败轮次上限（一轮 = 用尽一次 `extractionMaxRetries`）。未达上限的 turn 会在下一轮对话和下次启动时重抽；达上限后记入 `abandoned`，并由 `memory_status` / doctor 报告该 turn 的记忆未写入 |
+| `extractionMaxRetries` | `4` | 首次尝试之后的重试次数（一轮共 5 次尝试）；用尽后进入失败轮次，该 turn 仍会保留并重抽 |
+| `extractionRetryDelayMs` | `[15000,60000,180000,600000]` | 同一轮内重试之间的等待（末项重复，±20% 抖动）。原先是硬编码 `[5s,30s]`——太密，跨不过上游几十秒级的故障窗口 |
+| `extractionJobIntervalMs` | `3000` | 相邻两个抽取任务**开始**之间的最小间隔（`0` = 关闭）。这是防止「启动爆发」的关键：14 条积压按 0s/3s/…/39s 稀疏铺开，而不是 14 连发撞进故障窗口 |
+| `extractionMaxFailureRounds` | `10` | 失败轮次上限（一轮 = 用尽一次 `extractionMaxRetries`）。未达上限的 turn 会在下一轮对话和下次启动时重抽；达上限后记入 `abandoned`，并由 `memory_status` / doctor 报告该 turn 的记忆未写入 |
 | `extractionConcurrency` | `1` | 抽取 worker 池大小；`1` 为严格串行。仅当端点能承受并发抽取调用时才调高 |
 | `snapshotThreshold` | `1000` | 两次快照压缩之间的 journal 操作数 |
 | `debug` | `false` | 诊断开关。打开后把每个 session 事件的 `listener-saw` 轨迹与空内容调用的 `llm-empty` 现场记录写进 `extraction-debug.jsonl`（正常也能到每天近千行）。**默认关闭，不要给用户默认打开**；关掉不影响损失账本（`failed` / `abandoned` / `requeue` 等仍无条件写） |

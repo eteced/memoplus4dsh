@@ -50,7 +50,8 @@ memoplus4dsh 的重要修改归档，按开发里程碑组织。各里程碑的�
   重建 profile 注册表，**立即生效、无需重启**；写错 profile 名字被 Host 拒绝并给出
   原因。其余配置仍归 `cordis.yml`。新增运行时依赖 `@deepseek-ai/schemastery`
   （dsh 自带的 schema 库）与构建期依赖 `esbuild`。
-- **诊断默认关，且空内容失败自带现场证据。** 新增 `debug`（**默认 false**）：打开后才写每个 session 事件的 `listener-saw` 轨迹（此前无条件写，一天近千行，信噪比太低）与空内容调用的 `llm-empty` 现场记录（`provider`/`model`/`maxTokens`/`chunks`/`chars`/`finish`/`usage`，字段取自 `@deepseek-ai/dsh-llm` 的 `StreamChunk` 类型）。**失败路径的现场信息无条件拼进错误消息**（`extraction produced empty content (finish=…, chunks=…, chars=…)`），所以默认配置下也能诊断；损失账本（`failed`/`abandoned`/`requeue`）继续无条件写。
+- **抽取重试改为「耐心且节流」。** `extractionMaxRetries` 默认 2→**4**、新增 `extractionRetryDelayMs`（默认 `[15s,1m,3m,10m]`，末项重复，±20% 抖动，取代硬编码的 5s/30s）、新增 `extractionJobIntervalMs`（默认 **3s**，相邻任务开始的最小间隔）、`extractionMaxFailureRounds` 默认 3→**10**。启动重抽不再连发（14 条摊开约 40 秒），配合跨「下一轮对话 + 下次启动」的持续重抽，熬得过上游几十秒到几分钟的 500 抖动；每条 turn 最多 10 轮 × 5 次尝试。`close()` 会中断退避且不白记账，dispose 不会为 600s 退避买单。
+ 新增 `debug`（**默认 false**）：打开后才写每个 session 事件的 `listener-saw` 轨迹（此前无条件写，一天近千行，信噪比太低）与空内容调用的 `llm-empty` 现场记录（`provider`/`model`/`maxTokens`/`chunks`/`chars`/`finish`/`usage`，字段取自 `@deepseek-ai/dsh-llm` 的 `StreamChunk` 类型）。**失败路径的现场信息无条件拼进错误消息**（`extraction produced empty content (finish=…, chunks=…, chars=…)`），所以默认配置下也能诊断；损失账本（`failed`/`abandoned`/`requeue`）继续无条件写。
 - **修复：抽取失败不再静默丢掉一个 turn 的记忆。** 原先一轮重试用尽后直接写
   `settled` 墓碑——终态、不重试、除了日志行没有任何地方能看到。现在失败写
   `failed` 记录，该 turn 保持"未结"并在下一轮对话和下次启动时重抽，直到

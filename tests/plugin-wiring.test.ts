@@ -11,7 +11,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
@@ -435,6 +435,84 @@ describe('extraction failure visibility', () => {
     const report = await status(boot({ extractionMaxRetries: 0 }))
     expect(report).toContain('extraction failures awaiting retry: 1')
     expect(report).toContain('ABANDONED extraction: 1 turn(s)')
+  })
+
+  it('defaults to 10 failure rounds, so a 9th failure is still retried', async () => {
+    // 8 rounds already survived + the one this run books = 9 < 10. With the old
+    // default of 3 the turn would have been abandoned at start-up instead.
+    writeFileSync(join(dir, 'extraction-pending.jsonl'), [
+      JSON.stringify({ kind: 'pending', job: { sessionId: 's', turn: 3, turnText: 'User: x', mentionTime: '2026-09-13T00:00:00.000Z' } }),
+      JSON.stringify({ kind: 'failed', sessionId: 's', turn: 3, error: 'boom', at: '2026-09-13T00:00:01.000Z', failures: 8 }),
+      '',
+    ].join('\n'), 'utf8')
+    const h = boot({ extractionMaxRetries: 0 })
+    await h.drain() // books the 9th failed round, still under the cap
+    // The drained harness disposed its tools, so read the loss ledger directly.
+    const ledger = readFileSync(join(dir, 'extraction-pending.jsonl'), 'utf8')
+    expect(ledger).not.toContain('"kind":"abandoned"')
+    expect(ledger).toContain('"failures":9')
+  })
+
+  it('abandons only once the default 10-round cap is reached', async () => {
+    writeFileSync(join(dir, 'extraction-pending.jsonl'), [
+      JSON.stringify({ kind: 'pending', job: { sessionId: 's', turn: 3, turnText: 'User: x', mentionTime: '2026-09-13T00:00:00.000Z' } }),
+      JSON.stringify({ kind: 'failed', sessionId: 's', turn: 3, error: 'boom', at: '2026-09-13T00:00:01.000Z', failures: 10 }),
+      '',
+    ].join('\n'), 'utf8')
+    const h = boot({ extractionMaxRetries: 0 })
+    const report = await status(h)
+    expect(report).toContain('ABANDONED extraction: 1 turn(s)')
+  })
+})
+
+describe('extraction retry throttling wiring', () => {
+  /** One outstanding job, exactly as the durable log writes it. */
+  const pendingLine = (turn: number): string => JSON.stringify({
+    kind: 'pending',
+    job: { sessionId: 's', turn, turnText: `User: ${turn}`, mentionTime: '2026-09-13T00:00:00.000Z' },
+  })
+
+  /** Turns whose attempt failed, in the order the failures were booked. */
+  const attemptedTurns = (): number[] => debugLines()
+    .filter(entry => entry['kind'] === 'attempt-failed')
+    .map(entry => entry['turn'] as number)
+
+  it('spaces start-up requeues by the configured interval instead of firing them at once', async () => {
+    vi.useFakeTimers({ now: 0 })
+    try {
+      writeFileSync(join(dir, 'extraction-pending.jsonl'), [pendingLine(1), pendingLine(2), pendingLine(3), ''].join('\n'), 'utf8')
+      const h = boot({ extractionMaxRetries: 0, extractionJobIntervalMs: 5_000 })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(attemptedTurns()).toEqual([1]) // only the first queued job goes out
+      await vi.advanceTimersByTimeAsync(4_999)
+      expect(attemptedTurns()).toEqual([1]) // the 2nd waits out the interval
+      await vi.advanceTimersByTimeAsync(1)
+      expect(attemptedTurns()).toEqual([1, 2])
+      await vi.advanceTimersByTimeAsync(5_000)
+      expect(attemptedTurns()).toEqual([1, 2, 3])
+      await h.drain()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('waits the configured retry delay before a second attempt, not the old 5s', async () => {
+    vi.useFakeTimers({ now: 0 })
+    try {
+      const h = boot({ extractionMaxRetries: 1, extractionRetryDelayMs: [40_000], extractionJobIntervalMs: 0 })
+      emitTurnEnd(h)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(attemptedTurns()).toEqual([2]) // first attempt, immediate
+      // 40s jittered by ±20% is [32s, 48s]; the old hard-coded 5s would have
+      // retried long before 32s.
+      await vi.advanceTimersByTimeAsync(31_999)
+      expect(attemptedTurns()).toEqual([2])
+      await vi.advanceTimersByTimeAsync(16_001)
+      expect(attemptedTurns()).toEqual([2, 2]) // retried, and no earlier
+      await h.drain()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

@@ -10,7 +10,7 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type {} from '@deepseek-ai/dsh-session'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import { MemoryStore } from './store.js'
-import { EMPTY_EXTRACTION_ERROR, ExtractionPipeline, ExtractionQueue, PendingJobLog } from './extraction.js'
+import { EMPTY_EXTRACTION_ERROR, ExtractionPipeline, ExtractionQueue, PendingJobLog, DEFAULT_EXTRACTION_JOB_INTERVAL_MS, DEFAULT_EXTRACTION_RETRY_DELAY_MS } from './extraction.js'
 import type { ExtractionJob, OutstandingJob } from './extraction.js'
 import { LlmEntityMerger } from './entity-merge.js'
 import { LlmSupersedeResolver } from './supersede.js'
@@ -32,7 +32,7 @@ import type { MemorySettingsSection } from './settings.js'
 export const name = 'memoplus4dsh'
 
 /** Failure rounds before a turn's extraction is abandoned; see `extractionMaxFailureRounds`. */
-const DEFAULT_MAX_FAILURE_ROUNDS = 3
+const DEFAULT_MAX_FAILURE_ROUNDS = 10
 
 /** Minimum gap between in-run retry passes over outstanding extraction failures. */
 const RETRY_PASS_COOLDOWN_MS = 10 * 60 * 1000
@@ -48,13 +48,40 @@ export interface Config {
   extractionProvider?: string
   /** Model for extraction/expansion calls; defaults to the session's own model. */
   extractionModel?: string
-  /** Retries after the first extraction attempt before a turn is skipped. */
+  /**
+   * Retries after the first extraction attempt before a round is booked
+   * failed (default 4, i.e. five attempts per round). Higher than the old 2
+   * because the upstream gateway recovers on a minutes scale, and "抽取完全
+   * 可以持续尝试" — a turn's memories are worth more than the wasted calls.
+   */
   extractionMaxRetries?: number
   /**
-   * Failure rounds before a turn's extraction is given up on (default 3).
+   * Delay before retry attempt N (1-based) in ms; the last entry repeats;
+   * default `[15000, 60000, 180000, 600000]`, each entry jittered by ±20% so
+   * jobs that failed together do not retry in lockstep.
+   *
+   * The old default was `[5000, 30000]`: retries 5s/30s apart mostly re-hit
+   * the same failure, because the upstream's bad windows last tens of seconds
+   * (2026-09-13 incident), and every attempt burns a full prompt.
+   */
+  extractionRetryDelayMs?: number[]
+  /**
+   * Minimum delay between two extraction job *starts*, in ms (default 3000).
+   * Applies to start-up requeues, in-run requeues, and fresh enqueues alike.
+   *
+   * This is the anti-burst lever: without it, a restart with a backlog started
+   * every queued job back-to-back, which is exactly the burst that walked into
+   * the gateway's intermittent 500 window. At 3000ms, 14 backlogged turns are
+   * spread over ~40s, while a single live turn starts immediately.
+   */
+  extractionJobIntervalMs?: number
+  /**
+   * Failure rounds before a turn's extraction is given up on (default 10).
    * One round exhausts `extractionMaxRetries`; a failed turn stays outstanding
-   * and is retried on the next turn and on the next start until this cap, then
-   * recorded as abandoned — the only outcome that reports memories as lost.
+   * and is retried on the next turn (10-minute cooldown) and on the next start
+   * until this cap, then recorded as abandoned — the only outcome that reports
+   * memories as lost. Raised from 3 to 10 for the same reason as the higher
+   * retry count: persistent trying costs little, abandoning a turn loses it.
    */
   extractionMaxFailureRounds?: number
   /**
@@ -709,6 +736,8 @@ export function apply(ctx: Context, config: Config) {
         debugLog({ kind: 'extracted', session: job.sessionId, turn: job.turn, ...result })
       }), {
         maxRetries: config.extractionMaxRetries,
+        retryDelayMs: config.extractionRetryDelayMs ?? DEFAULT_EXTRACTION_RETRY_DELAY_MS,
+        jobIntervalMs: config.extractionJobIntervalMs ?? DEFAULT_EXTRACTION_JOB_INTERVAL_MS,
         concurrency: config.extractionConcurrency,
         onAttemptFailed: (job, attempt, error) => debugLog({
           kind: 'attempt-failed', session: job.sessionId, turn: job.turn, attempt,
@@ -937,8 +966,11 @@ export function apply(ctx: Context, config: Config) {
       disposeTools?.()
       for (const bridge of bridges) bridge.dispose()
       // Drain pending extraction jobs before the final checkpoint; each is
-      // bounded by its own call timeout, so this terminates.
+      // bounded by its own call timeout, so this terminates. `close()` drops
+      // the start pacing first, so shutdown is not stretched by the interval,
+      // and leaves no pending timer behind.
       try {
+        queue?.close()
         await queue?.whenIdle()
       } catch {
         // The queue never rejects; guard anyway.
