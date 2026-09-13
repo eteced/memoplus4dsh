@@ -94,8 +94,11 @@ scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 | `progressBridge` | `true` | 把 goal/todo/schedule/plan 进度事件桥接进记忆图谱（M8） |
 | `stateDedup` | `true` | Retrieval 时每个 entity+family 只保留最新的桥接状态事件；历史仍留在图谱中 |
 | `embedding` | `true` | 本地 ONNX embedding；失败时降级为纯关键词 retrieval |
-| `embeddingModel` | `multilingual` | `multilingual` = distiluse-base-multilingual-cased-v2（512 维，首次下载约 135MB，支持 50+ 种语言，含中文）；`english` = all-MiniLM-L6-v2（384 维，约 23MB）。切换后已存向量会惰性重嵌入 |
+| `embeddingModel` | `multilingual` | 预设名：`multilingual` = distiluse-base-multilingual-cased-v2（512 维，首次下载约 135MB，支持 50+ 种语言，含中文）；`english` = all-MiniLM-L6-v2（384 维，约 23MB）；也可以填 `embeddingModels` 里自定义的名字。切换后已存向量会惰性重嵌入 |
+| `embeddingModels` | （无） | 按名字新增或替换预设：`{ repo, dim, hiddenDim?, projectionFile?, maxFileBytes }`。机器配置够时换成更强的模型 |
 | `embeddingBackend` | `auto` | `auto` = 当其 python 环境装有 `sentence-transformers` 时使用 harrier sidecar（microsoft/harrier-oss-v1-0.6b，1024 维，多语言，CPU 约 10ms/条），否则用 ONNX encoder；也可用 `onnx` / `harrier` 强制指定。查询侧使用该模型训练时的 instruction prompt |
+| `embeddingSidecarModel` | `microsoft/harrier-oss-v1-0.6b` | sidecar 加载的 sentence-transformers 模型。sidecar 在握手时会报出真实维度，所以换模型后已存向量会被正确判定为过期并重嵌入 |
+| `embeddingSidecarQueryPrompt` | （随模型） | 查询侧 instruction prompt 名（默认模型是 `web_search_query`），`null` 表示不用。换成其他模型时默认为不用——它的 prompt 预设名本插件无从得知 |
 | `embedPython` | （nerPython 或 python3） | harrier embedding sidecar 使用的 Python 可执行文件 |
 
 > 插件解析的是 **dsh 进程** PATH 上的 `python3`——dsh 从你的 shell 启动时会继承同一环境，所以只要当前 `python3` 已装这些包就是零配置直接用。没装的话跑 `scripts/setup-python.sh`：创建专用 venv（sentence-transformers + torch/gliner/stanza）并输出要粘贴进 `cordis.patch.yml` 的 `nerPython` / `embedPython` 配置行。
@@ -107,10 +110,44 @@ scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 | `nerPython` | `python3` | NER sidecar 使用的 Python 可执行文件（该环境需要 `torch gliner stanza`；模型首次使用时自动下载） |
 | `dataDir` | `<dsh-home>/memoplus4dsh` | 插件数据目录（journal、快照、模型缓存、expansion 缓存） |
 | `extractionProvider` / `extractionModel` | 会话自身路由 | 覆盖 extraction/expansion 调用使用的模型路由 |
-| `extractionMaxTokens` | `8192` | extraction 调用的输出上限（reasoning 模型需要这个余量） |
-| `extractionCallTimeoutMs` | `120000` | 单次调用超时；卡住的端点会快速失败并进入重试队列 |
+| `extractionMaxTokens` | `8192` | extraction 调用的输出上限（reasoning 模型需要这个余量）；等价于 `prompts.extraction.maxTokens` |
+| `extractionCallTimeoutMs` | `120000` | 单次调用超时；卡住的端点会快速失败并进入重试队列。等价于 `prompts.extraction.timeoutMs` |
 | `extractionMaxRetries` | `2` | 首次尝试之后的重试次数；超过后该 turn 被跳过并记录日志 |
 | `snapshotThreshold` | `1000` | 两次快照压缩之间的 journal 操作数 |
+| `promptProfiles` | （无） | 具名 prompt profile，按声明顺序与会话路由匹配。每项形如 `{ name, match: { provider?, model? }, stages: { <阶段>: { prompt, maxTokens?, timeoutMs?, reasoningEffort? } } }`，`*` 为通配。内置 `default` profile 承载 v0.1 的原始 prompt，始终兜底 |
+| `promptProfile` | （自动） | 强制使用某个 profile，跳过路由匹配 |
+| `prompts` | （无） | 阶段级覆盖，优先级高于所有 profile：`extraction` / `entityMerge` / `supersede` / `queryExpansion` / `queryDistill` |
+
+### Prompt profile 与 embedding 升级
+
+每个会调用模型的阶段都同时拥有「prompt + 输出上限 + 单次超时 + reasoning effort」。这些原先写死成单一模型族的调参，现在由 profile 配置，并且**按会话实际路由逐次解析**——在 Models 页面切模型后，下一个 turn 就用上新 prompt，无需重载。
+
+优先级从高到低：`prompts.<阶段>` → 选中的 profile（`promptProfile`，否则第一个 `match` 命中的 `promptProfiles` 条目）→ 内置 `default`。`extractionMaxTokens` / `extractionCallTimeoutMs` 等价于 `prompts.extraction` 的对应项。`memory_status` 会报出每个阶段当前用的 profile。
+
+```yaml
+- insert:
+    - id: memoplus4dsh
+      name: 'memoplus4dsh'
+      config:
+        promptProfile: deepseek-flash          # 强制指定；省略则按路由匹配
+        promptProfiles:
+          - name: deepseek-flash
+            match: { model: 'deepseek-*' }
+            stages:
+              entityMerge:
+                maxTokens: 8192
+                reasoningEffort: 'off'
+          - name: glm
+            match: { provider: 'opencode-go*', model: 'glm-*' }
+            stages:
+              extraction: { prompt: '<你的模板，保留 {turn_text}>' }
+        embeddingModels:
+          bge-m3: { repo: BAAI/bge-m3, dim: 1024, maxFileBytes: 2147483648 }
+        embeddingModel: bge-m3
+        embeddingSidecarModel: BAAI/bge-m3    # sidecar 会报出自己的维度
+```
+
+profile 的 prompt 必须保留该阶段的输入占位符——extraction 是 `{turn_text}`，两个裁决阶段是 `{lines}`，两个查询侧阶段是 `{query}`（加载时校验，不满足直接拒绝该 profile）。extraction prompt 中的 `{known_entities}` / `{candidate_mentions}` 是可选的，缺失只告警。
 
 Extraction 会消耗你配置的模型的 API 配额——设置 `extraction: off` 可退出。
 

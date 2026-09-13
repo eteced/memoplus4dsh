@@ -6,6 +6,42 @@ All notable changes to memoplus4dsh, grouped by development milestone. The detai
 per-milestone reports live in [docs/](docs/) (bilingual). Evaluation numbers refer to
 MemoryAgentBench; see [docs/evaluation.md](docs/evaluation.en.md) for the full archived record.
 
+## v0.2 (unreleased) — model-dependent surfaces as configuration
+
+- **Prompt profiles.** The five stage prompts (extraction, entity merge,
+  supersede, query expansion, query distillation) and the model parameters that
+  travel with them — output cap, per-call timeout, reasoning effort — are no
+  longer literals. A profile is `{ name, match: { provider?, model? }, stages }`,
+  resolved per call from the session's actual route, so switching the model in
+  the Models page changes what the next turn uses without a reload. Precedence:
+  `prompts.<stage>` → selected profile (`promptProfile`, else the first
+  `promptProfiles` match) → built-in `default`. The built-in default carries the
+  v0.1 prompts byte for byte, and `extractionMaxTokens` /
+  `extractionCallTimeoutMs` keep working as shorthand for the `prompts.extraction`
+  entries, so an existing profile is unaffected.
+- **`reasoningEffort` is configurable per stage.** It was hardcoded to `off`
+  (the M9 F-1 workaround for deepseek-v4-flash spiralling into empty output on
+  dense extraction inputs). A model that extracts better with thinking can now
+  raise it without patching source.
+- **Embedding presets by name.** `embeddingModel` accepts any key declared in the
+  new `embeddingModels` table (built-ins `multilingual` / `english` are the
+  defaults), and an unknown name is refused at load instead of failing later
+  inside a download.
+- **The embedding sidecar is a real seam.** `embeddingSidecarModel` selects the
+  sentence-transformers model and `embeddingSidecarQueryPrompt` its query-side
+  instruction. The handshake's reported dimension is now honoured instead of the
+  hardcoded 1024, so a swapped model's stored vectors are correctly detected as
+  stale rather than re-embedded on every query. A non-default model defaults to
+  *no* instruction, because its prompt presets are unknown.
+- **Fixed:** extraction substituted `{turn_text}`, `{known_entities}`, and
+  `{candidate_mentions}` in three sequential passes, so a turn containing
+  `{known_entities}` literally had the entity list spliced into it. Substitution
+  is now single-pass (`renderPrompt`).
+- **Observability:** `memory_status` reports the configured profiles, the route
+  in hand, the profile each stage resolved to, and the live embedding model and
+  dimension; profile selection and switches are written to
+  `extraction-debug.jsonl`.
+
 ## r2 full rerun — 2026-09-11
 
 - Full MemoryAgentBench rerun on the DeepSeek official API after the M11–M17

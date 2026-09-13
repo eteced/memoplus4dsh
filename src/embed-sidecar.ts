@@ -67,9 +67,24 @@ export class FallbackEmbedder implements TextEmbedder {
 /** 与 ONNX embedder 一致的分块大小。 */
 const CHUNK = 256
 
+/** The sidecar model this plugin is tuned for; its 1024 dims and query instruction are defaults, not requirements. */
+export const DEFAULT_SIDECAR_MODEL = 'microsoft/harrier-oss-v1-0.6b'
+
+/** harrier's trained query-side instruction prompt name (documents embed bare). */
+export const DEFAULT_SIDECAR_QUERY_PROMPT = 'web_search_query'
+
 export interface HarrierEmbedderOptions {
   python?: string
+  /** sentence-transformers model id; defaults to {@link DEFAULT_SIDECAR_MODEL}. */
   model?: string
+  /**
+   * Query-side instruction prompt name, or `null` for none. Defaults to
+   * harrier's trained instruction for the default model and to none for any
+   * other model, whose prompt presets are unknown to us.
+   */
+  queryPrompt?: string | null
+  /** Dimension to report before the sidecar handshake answers (default 1024). */
+  expectedDim?: number
   /** 单次调用超时（默认 60s；大批量分块调用）。 */
   timeoutMs?: number
   /** HF 镜像基址（以 HF_ENDPOINT 传给 sidecar；模型首用下载走镜像）。 */
@@ -77,12 +92,14 @@ export interface HarrierEmbedderOptions {
 }
 
 export class HarrierEmbedder implements TextEmbedder {
-  readonly dim: number = 1024
-
   private readonly python: string
-  private readonly model?: string
+  private readonly model: string
+  private readonly instruction: string | null
+  private readonly expectedDim: number
   private readonly timeoutMs: number
   private readonly hfBaseUrl?: string
+  /** Dimension the sidecar reported at handshake; a different embedding model reports its own. */
+  private reportedDim: number | undefined
   private initPromise: Promise<boolean> | undefined
   private proc: ReturnType<typeof spawn> | undefined
   private nextId = 0
@@ -93,9 +110,33 @@ export class HarrierEmbedder implements TextEmbedder {
 
   constructor(options: HarrierEmbedderOptions = {}) {
     this.python = options.python ?? 'python3'
-    this.model = options.model
+    this.model = options.model ?? DEFAULT_SIDECAR_MODEL
+    this.instruction = options.queryPrompt === undefined
+      ? (this.model === DEFAULT_SIDECAR_MODEL ? DEFAULT_SIDECAR_QUERY_PROMPT : null)
+      : options.queryPrompt
+    this.expectedDim = options.expectedDim ?? 1024
     this.timeoutMs = options.timeoutMs ?? 60_000
     this.hfBaseUrl = options.hfBaseUrl
+  }
+
+  /**
+   * The live dimension: whatever the loaded model reported, falling back to the
+   * expected one before the handshake. Retrieval compares this against
+   * persisted vectors, so a swapped model's vectors are correctly seen as stale
+   * instead of being re-embedded on every query.
+   */
+  get dim(): number {
+    return this.reportedDim ?? this.expectedDim
+  }
+
+  /** The sentence-transformers model the sidecar loads. */
+  get modelId(): string {
+    return this.model
+  }
+
+  /** The query-side instruction prompt name, or `null` when queries embed bare. */
+  get queryPrompt(): string | null {
+    return this.instruction
   }
 
   /** Whether the sidecar came up (checked lazily on first embed). */
@@ -122,7 +163,8 @@ export class HarrierEmbedder implements TextEmbedder {
   async embedQuery(texts: string[]): Promise<Float32Array[] | null> {
     if (texts.length === 0) return []
     if (!await this.init()) return null
-    return this.call(texts, 'web_search_query')
+    if (this.instruction === null) return this.embed(texts)
+    return this.call(texts, this.instruction)
   }
 
   private call(texts: string[], prompt: string | null): Promise<Float32Array[] | null> {
@@ -150,7 +192,7 @@ export class HarrierEmbedder implements TextEmbedder {
         return
       }
       const env = { ...process.env }
-      if (this.model !== undefined) env['EMBED_MODEL'] = this.model
+      env['EMBED_MODEL'] = this.model
       if (this.hfBaseUrl !== undefined) env['HF_ENDPOINT'] = this.hfBaseUrl
       let settled = false
       const finish = (ok: boolean): void => {
@@ -171,6 +213,10 @@ export class HarrierEmbedder implements TextEmbedder {
           return
         }
         if (msg['ready'] === true) {
+          // The loaded model's real dimension, so a model swap is detected by
+          // retrieval's stale-vector check instead of looping on re-embed.
+          const dim = msg['dim']
+          if (typeof dim === 'number' && Number.isFinite(dim) && dim > 0) this.reportedDim = dim
           this.proc = proc
           finish(true)
           return

@@ -37,6 +37,12 @@ export const SUPERSEDED_DISCOUNT = 0.3
 export interface LlmSupersedeResolverOptions {
   store: MemoryStore
   callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
+  /**
+   * Adjudication template, or a resolver called once per turn (the route is
+   * per turn). Defaults to {@link SUPERSEDE_ADJUDICATION_PROMPT}; an override
+   * must keep `{lines}`.
+   */
+  prompt?: string | ((job: ExtractionJob) => string)
   /** Audit hook: every adjudication verdict and marked link is reported (m11). */
   onLog?: (entry: Record<string, unknown>) => void
 }
@@ -44,11 +50,14 @@ export interface LlmSupersedeResolverOptions {
 export class LlmSupersedeResolver {
   private readonly store: MemoryStore
   private readonly callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
+  private readonly promptFor: (job: ExtractionJob) => string
   private readonly onLog?: (entry: Record<string, unknown>) => void
 
   constructor(options: LlmSupersedeResolverOptions) {
     this.store = options.store
     this.callLlm = options.callLlm
+    const source = options.prompt
+    this.promptFor = typeof source === 'function' ? source : () => source ?? SUPERSEDE_ADJUDICATION_PROMPT
     this.onLog = options.onLog
   }
 
@@ -164,7 +173,7 @@ export class LlmSupersedeResolver {
     }).join('\n')
     let raw: string
     try {
-      raw = await this.callLlm(SUPERSEDE_ADJUDICATION_PROMPT.replace('{lines}', () => lines), job)
+      raw = await this.callLlm(this.promptFor(job).replace('{lines}', () => lines), job)
     } catch {
       return 0
     }

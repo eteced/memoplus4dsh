@@ -68,6 +68,35 @@ export const EMBEDDING_MODELS = {
 export type EmbeddingModelName = keyof typeof EMBEDDING_MODELS
 
 /**
+ * Resolve one embedding preset by name.
+ *
+ * A deployment adds or replaces presets through `embeddingModels`, so a
+ * machine with more RAM or a different language mix can move to a stronger
+ * model without patching the plugin. An unknown name is refused at load rather
+ * than surfacing later as an obscure download failure.
+ *
+ * @param name - preset name from `embeddingModel`.
+ * @param userModels - deployment presets, which win over a built-in of the same name.
+ * @returns The preset to download and run.
+ * @throws When neither table describes the name.
+ */
+export function resolveEmbeddingModel(
+  name: string,
+  userModels?: Readonly<Record<string, EmbeddingModelSpec>>,
+): EmbeddingModelSpec {
+  const builtin = EMBEDDING_MODELS as Readonly<Record<string, EmbeddingModelSpec>>
+  const spec = userModels?.[name] ?? builtin[name]
+  if (spec === undefined) {
+    const known = [...new Set([...Object.keys(builtin), ...Object.keys(userModels ?? {})])]
+    throw new Error(
+      `memoplus4dsh: unknown embeddingModel "${name}" (known: ${known.join(', ')};`
+      + ' add a preset under embeddingModels)',
+    )
+  }
+  return spec
+}
+
+/**
  * Async batch embedder. `embed` returns null whenever the backend is
  * unavailable — callers must treat null as "run keyword-only".
  */

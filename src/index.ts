@@ -17,10 +17,12 @@ import { LlmSupersedeResolver } from './supersede.js'
 import { createNerDetector, NULL_NER } from './ner.js'
 import { FallbackEmbedder, HarrierEmbedder } from './embed-sidecar.js'
 import { registerBridges } from './bridges.js'
-import { OnnxEmbedder, NULL_EMBEDDER, EMBEDDING_MODELS } from './embedding.js'
-import type { TextEmbedder } from './embedding.js'
+import { OnnxEmbedder, NULL_EMBEDDER, resolveEmbeddingModel } from './embedding.js'
+import type { EmbeddingModelSpec, TextEmbedder } from './embedding.js'
 import { Retriever, createQueryDistiller, createQueryExpander } from './retrieval.js'
 import { createPreStepHandler } from './inject.js'
+import type { PromptProfile, PromptStage, StageSettings } from './prompts.js'
+import { PromptRegistry } from './prompts.js'
 import { registerMemoryTools } from './tools.js'
 
 export const name = 'memoplus4dsh'
@@ -46,7 +48,10 @@ export interface Config {
   extractionConcurrency?: number
   /** Output token cap for extraction calls (reasoning models need a large budget). */
   extractionMaxTokens?: number
-  /** Per-call timeout for extraction/expansion calls (default 120s). */
+  /**
+   * Per-call timeout in ms for extraction and the adjudication stages;
+   * shorthand for `prompts.extraction.timeoutMs` (default 120000).
+   */
   extractionCallTimeoutMs?: number
   /** Journal ops between snapshot compactions. */
   snapshotThreshold?: number
@@ -71,12 +76,28 @@ export interface Config {
   /** Python executable for the harrier embedding sidecar (default: nerPython, else python3). */
   embedPython?: string
   /**
-   * Embedding model preset: 'multilingual' (default, distiluse-base-multilingual-cased-v2,
-   * 512-dim, ~135MB download, 50+ languages incl. Chinese) or 'english'
-   * (all-MiniLM-L6-v2, 384-dim, ~23MB). Switching presets recomputes stored
-   * vectors lazily (dimension mismatch is detected and re-embedded).
+   * Embedding preset name: a built-in (`multilingual`, `english`) or any key
+   * declared under `embeddingModels`. Switching re-embeds stored vectors
+   * lazily, because retrieval treats a dimension mismatch as stale.
    */
-  embeddingModel?: 'multilingual' | 'english'
+  embeddingModel?: string
+  /**
+   * Extra or replacement embedding presets by name, for a machine that can
+   * afford a stronger model than the shipped ONNX presets.
+   */
+  embeddingModels?: Record<string, EmbeddingModelSpec>
+  /**
+   * sentence-transformers model the sidecar loads (default
+   * `microsoft/harrier-oss-v1-0.6b`). The sidecar reports the model's real
+   * dimension at handshake, so any sentence-transformers model works.
+   */
+  embeddingSidecarModel?: string
+  /**
+   * Query-side instruction prompt name for the sidecar, or `null` for none.
+   * Defaults to harrier's trained instruction for the default model and to
+   * none for any other model, whose prompt presets this plugin does not know.
+   */
+  embeddingSidecarQueryPrompt?: string | null
   /** HuggingFace base URL or mirror for the embedding model download. */
   hfBaseUrl?: string
   /** LLM query expansion during retrieval; default true. */
@@ -109,6 +130,20 @@ export interface Config {
    * (default 4000): very long messages are document dumps, not queries.
    */
   injectMaxQueryChars?: number
+  /**
+   * Named prompt profiles, tried in declaration order against the session's
+   * route; the first whose `match` accepts it supplies that turn's prompts.
+   * The built-in `default` profile (the v0.1 prompts) is always the fallback.
+   */
+  promptProfiles?: PromptProfile[]
+  /** Force one profile by name, disabling route matching (default: match, then `default`). */
+  promptProfile?: string
+  /**
+   * Per-stage prompt and model-parameter overrides that beat every profile.
+   * `extractionMaxTokens` and `extractionCallTimeoutMs` are shorthand for this
+   * layer's `extraction` entries.
+   */
+  prompts?: Partial<Record<PromptStage, StageSettings>>
 }
 
 export const inject = ['systemPrompt', 'llm', 'tools']
@@ -192,6 +227,7 @@ async function callPluginLlm(
   prompt: string,
   maxTokens: number,
   timeoutMs?: number,
+  reasoningEffort = 'off',
 ): Promise<string> {
   const resolved = config.extractionProvider !== undefined && config.extractionModel !== undefined
     ? { provider: config.extractionProvider, model: config.extractionModel }
@@ -209,13 +245,15 @@ async function callPluginLlm(
     model: resolved.model,
     messages: [message],
     maxTokens,
-    // Extraction/expansion are structured tasks: thinking is pure waste here
+    // Extraction/expansion are structured tasks: thinking spends the output cap
     // and, worse, deepseek-v4-flash spirals into unbounded reasoning on dense
     // extraction inputs, exhausting any token budget with EMPTY visible
     // output (M9 F-1; verified 8k→32k budgets). dsh maps effort 'off' to
     // wire `thinking: 'disabled'` (llm-deepseek serialize.ts); the user's
-    // main conversation is unaffected (per-call option).
-    reasoningEffort: 'off' as never,
+    // main conversation is unaffected (per-call option). The default is 'off'
+    // and a prompt profile may raise it per stage for a model that needs to
+    // think in order to extract.
+    reasoningEffort: reasoningEffort as never,
     // Bound the call: an endpoint that stalls without erroring would
     // otherwise stall the serial extraction queue forever. 120s pairs with
     // the 8192-token budget: reasoning models either finish well within it
@@ -242,6 +280,40 @@ export function apply(ctx: Context, config: Config) {
     // their own, this cell serves query expansion at injection time.
     let lastRoute: Route | undefined
 
+    // Minimal durable trace in the data dir for field debugging (extraction,
+    // query-side calls, and prompt-profile selection); must never break the
+    // plugin, so it is defined before anything that reports through it.
+    const debugLog = (entry: Record<string, unknown>): void => {
+      try {
+        appendFileSync(join(dataDir, 'extraction-debug.jsonl'),
+          JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n', 'utf8')
+      } catch {
+        // Debug logging must never break anything.
+      }
+    }
+
+    // Prompt profiles resolve per call, because the route is per call: the
+    // extraction stages follow the turn's recorded route, the query-side
+    // stages follow the session's latest request header. The legacy
+    // `extractionMaxTokens` / `extractionCallTimeoutMs` keys become the
+    // highest-precedence extraction overrides, which is the layer they were
+    // before profiles existed.
+    const promptOverrides: Partial<Record<PromptStage, StageSettings>> = {
+      ...config.prompts,
+      extraction: {
+        ...(config.extractionMaxTokens === undefined ? {} : { maxTokens: config.extractionMaxTokens }),
+        ...(config.extractionCallTimeoutMs === undefined ? {} : { timeoutMs: config.extractionCallTimeoutMs }),
+        ...config.prompts?.extraction,
+      },
+    }
+    const prompts = new PromptRegistry({
+      profiles: config.promptProfiles,
+      selected: config.promptProfile,
+      overrides: promptOverrides,
+      onResolve: info => debugLog({ kind: 'prompt-profile', ...info }),
+    })
+    for (const warning of prompts.warnings) logger.warn(warning)
+
     ctx.systemPrompt.section({
       name: 'memoplus4dsh',
       order: 900,
@@ -265,13 +337,22 @@ export function apply(ctx: Context, config: Config) {
 
     // Embedding backend (m14): harrier sidecar（多语言 decoder，1024 维，
     // 查询侧用其训练指令）优先，ONNX 编码器兜底；任一不可用自动降级。
+    // Resolved by name so a deployment can add a preset or swap the sidecar
+    // model; an unknown name fails here at load, not inside a download.
+    const embeddingModelName = config.embeddingModel ?? 'multilingual'
+    const embeddingSpec = resolveEmbeddingModel(embeddingModelName, config.embeddingModels)
     const onnxEmbedder: TextEmbedder = new OnnxEmbedder({
       modelsDir: join(dataDir, 'models'),
       hfBaseUrl: config.hfBaseUrl,
-      model: EMBEDDING_MODELS[config.embeddingModel ?? 'multilingual'],
+      model: embeddingSpec,
     })
     const backend = config.embeddingBackend ?? 'auto'
-    const harrier = new HarrierEmbedder({ python: config.embedPython ?? config.nerPython, hfBaseUrl: config.hfBaseUrl })
+    const harrier = new HarrierEmbedder({
+      python: config.embedPython ?? config.nerPython,
+      ...(config.embeddingSidecarModel === undefined ? {} : { model: config.embeddingSidecarModel }),
+      ...(config.embeddingSidecarQueryPrompt === undefined ? {} : { queryPrompt: config.embeddingSidecarQueryPrompt }),
+      hfBaseUrl: config.hfBaseUrl,
+    })
     const embedder: TextEmbedder = config.embedding === false
       ? NULL_EMBEDDER
       : backend === 'onnx'
@@ -287,16 +368,25 @@ export function apply(ctx: Context, config: Config) {
       ? undefined
       : createQueryExpander({
           cachePath: join(dataDir, 'query-expansion-cache.json'),
-          // Expansion output is ≤12 short lines: 1024 tokens cover a reasoning
-          // model's thinking for that; 30s keeps the pre-step critical path
-          // responsive when the endpoint degrades (failure → no expansion).
-          callLlm: prompt => callPluginLlm(ctx, config, lastRoute, prompt, 1024, 30_000),
+          prompt: () => prompts.resolve('queryExpansion', lastRoute).prompt,
+          // Expansion output is ≤12 short lines: the default 1024 tokens cover
+          // a reasoning model's thinking for that, and 30s keeps the pre-step
+          // critical path responsive when the endpoint degrades (failure → no
+          // expansion). A profile may raise either bound.
+          callLlm: prompt => {
+            const stage = prompts.resolve('queryExpansion', lastRoute)
+            return callPluginLlm(ctx, config, lastRoute, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort)
+          },
         })
     const distillQueryLlm = config.queryExpansion === false
       ? undefined
       : createQueryDistiller({
           cachePath: join(dataDir, 'query-distill-cache.json'),
-          callLlm: prompt => callPluginLlm(ctx, config, lastRoute, prompt, 1024, 30_000),
+          prompt: () => prompts.resolve('queryDistill', lastRoute).prompt,
+          callLlm: prompt => {
+            const stage = prompts.resolve('queryDistill', lastRoute)
+            return callPluginLlm(ctx, config, lastRoute, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort)
+          },
         })
 
     const retriever = new Retriever({
@@ -307,39 +397,44 @@ export function apply(ctx: Context, config: Config) {
     })
 
     let queue: ExtractionQueue | undefined
-    // Minimal durable trace in the data dir for field debugging (extraction
-    // and query-side LLM calls); must never break the plugin.
-    const debugLog = (entry: Record<string, unknown>): void => {
-      try {
-        appendFileSync(join(dataDir, 'extraction-debug.jsonl'),
-          JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n', 'utf8')
-      } catch {
-        // Debug logging must never break anything.
-      }
-    }
     // NER detector chain (m12): PyTorch sidecar → ONNX → off; the named
     // instance also feeds the memory_status report (which leg is live).
     const nerDetector = config.nerAssist === false ? NULL_NER : createNerDetector({ python: config.nerPython, hfBaseUrl: config.hfBaseUrl })
     if (config.extraction === 'turn_end') {
+      // Every write-path stage resolves its prompt and bounds from the job's
+      // own route, so a model switch takes effect on the next completed turn
+      // without a reload.
       const pipeline = new ExtractionPipeline({
         store,
-        callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, config.extractionMaxTokens ?? 8192),
+        prompt: job => prompts.resolve('extraction', job.route).prompt,
+        callLlm: (prompt, job) => {
+          const stage = prompts.resolve('extraction', job.route)
+          return callPluginLlm(ctx, config, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort)
+        },
         ner: nerDetector,
         entityMerger: config.entityMergeLlm === false
           ? undefined
           : new LlmEntityMerger({
             store,
             embedder,
-            // Adjudication output is a few "N: M" lines; a small budget and the
-            // shared call timeout keep a turn's write path bounded.
-            callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, 4096),
+            // Adjudication output is a few "N: M" lines; the default 4096-token
+            // budget plus the shared call timeout keep a turn's write path bounded.
+            prompt: job => prompts.resolve('entityMerge', job.route).prompt,
+            callLlm: (prompt, job) => {
+              const stage = prompts.resolve('entityMerge', job.route)
+              return callPluginLlm(ctx, config, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort)
+            },
             onLog: debugLog,
           }),
         supersedeResolver: config.supersedeLlm === false
           ? undefined
           : new LlmSupersedeResolver({
             store,
-            callLlm: (prompt, job) => callPluginLlm(ctx, config, job.route, prompt, 4096),
+            prompt: job => prompts.resolve('supersede', job.route).prompt,
+            callLlm: (prompt, job) => {
+              const stage = prompts.resolve('supersede', job.route)
+              return callPluginLlm(ctx, config, job.route, prompt, stage.maxTokens, stage.timeoutMs, stage.reasoningEffort)
+            },
             onLog: debugLog,
           }),
       })
@@ -448,9 +543,11 @@ export function apply(ctx: Context, config: Config) {
       if (config.embedding === false) {
         lines.push('  embedding: OFF (keyword-only retrieval)')
       } else if (backend === 'onnx') {
-        lines.push('  embedding: ONNX (forced via embeddingBackend)')
+        lines.push(`  embedding: ONNX preset "${embeddingModelName}" (dim ${embedder.dim ?? '?'}; forced via embeddingBackend)`)
+      } else if (await harrier.available()) {
+        lines.push(`  embedding: harrier sidecar (dim ${harrier.dim}; model ${harrier.modelId}${harrier.queryPrompt === null ? ', no query instruction' : `, query instruction "${harrier.queryPrompt}"`})`)
       } else {
-        lines.push(`  embedding: ${await harrier.available() ? 'harrier sidecar (1024-dim multilingual)' : 'ONNX multilingual (fallback; pip install sentence-transformers for harrier)'}`)
+        lines.push(`  embedding: ONNX preset "${embeddingModelName}" (dim ${embedder.dim ?? '?'}) — sidecar unavailable, falling back (pip install sentence-transformers for harrier)`)
       }
       const nerLegs = 'legs' in nerDetector
         ? (nerDetector as { legs: { sidecar: { available(): Promise<boolean> }; onnx: { available(): Promise<boolean> } } }).legs
@@ -463,6 +560,12 @@ export function apply(ctx: Context, config: Config) {
         lines.push('  ner: ONNX package (fallback; pip install torch gliner stanza for the sidecar)')
       } else {
         lines.push('  ner: unavailable (extraction continues without candidate hints)')
+      }
+      lines.push('', '[prompts]')
+      lines.push(`  configured: ${prompts.names().join(', ')}`)
+      lines.push(`  route: ${lastRoute === undefined ? '(none observed yet — stages report the fallback)' : `${lastRoute.provider}/${lastRoute.model}`}`)
+      for (const [stage, profile] of Object.entries(prompts.summary(lastRoute))) {
+        lines.push(`  ${stage}: ${profile}`)
       }
       lines.push('', '[data]')
       lines.push(`  graph: ${store.filePath}`)

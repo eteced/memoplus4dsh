@@ -15,6 +15,7 @@ import type { LlmEntityMerger, MergeMention } from './entity-merge.js'
 import type { LlmSupersedeResolver } from './supersede.js'
 import type { NerDetector } from './ner.js'
 import { NULL_NER } from './ner.js'
+import { renderPrompt } from './text.js'
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 
 /**
@@ -312,6 +313,14 @@ export interface ExtractionPipelineOptions {
   store: MemoryStore
   /** One LLM call: prompt in, raw text out. Throws on failure. */
   callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
+  /**
+   * Extraction template, or a resolver called once per turn. Defaults to
+   * {@link EXTRACTION_PROMPT_TURN}. A prompt profile supplies an override, so
+   * it must keep `{turn_text}` and may keep `{known_entities}` /
+   * `{candidate_mentions}`. The resolver form exists because the route is
+   * per turn: extraction follows the route the turn was recorded with.
+   */
+  prompt?: string | ((job: ExtractionJob) => string)
   /** Optional LLM entity-merge adjudication for exact-miss mentions (m11). */
   entityMerger?: LlmEntityMerger
   /** Optional LLM supersede detection for same-(subject, predicate) updates (m11 P1-B). */
@@ -327,6 +336,7 @@ export interface ExtractionPipelineOptions {
 export class ExtractionPipeline {
   private readonly store: MemoryStore
   private readonly callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
+  private readonly promptFor: (job: ExtractionJob) => string
   private readonly entityMerger?: LlmEntityMerger
   private readonly supersedeResolver?: LlmSupersedeResolver
   private readonly ner: NerDetector
@@ -334,6 +344,8 @@ export class ExtractionPipeline {
   constructor(options: ExtractionPipelineOptions) {
     this.store = options.store
     this.callLlm = options.callLlm
+    const source = options.prompt
+    this.promptFor = typeof source === 'function' ? source : () => source ?? EXTRACTION_PROMPT_TURN
     this.entityMerger = options.entityMerger
     this.supersedeResolver = options.supersedeResolver
     this.ner = options.ner ?? NULL_NER
@@ -354,11 +366,13 @@ export class ExtractionPipeline {
       const candidateMentions = mentions === null || mentions.length === 0
         ? '(none)'
         : mentions.map(m => `${m.text} (${m.type})`).join(', ')
-      // Replacement-function form: turn text may contain $-patterns.
-      const prompt = EXTRACTION_PROMPT_TURN
-        .replace('{turn_text}', () => segment)
-        .replace('{known_entities}', () => known)
-        .replace('{candidate_mentions}', () => candidateMentions)
+      // One-pass substitution: an inserted turn text is never rescanned, so a
+      // turn that literally contains a placeholder name stays literal.
+      const prompt = renderPrompt(this.promptFor(job), {
+        '{turn_text}': segment,
+        '{known_entities}': known,
+        '{candidate_mentions}': candidateMentions,
+      })
       const raw = (await this.callLlm(prompt, job)).trim()
       if (raw.length === 0) throw new Error('extraction produced empty content')
       const parsed = parseExtractionOutput(raw)

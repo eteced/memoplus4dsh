@@ -6,6 +6,34 @@ memoplus4dsh 的重要修改归档，按开发里程碑组织。各里程碑的�
 [docs/](docs/)（中英双语）。评测数字均来自 MemoryAgentBench，完整评测记录归档见
 [docs/evaluation.md](docs/evaluation.md)。
 
+## v0.2（未发布）— 模型依赖面可配置化
+
+- **Prompt profile。** 五个阶段的 prompt（抽取、实体合并、supersede 判定、
+  查询扩展、查询蒸馏）以及随之绑定的模型参数（输出上限、单次超时、reasoning
+  effort）不再是字面量。一个 profile 形如 `{ name, match: { provider?, model? },
+  stages }`，**按会话实际路由逐次解析**——在 Models 页面切模型后，下一个 turn
+  即生效，无需重载。优先级：`prompts.<阶段>` → 选中的 profile（`promptProfile`，
+  否则第一个命中的 `promptProfiles`）→ 内置 `default`。内置 default 逐字节承载
+  v0.1 的原始 prompt，且 `extractionMaxTokens` / `extractionCallTimeoutMs` 仍等价
+  于 `prompts.extraction` 的对应项，因此既有配置行为不变。
+- **`reasoningEffort` 可按阶段配置。** 原先硬编码为 `off`（M9 F-1 的规避：
+  deepseek-v4-flash 在密集抽取输入上会失控推理、把预算烧空且输出为空）。换成
+  需要思考才抽得好的模型时，现在改配置即可。
+- **Embedding 预设按名字解析。** `embeddingModel` 可填新增 `embeddingModels`
+  表中的任意键（内置 `multilingual` / `english` 为默认值）；未知名字在加载期
+  即被拒绝，而不是等到下载时报一个含糊的错。
+- **Embedding sidecar 成为真正的接缝。** `embeddingSidecarModel` 选择
+  sentence-transformers 模型，`embeddingSidecarQueryPrompt` 选择查询侧指令。
+  握手报出的维度现在被真正采纳（此前硬编码 1024），所以换模型后已存向量会被
+  正确判定为过期，而不是每次查询都重嵌入一次。非默认模型默认不带指令——它的
+  prompt 预设名本插件无从得知。
+- **修复：** 抽取原先分三次顺序替换 `{turn_text}` / `{known_entities}` /
+  `{candidate_mentions}`，导致正文里若真的出现 `{known_entities}` 字样会被塞入
+  实体列表。现改为单遍替换（`renderPrompt`）。
+- **可观测：** `memory_status` 报出已配置的 profile、当前路由、每阶段解析到的
+  profile，以及实际使用的 embedding 模型与维度；profile 选择与切换写入
+  `extraction-debug.jsonl`。
+
 ## r2 全量重跑 — 2026-09-11
 
 - M11–M17 改进后的全量重跑（DeepSeek 官方 API）：FC-SH 89/78/90/83，

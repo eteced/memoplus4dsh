@@ -94,15 +94,52 @@ Set under the plugin's `config:` in the profile's `cordis.patch.yml`:
 | `progressBridge` | `true` | Bridge goal/todo/schedule/plan progress events into the memory graph (M8) |
 | `stateDedup` | `true` | Retrieval keeps only the newest bridge state event per entity+family; history stays in the graph |
 | `embedding` | `true` | Local ONNX embeddings; failure degrades to keyword-only retrieval |
-| `embeddingModel` | `multilingual` | `multilingual` = distiluse-base-multilingual-cased-v2 (512-dim, ~135MB first-download, 50+ languages incl. Chinese); `english` = all-MiniLM-L6-v2 (384-dim, ~23MB). Switching re-embeds stored vectors lazily |
+| `embeddingModel` | `multilingual` | Preset name: `multilingual` = distiluse-base-multilingual-cased-v2 (512-dim, ~135MB first-download, 50+ languages incl. Chinese); `english` = all-MiniLM-L6-v2 (384-dim, ~23MB); or any key you declare in `embeddingModels`. Switching re-embeds stored vectors lazily |
+| `embeddingModels` | (none) | Extra or replacement presets by name: `{ repo, dim, hiddenDim?, projectionFile?, maxFileBytes }`. A stronger model for a machine that can afford it |
 | `embeddingBackend` | `auto` | `auto` = harrier sidecar (microsoft/harrier-oss-v1-0.6b, 1024-dim, multilingual, ~10ms/text CPU) when its python env has `sentence-transformers`, else ONNX encoder; `onnx` / `harrier` to force. Query-side uses the model's trained instruction prompt |
+| `embeddingSidecarModel` | `microsoft/harrier-oss-v1-0.6b` | sentence-transformers model the sidecar loads. The sidecar reports its real dimension at handshake, so a swapped model's stored vectors are correctly seen as stale and re-embedded |
+| `embeddingSidecarQueryPrompt` | (model default) | Query-side instruction prompt name (`web_search_query` for the default model), or `null` for none. Defaults to none for any other model, whose prompt presets this plugin does not know |
 | `embedPython` | (nerPython or python3) | Python executable for the harrier embedding sidecar |
 | `hfBaseUrl` | `https://huggingface.co` | Mirror base URL for the embedding model download |
 | `queryExpansion` | `true` | LLM query expansion during retrieval + verbatim-quote query distillation for injection (1024-token/30s bounded calls, results cached on disk per query) |
+| `promptProfiles` | (none) | Named prompt profiles, tried in declaration order against the session's route. Each is `{ name, match: { provider?, model? }, stages: { <stage>: { prompt, maxTokens?, timeoutMs?, reasoningEffort? } } }`; `*` is a wildcard. The built-in `default` profile holds the v0.1 prompts and is always the fallback |
+| `promptProfile` | (auto) | Force one profile by name instead of matching the route |
+| `prompts` | (none) | Per-stage overrides that beat every profile: `extraction` / `entityMerge` / `supersede` / `queryExpansion` / `queryDistill` |
 | `entityMergeLlm` | `true` | LLM-adjudicated entity merge at extraction (embedding candidates + one bounded call per turn; only explicit `sure` merges) |
 | `supersedeLlm` | `true` | LLM-adjudicated supersede detection (relation cardinality; older values marked `supersededBy`, history kept; re-mention guard + mark propagation) |
 | `nerAssist` | `true` | NER candidate hints for extraction (detector chain: PyTorch sidecar → ONNX package → off) |
 | `nerPython` | `python3` | Python executable for the NER sidecar (needs `torch gliner stanza` in that env; models auto-download on first use) |
+
+### Prompt profiles and embedding upgrades
+
+Every stage that calls a model owns a prompt plus its output cap, per-call timeout, and reasoning effort. They were hardcoded to one model family's tuning; a profile makes them configuration, and the profile is chosen per call from the session's actual route — so switching the model in the Models page changes the prompts the *next* turn uses, with no reload.
+
+Resolution order, highest first: `prompts.<stage>` → the selected profile (`promptProfile`, else the first `promptProfiles` entry whose `match` accepts the route) → the built-in `default`. `extractionMaxTokens` and `extractionCallTimeoutMs` are shorthand for the `prompts.extraction` entries. `memory_status` reports which profile each stage is using.
+
+```yaml
+- insert:
+    - id: memoplus4dsh
+      name: 'memoplus4dsh'
+      config:
+        promptProfile: deepseek-flash          # force one, or omit to match by route
+        promptProfiles:
+          - name: deepseek-flash
+            match: { model: 'deepseek-*' }
+            stages:
+              entityMerge:
+                maxTokens: 8192
+                reasoningEffort: 'off'
+          - name: glm
+            match: { provider: 'opencode-go*', model: 'glm-*' }
+            stages:
+              extraction: { prompt: '<your template with {turn_text}>' }
+        embeddingModels:
+          bge-m3: { repo: BAAI/bge-m3, dim: 1024, maxFileBytes: 2147483648 }
+        embeddingModel: bge-m3
+        embeddingSidecarModel: BAAI/bge-m3    # sidecar path reports its own dimension
+```
+
+A profile prompt must keep its stage's input placeholder — `{turn_text}` for extraction, `{lines}` for both adjudication stages, `{query}` for both query-side stages (checked at load, refuses the profile otherwise). `{known_entities}` and `{candidate_mentions}` are optional in the extraction prompt and only warned about.
 
 > The plugin resolves `python3` from the **dsh process** PATH — when dsh is launched from your shell it inherits that environment, so an interpreter that already has the packages works with zero configuration. If yours does not, `scripts/setup-python.sh` creates a dedicated venv (sentence-transformers + torch/gliner/stanza) and prints the exact `nerPython` / `embedPython` lines to paste into `cordis.patch.yml`.
 | `dataDir` | `<dsh-home>/memoplus4dsh` | Plugin data directory (journal, snapshots, model cache, expansion cache) |
