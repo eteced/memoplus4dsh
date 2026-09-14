@@ -245,6 +245,32 @@ MemoryAgentBench; see [docs/evaluation.md](docs/evaluation.en.md) for the full a
   **stem/agreement drift** (`declare`/`declares`, `support`/`supports`) and **not
   synonyms** (`contains`/`includes` share no stem).
 
+- **The settings card now has three surfaces, collapsing 11 keys into two rows plus one
+  folded area.** Previously all 11 keys rendered flat with no collapsing, and the only one
+  worth turning day to day is `injectTopK`. The split follows **"does a normal user need to
+  know the consequence before changing it"**, not importance: `common` stays visible
+  (`injectTopK`, plus `debug` — not a tuning knob but **a state that has to be visible at a
+  glance**, since folded away it is easy to leave on); `advanced` is important but rarely
+  changed and folds under 「高级设置」, each entry keeping its explanation and apply
+  semantic once expanded (`promptProfile` / `reasoningEffortPolicy` /
+  `thinkingTokenHeadroom` / `extractionMaxFailureRounds`); the remaining five
+  (`promptProfilesDir` and the four queue parameters, **all `applies: restart`**) are
+  carried by one JSON box inside that area, where `{}` or an empty box returns everything
+  to defaults/inheritance. The fold's header states the item count **and** that everything
+  inside needs a dsh restart, so the cost is visible while collapsed. **Each key has exactly
+  one owner**: `raw` keys no longer render as controls, so the controls and the JSON cannot
+  become two write paths to one key. The JSON feeds the same drafts/dirty/save pipeline and
+  validates in place: a parse failure or a key this namespace does not own **blocks saving
+  and keeps the draft**, and unknown keys are reported rather than silently dropped. The
+  initial text carries only **already overridden** keys, never baking a `cordis.yml`
+  inherited value into an override. The "client key set must not drift from the Host" test
+  was retargeted to a **stronger** form: it first asserts statically that the `SURFACE` map
+  covers exactly `MEMORY_SETTING_KEYS` (adding a Host key without a surface now fails), then
+  that the collapsed render exposes exactly the `common` tier. Browser testing found and
+  fixed a real bug: 「丢弃改动」 only reset `drafts`, so a bad JSON stayed in the textarea,
+  `rawError` stayed non-empty, and saving was **blocked permanently** with no way for the
+  user to recover; both now clear together.
+
 ## r2 full rerun — 2026-09-11
 
 - Full MemoryAgentBench rerun on the DeepSeek official API after the M11–M17

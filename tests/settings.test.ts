@@ -460,22 +460,53 @@ describe.skipIf(!clientReady)('lib/client.js (the browser half)', () => {
     expect(typeof loaded['apply']).toBe('function')
   })
 
-  it('edits exactly the keys the Host namespace owns, so the two lists cannot drift', () => {
+  /**
+   * 卡片分三档（`SURFACE`）：`common` 渲染成控件、`advanced` 折在「高级设置」里、
+   * `raw` 由该区域的一段 JSON 承载。断言分档表本身，是为了让"新增一个 Host 键却忘了
+   * 给它分档"直接失败 —— 静态检查比只盯着折叠态渲染出的那几个控件更强。
+   */
+  function surfaceTiers(): Record<string, string> {
+    const source = readFileSync(fileURLToPath(new URL('../src/client/index.tsx', import.meta.url)), 'utf8')
+    const block = /const SURFACE: Readonly<Record<string, Surface>> = \{([\s\S]*?)\n\}/.exec(source)
+    expect(block, 'SURFACE map not found in src/client/index.tsx').not.toBeNull()
+    const tiers: Record<string, string> = {}
+    for (const line of block![1]!.split('\n')) {
+      const entry = /^\s*([A-Za-z0-9_]+):\s*'(common|advanced|raw)'/.exec(line)
+      if (entry !== null) tiers[entry[1]!] = entry[2]!
+    }
+    return tiers
+  }
+
+  it('gives every Host-owned key exactly one surface, so the two lists cannot drift', () => {
+    const tiers = surfaceTiers()
+    expect(Object.keys(tiers).sort()).toEqual([...MEMORY_SETTING_KEYS].sort())
+    // 折叠态只渲染常改的那一档；其余两档必须能在展开后到达，否则这个键就是死的。
     const tree = render({ status: 'ready', value: {}, user: {}, base: {}, writable: true, revision: 1 })
-    expect(cardKeys(tree).sort()).toEqual([...MEMORY_SETTING_KEYS].sort())
+    expect(cardKeys(tree).sort()).toEqual(
+      Object.keys(tiers).filter(key => tiers[key] === 'common').sort(),
+    )
+    // 折叠区标题报出被收起来的键数，并说明那里要重启才生效 —— 用户在展开前就该知道。
+    // `join('')`：标题里的计数是插值，`texts` 的分隔符是测试脚手架的产物，不是 DOM 里的。
+    const flat = texts(tree).join('')
+    expect(flat).toContain(`高级设置（${MEMORY_SETTING_KEYS.length - cardKeys(tree).length} 项）`)
+    expect(flat).toContain('都要重启 dsh 才生效')
   })
 
-  it('labels every field with its apply semantic: 4 restart, 7 live', () => {
+  it('labels every field with the apply semantic of the surface that owns it', () => {
     const tree = render({ status: 'ready', value: {}, user: {}, base: {}, writable: true, revision: 1 })
+    const tiers = surfaceTiers()
+    const common = Object.keys(tiers).filter(key => tiers[key] === 'common')
     const marks = badges(tree)
-    // 徽标逐项标注：四个队列类键"重启后生效"，其余七个"保存即生效"。
-    expect(marks.filter(mark => mark === '重启后生效')).toHaveLength(4)
-    expect(marks.filter(mark => mark === '保存即生效')).toHaveLength(7)
+    // 常改档都是 `live`，所以逐项标「保存即生效」。
+    expect(marks.filter(mark => mark === '保存即生效')).toHaveLength(common.length)
+    expect(marks.filter(mark => mark === '重启后生效')).toHaveLength(0)
     const rendered = texts(tree).join(' ')
+    // 重启语义由折叠标题承载（该档四个键一个都不渲染成控件）。
+    expect(rendered).toContain('都要重启 dsh 才生效')
     // 每项都带一行说明与状态（默认值 / 继承 / 已覆盖）。
     expect(rendered).toContain('诊断开关，默认关')
-    expect(rendered).toContain('默认：3')
-    expect(rendered).toContain('逗号分隔')
+    expect(rendered).toContain('默认：8')
+    expect(rendered).toContain('每条用户消息最多注入的记忆条数')
     // 导入导出的两个入口都在。
     expect(rendered).toContain('导出配置（下载 JSON）')
     expect(rendered).toContain('复制到剪贴板')
@@ -492,7 +523,7 @@ describe.skipIf(!clientReady)('lib/client.js (the browser half)', () => {
     // 类型全错：value/user/base 不是对象、revision 不是数字、writable 不是布尔。
     const broken = render({ status: 7, value: 'nope', user: 5, base: [], writable: 'yes', revision: 'x' })
     const brokenText = texts(broken).join(' ')
-    expect(brokenText).toContain('promptProfile')
+    expect(brokenText).toContain('injectTopK')
     expect(brokenText).toContain('默认：8')
     // 值本身类型错乱：数字字段拿到字符串、布尔拿到字符串、列表拿到数字、字段缺席。
     const wrong = texts(render({
@@ -505,7 +536,8 @@ describe.skipIf(!clientReady)('lib/client.js (the browser half)', () => {
     })).join(' ')
     expect(wrong).toContain('injectTopK')
     expect(wrong).toContain('已覆盖')          // user 里有 debug
-    expect(wrong).toContain('继承 cordis.yml: zen')
+    // 类型错乱的值降级成"空"（当作未设置），既不抛也不阻断其余字段。
+    expect(wrong).toContain('每条用户消息最多注入的记忆条数')
   })
 })
 

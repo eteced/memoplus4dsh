@@ -100,6 +100,36 @@ interface FieldSpec {
 const GROUPS = ['提示词', '检索与推理', '抽取队列', '诊断'] as const
 
 /**
+ * 一个键在卡片上的档位。分档依据不是"重不重要"，而是**普通用户改它之前要不要先
+ * 知道后果**：
+ * - `common` 常改：始终可见。`injectTopK` 是唯一日常会拧的旋钮；`debug` 不是调优
+ *   而是**一种必须能一眼看到的状态**，收进折叠里容易忘了关。
+ * - `advanced` 重要但少改：折起来，展开后仍逐项带说明与生效语义。这四个改错都有
+ *   可观察的后果（换整套 prompt、抽取全空、被 dsh 拒绝、记忆被永久放弃）。
+ * - `raw` 其余：路径、数组、时序参数，**全部是 `applies: restart`**，本来就不是
+ *   随手调的。由折叠区里的一段 JSON 承载。
+ *
+ * 每个键只有一个主人：`raw` 的键不再渲染成控件，控件与 JSON 不会出现两个写入面。
+ */
+type Surface = 'common' | 'advanced' | 'raw'
+
+const SURFACE: Readonly<Record<string, Surface>> = {
+  injectTopK: 'common',
+  debug: 'common',
+  promptProfile: 'advanced',
+  reasoningEffortPolicy: 'advanced',
+  thinkingTokenHeadroom: 'advanced',
+  extractionMaxFailureRounds: 'advanced',
+  promptProfilesDir: 'raw',
+  extractionConcurrency: 'raw',
+  extractionJobIntervalMs: 'raw',
+  extractionRetryDelayMs: 'raw',
+  extractionMaxRetries: 'raw',
+}
+
+/** 由 JSON 承载的键，顺序沿用 {@link FIELDS}。 */
+
+/**
  * 字段清单。键名与 `src/settings.ts` 的 `MEMORY_SETTING_FIELDS` 一一对应，
  * 生效语义（`applies`）也逐项对齐：队列类四个键由 `ExtractionQueue` 在构造时
  * 固定，所以标「重启后生效」；`extractionMaxFailureRounds` 每次失败判定重读，
@@ -209,6 +239,12 @@ const FIELDS: readonly FieldSpec[] = [
     hint: '诊断开关，默认关；打开会显著增加日志量（每个 session 事件一行，正常也近千行/天），只在排查事件流或空内容抽取时开。关掉不影响损失账本。',
   },
 ]
+
+/** 由 JSON 承载的键；顺序沿用 {@link FIELDS}。 */
+const RAW_FIELDS: readonly FieldSpec[] = FIELDS.filter(spec => SURFACE[spec.key] === 'raw')
+
+/** 折叠区里的键数（含 JSON 承载的那些）。 */
+const ADVANCED_COUNT = FIELDS.filter(spec => SURFACE[spec.key] !== 'common').length
 
 /** 稳定的选择器：快照引用在两次变更之间不变，恒等选择器即最小订阅。 */
 const identity = (snapshot: ScopeSnapshot | undefined): ScopeSnapshot | undefined => snapshot
@@ -458,6 +494,20 @@ function draftsFrom(resolved: Record<string, unknown>): Drafts {
   return drafts
 }
 
+/**
+ * 高级区 JSON 的初始文本：只收**已覆盖**的 raw 键。
+ *
+ * 不能把生效值（含 `cordis.yml` 继承来的）写进去 —— 那会让一次保存把继承值烤成
+ * 覆盖，正是 `sources` 机制要避免的。
+ * @param user - 快照里的用户设置文档。
+ * @returns 格式化 JSON；没有覆盖时为空白。
+ */
+function rawTextFrom(user: Record<string, unknown>): string {
+  const picked: Record<string, unknown> = {}
+  for (const spec of RAW_FIELDS) if (user[spec.key] !== undefined) picked[spec.key] = user[spec.key]
+  return Object.keys(picked).length === 0 ? '' : JSON.stringify(picked, null, 2)
+}
+
 const cardStyle = {
   listStyle: 'none',
   border: '0.5px solid var(--dsw-alias-border-l4, #d8d8d8)',
@@ -518,11 +568,57 @@ export function MemorySettingsCard(props: CardProps) {
   const [importText, setImportText] = useState('')
   /** 解析出来的导入计划；`undefined` = 还没解析。 */
   const [plan, setPlan] = useState<ImportPlan | undefined>(undefined)
+  /** 高级区展开状态。默认收起：常改的两个键之外不该占视线。 */
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  /** 高级区 JSON 草稿，只承载 `raw` 档的键。 */
+  const [rawText, setRawText] = useState(() => rawTextFrom(overridden))
+  /** 高级区 JSON 的解析/归属错误；非空即阻塞保存。 */
+  const [rawError, setRawError] = useState('')
+
+  /**
+   * 把高级区文本折进同一份草稿。走 `drafts` 而不是另开写入面，所以本地校验、
+   * `dirty`、`saveAll` 都不用为它分叉。
+   * @param text - 文本域当前内容。
+   */
+  const applyRawText = (text: string): void => {
+    setRawText(text)
+    const trimmed = text.trim()
+    const writeRaw = (values: Record<string, unknown>): void => {
+      setDrafts(previous => {
+        const next = { ...previous }
+        // 不在 JSON 里的 raw 键 = 清除覆盖；空文本即"全部回到默认/继承"。
+        for (const spec of RAW_FIELDS) next[spec.key] = spec.key in values ? draftOf(spec, values[spec.key]) : ''
+        return next
+      })
+    }
+    if (trimmed === '') { setRawError(''); writeRaw({}); return }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch (error: unknown) {
+      setRawError(`JSON 解析失败：${reason(error)}`)
+      return
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      setRawError('需要一个 JSON 对象，例如 {"extractionConcurrency": 3}')
+      return
+    }
+    const values = parsed as Record<string, unknown>
+    const unknown = Object.keys(values).filter(key => !RAW_FIELDS.some(spec => spec.key === key))
+    if (unknown.length > 0) {
+      setRawError(`本区域只管 ${RAW_FIELDS.map(spec => spec.key).join(' / ')}，不认识：${unknown.join(', ')}`)
+      return
+    }
+    setRawError('')
+    writeRaw(values)
+  }
 
   // 已确认的值变了（保存成功、外部改写、重连）就丢弃草稿，回到权威值。
   const resolvedSignature = signature(resolved)
   useEffect(() => {
     setDrafts(draftsFrom(resolved))
+    setRawText(rawTextFrom(overridden))
+    setRawError('')
     // resolved 由快照派生：revision 或任一权威值变化都重置草稿。
   }, [revision, resolvedSignature])
 
@@ -535,7 +631,7 @@ export function MemorySettingsCard(props: CardProps) {
     if (wire.error !== undefined) errors[spec.key] = wire.error
     else if (draft !== draftOf(spec, resolved[spec.key])) changed.push({ key: spec.key, value: wire.value })
   }
-  const invalid = Object.keys(errors)
+  const invalid = rawError === '' ? Object.keys(errors) : [...Object.keys(errors), '高级区 JSON']
   const dirty = changed.length > 0
   const canWrite = writable && !busy
 
@@ -546,6 +642,19 @@ export function MemorySettingsCard(props: CardProps) {
       () => { setNote('已提交') },
       (error: unknown) => { setNote(`保存失败：${reason(error)}`) },
     ).finally(() => { setBusy(false) })
+  }
+
+  /**
+   * 丢弃全部草稿：控件与高级区一起回到权威值。
+   *
+   * 高级区必须一起清 —— 只重置 `drafts` 的话，一段坏 JSON 会留在文本域里，
+   * `rawError` 非空则保存被永久阻塞，而"丢弃改动"救不回来。
+   */
+  const discardDrafts = (): void => {
+    setDrafts(draftsFrom(resolved))
+    setRawText(rawTextFrom(overridden))
+    setRawError('')
+    setNote('草稿已丢弃')
   }
 
   const saveAll = (): void => {
@@ -651,10 +760,17 @@ export function MemorySettingsCard(props: CardProps) {
       {!ready ? <div style={{ ...hintStyle, marginTop: '6px' }}>设置快照尚未到达（Host 未服务该命名空间，或连接未就绪）。</div> : null}
       {ready && !writable ? <div style={{ ...hintStyle, marginTop: '6px' }}>当前设置文档只读（memory 模式或 Host 未开启写入）。</div> : null}
 
-      {GROUPS.map(group => (
+      {GROUPS.map(group => {
+        // `raw` 档不渲染控件（由折叠区的 JSON 承载，一个键只有一个主人）；
+        // `advanced` 档只在展开时出现。
+        const specs = FIELDS.filter(spec =>
+          spec.group === group
+          && (SURFACE[spec.key] === 'common' || (showAdvanced && SURFACE[spec.key] === 'advanced')))
+        if (specs.length === 0) return null
+        return (
         <div key={group}>
           <div style={groupStyle}>{group}</div>
-          {FIELDS.filter(spec => spec.group === group).map(spec => {
+          {specs.map(spec => {
             const draft = drafts[spec.key] ?? draftOf(spec, resolved[spec.key])
             const isOverridden = overridden[spec.key] !== undefined
             const inherited = !isOverridden && base[spec.key] !== undefined
@@ -714,14 +830,48 @@ export function MemorySettingsCard(props: CardProps) {
             )
           })}
         </div>
-      ))}
+        )
+      })}
+
+      <button
+        type="button"
+        style={{ ...hintStyle, marginTop: '10px', cursor: 'pointer' }}
+        aria-expanded={showAdvanced}
+        onClick={() => { setShowAdvanced(value => !value) }}
+      >
+        {showAdvanced ? '▾' : '▸'} 高级设置（{ADVANCED_COUNT} 项）—— 少改、改错有后果的那些，以及其余配置（都要重启 dsh 才生效）的 JSON
+      </button>
+
+      {showAdvanced ? (
+        <div style={{ marginTop: '8px', paddingLeft: '8px', borderLeft: '2px solid var(--dsw-alias-border-l4, #e4e4e4)' }}>
+          <div style={{ ...groupStyle, marginTop: '4px' }}>其余配置（JSON）</div>
+          <div style={hintStyle}>
+            这个区域只管 {RAW_FIELDS.map(spec => spec.key).join(' / ')} 这几个键，它们
+            <strong>都要重启 dsh 才生效</strong>。写 {'{}'} 或清空 = 全部回到默认 / 继承。
+            不在这里的键（含生效值）不受影响 —— 导出快照可以看到每项的当前来源。
+          </div>
+          <textarea
+            aria-label="其余配置（JSON）"
+            style={{ ...inputStyle, width: '100%', minHeight: '120px', fontFamily: 'monospace', whiteSpace: 'pre' }}
+            value={rawText}
+            disabled={!canWrite}
+            placeholder={'{\n  "extractionConcurrency": 3\n}'}
+            onChange={(event) => { applyRawText(event.target.value); setNote('') }}
+          />
+          <span style={rawError !== '' ? errorStyle : hintStyle}>
+            {rawError !== ''
+              ? `JSON 无效：${rawError}（保存已阻塞，草稿保留）`
+              : '每个键只在这里或上面的控件里出现一次；两边不会互相覆盖。'}
+          </span>
+        </div>
+      ) : null}
 
       <div style={footerStyle}>
         <button type="button" disabled={!canWrite || !dirty || invalid.length > 0} onClick={saveAll}>保存</button>
         <button
           type="button"
           disabled={!canWrite}
-          onClick={() => { setDrafts(draftsFrom(resolved)); setNote('草稿已丢弃') }}
+          onClick={() => { discardDrafts() }}
         >
           丢弃改动
         </button>
