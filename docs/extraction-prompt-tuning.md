@@ -373,3 +373,69 @@ p90 0、p99 5、最大 17。生命周期共 **555** 个候选（同主语 + 词�
 因为 supersede 本来就每轮批一次 LLM 调用，这些候选**可以并入那一次调用**，不需要新阶段、
 不需要额外往返。**代价是中等的误判风险**：4 个候选里 3 个是不同关系，全靠模型拒掉，
 所以 prompt 必须钉死"关系不同就整组不动"（对照 §4 里 mini-4 的 `author_of` 误标教训）。
+
+## 9. relation-merge：放宽候选，以及它必须满足的约束（2026-09-14）
+
+### 9.1 动机与实测边界
+
+§8 的约定只覆盖极性/撤回（全图 4 个槽）。普通谓词漂移无覆盖：同一个关系在不同轮
+写成 `declare` / `declares`、`support` / `supports`，精确谓词配不上，掩码文本相似度
+也常常够不到 0.8。
+
+做法不是新开一个阶段，而是**放宽 supersede 的候选集** —— supersede 本来就每轮批一次
+LLM 调用，所以增量成本几乎为零。实测（2336 事件）：
+
+| 指标 | 数值 |
+|---|---|
+| 每个新写入事件的额外候选数 | 均值 0.24 / 中位数 0 / p90 0 / p99 5 / 最大 17 |
+| 零额外候选的事件占比 | **92.4%** |
+| 生命周期候选总数 | 555 |
+| 抽样 24 条裁决精度 | **25%**（SAME 6 / DIFFERENT 18） |
+
+**边界要说清**：这条规则抓的是**词干 / 一致性漂移**（`declare`/`declares`、
+`support`/`supports`），**抓不到同义词** —— `contains` 与 `includes` 没有共享词干，
+归一化后是 `contain` / `include`。所以 §8.4 里 555 那个数字是**下限**，同义词一条都
+没算进去；而要把同义词也算进来，只能上向量近邻，那条路 §8.4 已量过、分辨力不够。
+
+### 9.2 关键约束：放宽必须是纯增量的
+
+`contested` 过滤的条件是 `distinct.size === 2` —— **恰好两个**不同值：
+
+```js
+const distinct = new Set([...g.predecessors, g.newest].map(ev => normObj(ev) ?? ev.normalizedText))
+return distinct.size === 2 && g.predecessors.some(old => normObj(old) !== newestObj)
+```
+
+放宽候选只会**推高** distinct 值数。所以无差别放宽会把原本 `distinct.size === 2`、
+今天本来会被裁决并标记的组，变成 3 个值而被整组丢掉 —— 那是**拿已有的标记能力换新
+覆盖**，净收益可能为负。这不是理论顾虑：它是这段代码最容易踩的坑。
+
+为此：
+
+1. 候选判定抽成 `contests(predecessors, newest)`，与 contested 过滤**共用同一份逻辑**
+   （否则两处会各自漂移）。
+2. **精确集（谓词相等 / 掩码文本相似）一旦成立就沿用它**，旧路径逐字节不变。
+3. 只有精确集不成立时，才启用"共享内容词"的放宽集，且放宽集自己也必须成立。
+4. `tests/relation-drift.test.ts` 里那条"三值组"用例专门钉住第 2 条：同主语上放一个
+   词干相近但不同关系的第三个事件，断言精确组**仍然**被裁决并标记。
+
+### 9.3 配套
+
+- `contentTokens` / `sharesContentToken`：丢掉轻动词、冠词、否定词，折叠复数，
+  取内容词。否定词要丢是因为极性由 OBJECT 承载（§8），不是关系身份的一部分。
+- 裁决 prompt 加一条：**同组内不同拼写若指向不同关系，答 multi（不标记）**。
+  这是 25% 精度的唯一防线。
+- 组内出现多种拼写时，行里才附 `predicate spellings: "a", "b"`；单拼写组的 prompt
+  与改前**逐字节一致**，避免改动已工作的那条路径。
+- `tests/fixtures/v01-prompts.json` 的 supersede 一项随之有意更新（记入 `deviations`，
+  与 extraction 同一套流程）；entityMerge / queryExpansion / queryDistill 仍钉在 v0.1。
+
+### 9.4 局限
+
+- **同义词抓不到**（见 9.1），这是词法方案的硬边界，不是实现问题。
+- 候选精度 25%：三个候选里两个是不同关系，全靠模型拒掉。模型若判错成 single，
+  就会产生一次**错误 supersede 标记**（对照 §4 里 mini-4 的 `author_of` 误标教训）。
+  这也是为什么"答 multi"那条 prompt 规则和 `deviations` 记录都必须留着。
+- 本轮**没有**对放宽后的真实图做端到端效果测量（标记数、误标率）。上面 555 / 25%
+  是候选侧的抽样，不是标记侧的结果；下一轮应该在真实图上统计 `supersede-verdict`
+  日志里 widened 组的 single/multi 比例。

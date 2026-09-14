@@ -446,3 +446,83 @@ Because supersede already makes one batched LLM call per turn, those candidates 
 moderate misjudgement risk**: three of four candidates are different relations and only
 the model rejects them, so the prompt has to pin "leave the group untouched when the
 relations differ" (against the mini-4 `author_of` false-mark lesson in §4).
+
+## 9. relation-merge: widening candidates, and the constraint it has to satisfy (2026-09-14)
+
+### 9.1 Motivation and measured boundary
+
+The convention in §8 covers only polarity/retraction (4 slots in the whole graph). Ordinary
+predicate drift stays uncovered: one relation written as `declare` / `declares` or
+`support` / `supports` across turns matches neither the exact predicate nor, often, the
+0.8 masked-text threshold.
+
+The approach is not a new stage but **widening supersede's candidate set** — supersede
+already makes one batched LLM call per turn, so the incremental cost is near zero.
+Measured over 2336 events:
+
+| Metric | Value |
+|---|---|
+| Extra candidates per newly written event | mean 0.24 / median 0 / p90 0 / p99 5 / max 17 |
+| Events with zero extra candidates | **92.4%** |
+| Lifetime candidate total | 555 |
+| Sampled adjudication precision (24 pairs) | **25%** (SAME 6 / DIFFERENT 18) |
+
+**State the boundary plainly**: this rule catches **stem / agreement drift**
+(`declare`/`declares`, `support`/`supports`) and **not synonyms** — `contains` and
+`includes` share no stem, normalizing to `contain` / `include`. The 555 in §8.4 is
+therefore a **floor** with no synonyms counted; including them would require embedding
+neighbours, and §8.4 already measured that signal as too weak to separate.
+
+### 9.2 The constraint: widening must be purely additive
+
+The contested filter requires `distinct.size === 2` — **exactly two** distinct values:
+
+```js
+const distinct = new Set([...g.predecessors, g.newest].map(ev => normObj(ev) ?? ev.normalizedText))
+return distinct.size === 2 && g.predecessors.some(old => normObj(old) !== newestObj)
+```
+
+Widening only ever **raises** the distinct-value count. So widening unconditionally would
+turn a group that is `distinct.size === 2` today — and therefore already adjudicated and
+marked — into three values and drop it entirely. That trades an **existing** marking
+capability for new coverage, and the net gain can be negative. This is not a theoretical
+worry; it is the easiest mistake to make in this code.
+
+Hence:
+
+1. The candidate decision is factored into `contests(predecessors, newest)`, **sharing one
+   implementation** with the contested filter (two copies would drift apart).
+2. **The exact set (predicate equality / masked-text similarity) wins whenever it
+   qualifies**, leaving the old path byte-for-byte unchanged.
+3. Only when the exact set does not qualify does the "shared content token" set apply, and
+   that set must qualify on its own.
+4. The three-value case in `tests/relation-drift.test.ts` pins step 2: a third event on the
+   same subject that is stem-adjacent but a different relation must not stop the exact
+   group from being adjudicated and marked.
+
+### 9.3 Supporting changes
+
+- `contentTokens` / `sharesContentToken`: drop light verbs, articles, and negation markers,
+  fold plurals, keep content words. Negation is dropped because polarity lives in OBJECT
+  (§8) and is not part of relation identity.
+- The adjudication prompt gains one bullet: **different spellings that name different
+  relations answer multi (no mark)**. That is the only defence behind 25% precision.
+- The line lists `predicate spellings: "a", "b"` only when a group holds more than one, so
+  a single-spelling group's prompt is **byte-identical** to before — the path that already
+  worked is not touched.
+- The supersede entry in `tests/fixtures/v01-prompts.json` is deliberately updated through
+  the same `deviations` flow as extraction; entityMerge / queryExpansion / queryDistill
+  stay pinned to v0.1.
+
+### 9.4 Limits
+
+- **Synonyms are not caught** (see 9.1). That is the hard boundary of a lexical scheme, not
+  an implementation gap.
+- 25% candidate precision: two of three candidates are different relations and only the
+  model rejects them. A wrong `single` verdict produces a **false supersede mark** (against
+  the mini-4 `author_of` false-mark lesson in §4). That is why the "answer multi" prompt
+  rule and the `deviations` record both have to stay.
+- This round did **not** measure the end-to-end effect on the live graph (mark counts, false
+  mark rate). The 555 / 25% above are candidate-side sampling, not marking-side results;
+  the next round should read the `supersede-verdict` log and count single/multi among
+  widened groups.
