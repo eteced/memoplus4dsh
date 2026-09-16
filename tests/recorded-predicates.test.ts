@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { formatRecordedPredicates } from '../src/extraction.js'
+import { parseProfile } from '../src/prompts-file.js'
 import { OPTIONAL_PLACEHOLDERS } from '../src/prompts.js'
 import { MemoryStore } from '../src/store.js'
 
@@ -58,9 +59,11 @@ describe('formatRecordedPredicates', () => {
 describe('shipped tuned profile', () => {
   // A full prompt override drops whatever it does not restate, so the
   // convention has to be present in the profile's own text.
-  const prompt = (JSON.parse(
-    readFileSync(new URL('../profiles/deepseek-v4.1-flash.json', import.meta.url), 'utf8'),
-  ) as { stages: { extraction: { prompt: string } } }).stages.extraction.prompt
+  // 参考档现在是纯文本的 .prompts（一个文件一个 profile），用插件自己的解析器读，
+  // 读到的就是运行时真正会加载的那段正文。
+  const source = new URL('../profiles/deepseek-v4.1-flash.prompts', import.meta.url)
+  const prompt = parseProfile(readFileSync(source, 'utf8'), source.pathname, 'deepseek-v4.1-flash')
+    .stages!.extraction!.prompt!
 
   it('carries the recorded-predicate block and its placeholder', () => {
     expect(prompt).toContain('Recorded predicates: {recorded_predicates}')

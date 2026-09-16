@@ -68,6 +68,22 @@ git pull && npm run build
 
 No reinstall needed: the profile links this checkout via a `file:` dependency, so rebuilding `lib/` is the whole update — then **restart dsh** to pick it up. (dsh's live reload is config-only: edits to `cordis.patch.yml` apply without a restart, plugin code does not.) Rerun `scripts/install.sh` (idempotent, also builds) only when the mount block or the install script itself changed. Memory data under `<dsh-home>/memoplus4dsh/` is untouched either way.
 
+## Running on another machine
+
+Two things do not travel with the checkout, and both fail quietly:
+
+- **`lib/` is gitignored**, so a fresh clone (or a copied directory) has no build output and the plugin cannot load until something builds it. `scripts/install.sh` builds as part of installing; on an existing checkout a plain `git pull` still needs `npm run build`.
+- **`profiles/` is never read at runtime.** The plugin loads profile files from `<dataDir>/prompts` (`~/.dsh/memoplus4dsh/prompts` by default), which starts **empty**, so a fresh machine runs the built-in `default` prompts for every stage until a file is put there:
+
+```sh
+npm install && npm run build
+scripts/install.sh --profile web
+node scripts/prompts.mjs import profiles/deepseek-v4.1-flash.prompts   # or: cp into <dataDir>/prompts/
+# restart dsh, then confirm with memory_status
+```
+
+`memory_status` is the check that the profile really loaded: it lists the directory and the files it found, and reports **per stage** whether that prompt came from the profile or from the built-in default. A profile that never loaded is otherwise invisible — every stage just quietly runs the built-in text.
+
 > **Keep your own configuration outside the managed block.** `scripts/install.sh` rewrites the `# >>> memoplus4dsh` block wholesale, so anything you add *inside* it is lost on the next re-install. Put your additions in a separate patch entry targeting `id: memoplus4dsh` (see the example under [Prompt profiles](#prompt-profiles-and-embedding-upgrades)); because such an entry replaces the row's entire `config`, restate the keys you still want. Memory data is never affected.
 
 **Verify the install**: `node scripts/doctor.mjs [--profile <name>] [--dsh-home <path>]` prints the mount status, the effective config (defaults vs your overrides), component probes (harrier/ONNX embedding chain, NER chain, model caches), and memory-data status (graph size, extraction queue, last extraction activity) — including hints for enabling the full-featured backends.
@@ -105,7 +121,7 @@ Set under the plugin's `config:` in the profile's `cordis.patch.yml`:
 | `hfBaseUrl` | `https://huggingface.co` | Mirror base URL for the embedding model download |
 | `queryExpansion` | `true` | LLM query expansion during retrieval + verbatim-quote query distillation for injection (1024-token/30s bounded calls, results cached on disk per query) |
 | `promptProfiles` | (none) | Named prompt profiles, tried in declaration order against the model each call actually runs on. Each is `{ name, match: { provider?, model? }, stages: { <stage>: { prompt, maxTokens?, timeoutMs?, reasoningEffort? } } }`; `*` is a wildcard. The built-in `default` profile holds the v0.1 prompts and is always the fallback |
-| `promptProfilesDir` | `<dataDir>/prompts` | Directory of external profile files. Each `*.json` holds one profile, an array, or `{"profiles": [...]}`; files load in name order **after** the inline `promptProfiles`, so inline entries keep their matching order and files extend the set. A broken file fails at start instead of reaching the model |
+| `promptProfilesDir` | `<dataDir>/prompts` | Directory of external profile files. **One `*.prompts` file is one profile**, named by its file name; files load in name order **after** the inline `promptProfiles`, so inline entries keep their matching order and files extend the set. Prompt bodies are verbatim (no escaping); a profile that declares a stage must carry that stage's prompt. A broken file fails at start, naming the file and line, instead of reaching the model |
 | `promptProfile` | (auto) | Force one profile by name instead of matching the route |
 | `reasoningEffortPolicy` | `adapt` | What happens when a stage's effort is not supported by the route. `adapt` (default): the built-in `off` follows what dsh reports for that route — `off` when declared, else the route's lowest declared level (`low` on a route declaring only `low/high/max`), else the effort is omitted entirely for dsh and the provider to default; a user-set effort that is unsupported degrades the same way, with one warning per route. `strict`: send the configured effort as-is and let dsh refuse it (`UNSUPPORTED_REASONING_EFFORT`) |
 | `thinkingTokenHeadroom` | `3` | Thinking-budget multiplier; `1` disables it. When the effort that actually goes on the wire is **not `off`** (thinking is on — the built-in `off` adapted to the lowest level, or the effort omitted), the stage's resolved `maxTokens` is multiplied by this factor to leave room for visible output: measured on this route, thinking on eats the whole 8192-token extraction budget and yields 0 visible characters. With `off` nothing is multiplied, keeping the old behaviour and the old cost. `STAGE_DEFAULTS` and the profile/override values themselves are unchanged; only the value actually sent is scaled, which is what `memory_status` shows per stage. On a route where `off` is dispatchable this multiplier never applies — declaring `off` is the recommended fix, and this is the fallback |
@@ -121,22 +137,22 @@ Every stage that calls a model owns a prompt plus its output cap, per-call timeo
 
 "Actually runs on" matters when `extractionProvider` + `extractionModel` are set: those override the session's route for every auxiliary call, so profiles are matched on the **override**, not on the model in the composer. `memory_status` prints both the session route and the override, precisely so you can tell which one a profile matched.
 
-Resolution order, highest first: `prompts.<stage>` → the selected profile (`promptProfile`, else the first `promptProfiles` entry whose `match` accepts that route) → the built-in `default`. `extractionMaxTokens` and `extractionCallTimeoutMs` are shorthand for the `prompts.extraction` entries. `memory_status` reports which profile each stage is using.
+Resolution order, highest first: `prompts.<stage>` → the selected profile (`promptProfile`, else the first `promptProfiles` entry whose `match` accepts that route) → the built-in `default`. `extractionMaxTokens` and `extractionCallTimeoutMs` are shorthand for the `prompts.extraction` entries. A profile need not cover every stage, so `memory_status` reports **per stage whether the prompt came from the profile or from the built-in default** — a stage the profile never mentions can never look configured.
 
 **Profiles can also live in external files**, which is what makes a profile set reviewable, versioned, and portable. The default directory is `<dataDir>/prompts` (`~/.dsh/memoplus4dsh/prompts`); `promptProfilesDir` moves it. `scripts/prompts.mjs` imports and exports with the same validation the plugin applies:
 
 ```sh
 npm run build                                            # the CLI reuses the built loader
-node scripts/prompts.mjs init --name my-models           # write an example file
-node scripts/prompts.mjs list                            # profiles in the directory, with their files
-node scripts/prompts.mjs validate ./team-profiles.json   # validate only, write nothing
-node scripts/prompts.mjs import ./team-profiles.json --name team
-node scripts/prompts.mjs export --out /tmp/all.json --include-default
+node scripts/prompts.mjs init --name my-model            # write an example file
+node scripts/prompts.mjs list                            # profiles + which stages each one covers
+node scripts/prompts.mjs validate ./my-model.prompts     # validate only, write nothing
+node scripts/prompts.mjs import ./my-model.prompts --name my-model
+node scripts/prompts.mjs export --out /tmp/all --include-default
 ```
 
 An import is validated with `validateProfiles` first — a missing required placeholder, an unknown stage, or a non-positive bound is refused before anything is written. Profiles are read at dsh start, so an import becomes live on restart; resolution itself is per call, so nothing else is needed.
 
-**A tuned reference profile ships in the repository** under `profiles/`, and it is measured rather than asserted. `profiles/deepseek-v4.1-flash.json` matches on the **model name only** (`match.model = "deepseek-v4.1-flash*"`, no `provider` — the same model name means the same model, whichever route serves it) and carries the extraction prompt that measured best of four candidates on this route (the win is mainly language consistency on Chinese turns — the report is explicit about what it did *not* improve), with `maxTokens: 8192` and `reasoningEffort: "off"` pinned. Copy it into `<dataDir>/prompts/` (or `scripts/prompts.mjs import`) and restart. The frozen corpus of 18 real turns (`profiles/ab-corpus.jsonl`), the candidates, the harness (`scripts/ab-extraction-prompts.mjs`), the graph-side audit (`scripts/audit-literal-entities.mjs`), the numbers, and — just as important — what the A/B did *not* show are in [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md).
+**A tuned reference profile ships in the repository** under `profiles/`, and it is measured rather than asserted. `profiles/deepseek-v4.1-flash.prompts` matches on the **model name only** (`model: deepseek-v4.1-flash*`, no `provider` — the same model name means the same model, whichever route serves it) and carries the extraction prompt that measured best of four candidates on this route (the win is mainly language consistency on Chinese turns — the report is explicit about what it did *not* improve), with `maxTokens: 8192` and `reasoningEffort: "off"` pinned. Copy it into `<dataDir>/prompts/` (or `scripts/prompts.mjs import`) and restart. The frozen corpus of 18 real turns (`profiles/ab-corpus.jsonl`), the candidates, the harness (`scripts/ab-extraction-prompts.mjs`), the graph-side audit (`scripts/audit-literal-entities.mjs`), the numbers, and — just as important — what the A/B did *not* show are in [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md).
 
 **As of v0.2 the shipped default extraction prompt deliberately changed too.** It no longer equals v0.1 byte for byte: it now feeds **recorded predicates** back and encodes negation in `OBJECT` rather than in the predicate. Without that, an assertion and its retraction never pair — see [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md) §8. `tests/fixtures/v01-prompts.json` relaxes only the extraction entry, the other four stages stay pinned to v0.1, and the departure is recorded under the fixture's `deviations`.
 
@@ -166,6 +182,8 @@ Then let the stages actually fall to `off`: a profile must not pin `reasoningEff
 ### Settings page (Web GUI)
 
 The plugin registers a `memoplus4dsh` namespace on the settings service, so **Settings → Plugins → Plugin configuration** shows a "memoplus4dsh memory plugin" card editing the **11 keys** this namespace owns, grouped: `promptProfile` / `promptProfilesDir` (prompts), `injectTopK` / `reasoningEffortPolicy` / `thinkingTokenHeadroom` (retrieval & reasoning), `extractionConcurrency` / `extractionJobIntervalMs` / `extractionRetryDelayMs` / `extractionMaxRetries` / `extractionMaxFailureRounds` (extraction queue), `debug` (diagnostics). The tab renders the intersection of a served namespace and a card registered on that key; both halves ship in this package (Host half `src/settings.ts`, browser half `src/client/`), with no change to dsh itself.
+
+The card also carries a read-only **prompt source** block: the profile in force (`promptProfile`, or "auto by route"), its file name (`<name>.prompts`), the profile directory, and the fallback (the built-in `default`, which is source constants and has no file). **Per-stage** provenance — which stages come from a plugin-config override, from the selected profile, or from the built-in default — is deliberately *not* shown: it is computed by the Host-side `PromptRegistry` at call time and the browser half has no channel to it. The block says so and points at `memory_status`, which reports the real per-stage source. Asking the agent "which prompt am I using?" is the shortest path to that report.
 
 Every row states **how it applies**:
 

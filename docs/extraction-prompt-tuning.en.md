@@ -14,7 +14,7 @@ deployment**.
 ## 1. Bottom line
 
 1. **Adopted: candidate C (`extraction-c-format-bilingual`)** — its prompt text is
-   the body of `profiles/deepseek-v4.1-flash.json`. It has one **robust** win:
+   the body of `profiles/deepseek-v4.1-flash.prompts`. It has one **robust** win:
    **language consistency of fact sentences on Chinese turns** — five same-batch
    comparisons, five wins, with almost disjoint ranges: baseline
    `18.5% / 30.5% / 40.2% / 42.9% / 49.6%`, C `49.6% / 56.7% / 70.4% / 80.1% / 84.5%`.
@@ -78,7 +78,7 @@ package (`package.json` ships `lib` only) but does travel with the git repositor
 | Script | Role |
 | --- | --- |
 | `scripts/build-ab-corpus.mjs` | builds/validates the corpus; `--print-index` prints coverage |
-| `scripts/build-candidate-profiles.mjs` | wraps `candidates/*.prompt.txt` into loadable `candidates/*.json`, validated with the plugin's own `validateProfiles`; `--check` works as a CI gate |
+| `candidates/*.prompts` | The candidates are loadable profiles in the same format as the reference (one file is one profile, bodies verbatim). None declares `model:`, so no route can select one; `scripts/ab-extraction-prompts.mjs` loads them by name. The old "wrap `prompt.txt` into JSON" step retired with the format change |
 | `scripts/ab-extraction-prompts.mjs` | the A/B itself: calls the endpoint the way the plugin does (**streaming** + `include_usage`, configurable `thinking` / `max_tokens`) and scores the raw pipe table with the plugin's own `parseExtractionOutput`; `--score-raw` re-scores a saved run offline (**a new metric costs zero calls** — that is how the language metric and the hard/soft split were added) |
 | `scripts/audit-literal-entities.mjs` | measures the same name classes in the **live graph**, separating subject-side names (from `CANONICAL_NAME`, the tuning target) from legitimate object-side ones |
 
@@ -214,7 +214,7 @@ turns, with the overview table, the noise breakdown, per-turn detail (including
 overwrites it:
 
 ```sh
-node scripts/ab-extraction-prompts.mjs --profiles default,profiles/deepseek-v4.1-flash.json \
+node scripts/ab-extraction-prompts.mjs --profiles default,profiles/deepseek-v4.1-flash.prompts \
   --thinking disabled --max-tokens 8192 --out-json docs/ab-extraction-prompts.json --out-md docs/ab-extraction-prompts.md
 ```
 
@@ -291,7 +291,7 @@ made visible to the extraction stage. Not touched this round, recorded only.
 
 - Reference profile body = **C's prompt**
   (`profiles/candidates/extraction-c-format-bilingual.prompt.txt`, byte-identical
-  to `profiles/deepseek-v4.1-flash.json`, verified with `diff`).
+  to `profiles/deepseek-v4.1-flash.prompts`, verified with `diff`).
 - `match` carries the **model name only**:
   `{"match": {"model": "deepseek-v4.1-flash*"}}`, no `provider` — "the same model
   name means the same model", so any route serving it (future gateways, official

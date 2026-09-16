@@ -22,7 +22,7 @@ import type { EmbeddingModelSpec, TextEmbedder } from './embedding.js'
 import { Retriever, createQueryDistiller, createQueryExpander } from './retrieval.js'
 import { createPreStepHandler } from './inject.js'
 import type { PromptProfile, PromptStage, StageSettings } from './prompts.js'
-import { PROMPT_STAGES, PromptRegistry, DEFAULT_PROFILE_NAME } from './prompts.js'
+import { PROMPT_STAGES, PromptRegistry, DEFAULT_PROFILE_NAME, stagesWithPrompt } from './prompts.js'
 import { readProfileDir, resolvePromptsDir } from './prompts-file.js'
 import type { LoadedProfiles } from './prompts-file.js'
 import { registerMemoryTools } from './tools.js'
@@ -1109,6 +1109,17 @@ export function apply(ctx: Context, config: Config) {
       // 已按 headroom 放大，并在括号里给出配置值与倍数）；档位被适配掉时也一并
       // 显示（`effort off → low`），否则会看不懂预算为什么被放大。没有路由可解析
       // 时报配置值——那时调用本身也会因为没有路由而失败。
+      // 一个 profile 允许只覆盖一部分阶段，所以"选中了哪个 profile"回答不了
+      // "这个阶段的 prompt 到底是谁的"。先给一行汇总，再逐阶段报出真正来源 ——
+      // 否则未被覆盖的阶段会看起来像"profile 里配好了"。
+      const promptRoute = effectiveRoute(config, lastRoute)
+      const activeProfile = promptState.registry.profileFor(promptRoute)
+      const coveredStages = stagesWithPrompt(activeProfile)
+      const uncoveredStages = PROMPT_STAGES.filter(stage => !coveredStages.includes(stage))
+      if (uncoveredStages.length > 0) {
+        lines.push(`  prompt coverage: profile "${activeProfile.name}" declares ${coveredStages.join(', ') || '(no stage)'}`
+          + `; these fall back to the built-in default: ${uncoveredStages.join(', ')}`)
+      }
       for (const stage of PROMPT_STAGES) {
         const resolved = stageFor(stage, lastRoute)
         const route = effectiveRoute(config, lastRoute)
@@ -1117,7 +1128,11 @@ export function apply(ctx: Context, config: Config) {
           : await effortResolver.resolve(route, { effort: resolved.reasoningEffort, explicit: resolved.reasoningEffortExplicit })
         const sent = route === undefined ? resolved.maxTokens : effectiveMaxTokens(resolved.maxTokens, wireEffort, headroom)
         const parts = [
-          `${stage}: profile ${resolved.profile}`,
+          `${stage}: prompt ${resolved.promptFrom === 'override'
+            ? 'from plugin config override'
+            : resolved.promptFrom === 'profile'
+              ? `from profile ${resolved.profile}`
+              : `from built-in default${resolved.profile === DEFAULT_PROFILE_NAME ? '' : ` (profile ${resolved.profile} declares no ${stage})`}`}`,
           `maxTokens ${sent}${sent === resolved.maxTokens ? '' : ` (${resolved.maxTokens} × ${headroom} thinking headroom)`}`,
           `effort ${resolved.reasoningEffort}${route !== undefined && wireEffort !== resolved.reasoningEffort ? ` → ${wireEffort ?? 'omitted'}` : ''}`,
         ]

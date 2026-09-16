@@ -12,7 +12,7 @@
 ## 1. 结论先行
 
 1. **采纳候选 C（`extraction-c-format-bilingual`）的 prompt 文本作为参考 profile 正文**
-   （`profiles/deepseek-v4.1-flash.json`）。它有一项**稳健**的收益：
+   （`profiles/deepseek-v4.1-flash.prompts`）。它有一项**稳健**的收益：
    **中文轮的事实句语言一致性**——5 组同批对照（run1 18 轮、官方 18 轮、C-vs-D 8 轮、复核 6 轮 ×2）全部胜出，且两边分布几乎不重叠：
    baseline `18.5% / 30.5% / 40.2% / 42.9% / 49.6%`，C `49.6% / 56.7% / 70.4% / 80.1% / 84.5%`。
    代价是每次调用多约 **500 prompt token**（prompt 3098→5076 字符，+60% 输入）。
@@ -63,7 +63,7 @@
 | 脚本 | 作用 |
 | --- | --- |
 | `scripts/build-ab-corpus.mjs` | 生成/校验语料；`--print-index` 打印覆盖度 |
-| `scripts/build-candidate-profiles.mjs` | 由 `candidates/*.prompt.txt` 生成可加载的 `candidates/*.json`，用插件自己的 `validateProfiles` 校验；`--check` 可当 CI 门 |
+| `candidates/*.prompts` | 候选与参考档一样是可加载的 profile 文件（一个文件一个 profile，正文逐字）；它们不写 `model:`，所以不会被路由选中，只能由 `scripts/ab-extraction-prompts.mjs` 按名加载。原先那个"prompt.txt → JSON" 的包装步骤已随格式改革退役 |
 | `scripts/ab-extraction-prompts.mjs` | A/B 主程序：按插件的方式调用端点（**streaming** + `include_usage`，`thinking`/`max_tokens` 可配），用**插件自己的 `parseExtractionOutput`** 打分；`--score-raw` 离线重算已保存输出（**加指标零调用成本**，本轮的"语言一致性"和 hard/soft 拆分就是这么补上的） |
 | `scripts/audit-literal-entities.mjs` | 在**真实图**里统计同一批名字形态，区分 subject 位（来自 `CANONICAL_NAME`，调优目标）与仅 object 位（OBJECT 语义，合法） |
 
@@ -181,7 +181,7 @@ fixture 那一轮里 baseline 根本没把 9 个模型名抽成实体（它们�
 逐轮明细（含 `finish`/token/耗时）与 JSON 原始记录。重跑同一条命令即可覆盖：
 
 ```sh
-node scripts/ab-extraction-prompts.mjs --profiles default,profiles/deepseek-v4.1-flash.json \
+node scripts/ab-extraction-prompts.mjs --profiles default,profiles/deepseek-v4.1-flash.prompts \
   --thinking disabled --max-tokens 8192 --out-json docs/ab-extraction-prompts.json --out-md docs/ab-extraction-prompts.md
 ```
 
@@ -250,7 +250,7 @@ path              4 /  3    /home/claw/dsh_workspace  /tmp/probe/probe-adaptive.
 ### 5.1 推荐
 
 - 参考 profile 正文 = **C 的 prompt**（`profiles/candidates/extraction-c-format-bilingual.prompt.txt`，
-  与 `profiles/deepseek-v4.1-flash.json` 逐字相同，已用 `diff` 校验）。
+  与 `profiles/deepseek-v4.1-flash.prompts` 逐字相同，已用 `diff` 校验）。
 - `match` **只写模型名**：`{"match": {"model": "deepseek-v4.1-flash*"}}`，不带 `provider`
   ——E大 的口径"同名即同模型"，任何提供同名模型的路由（含将来的网关/官方线路）都套用。
 - 固定 `maxTokens: 8192` + `reasoningEffort: "off"`（§4.5）。

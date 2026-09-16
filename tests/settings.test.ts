@@ -379,40 +379,81 @@ const clientReady = existsSync(clientBundle)
 
 describe.skipIf(!clientReady)('lib/client.js (the browser half)', () => {
   /** 加载构建产物，取回它的导出面（与 dsh 页面加载客户端模块的方式一致）。 */
-  function loadBundle(): Record<string, unknown> {
+  function loadBundle(requireFn: (spec: string) => unknown = requireStub): Record<string, unknown> {
     const source = readFileSync(clientBundle, 'utf8')
     let loaded: Record<string, unknown> | undefined
     const windowStub = {
       __ModuleLoader__: {
         load: (entry: { id: string, factory: (require: (spec: string) => unknown) => unknown }) => {
-          loaded = entry.factory(requireStub) as Record<string, unknown>
+          loaded = entry.factory(requireFn) as Record<string, unknown>
         },
       },
     }
     // eslint-disable-next-line no-new-func -- 运行构建产物就是在测它能不能被页面加载
-    new Function('window', 'require', source)(windowStub, requireStub)
+    new Function('window', 'require', source)(windowStub, requireFn)
     expect(loaded).toBeDefined()
     return loaded!
   }
 
+  /**
+   * 迷你 `jsx`：宿主元素原样记下，**函数组件当场调用**。
+   *
+   * 真实的 react 在渲染时才调用函数组件，而这套桩没有渲染器。共享原子（`Button` /
+   * `Tag`）是纯函数、不带 hook，所以在这里直接展开，树里剩下的就都是宿主元素 ——
+   * 不展开的话 `<Button>` 的 `type` 是个函数，测试里所有"找 button"的断言都会落空。
+   */
+  const jsx = (type: unknown, props: Record<string, unknown>): unknown =>
+    typeof type === 'function' ? (type as (p: Record<string, unknown>) => unknown)(props) : { type, props }
+  const jsxRuntimeStub = { jsx, jsxs: jsx, Fragment: 'Fragment' }
+  /** `ui-primitives` 的值导入（外壳的箭头与徽标、控件）：占位成等价的宿主元素就够了。 */
+  const primitivesStub = {
+    IconChevronDownOutline14: (props: Record<string, unknown>) => jsx('svg', props),
+    Tag: (props: Record<string, unknown>) => jsx('span', props),
+    // 打标是为了把"共享 Button"和手写的裸 `<button>` 区分开 —— 看着都是 button。
+    Button: (props: Record<string, unknown>) => jsx('button', { ...props, 'data-shared-button': true }),
+  }
+  /** 只够把产物加载起来、不参与渲染的最小 react。 */
   const reactStub = {
     useState: (initial: unknown) => [typeof initial === 'function' ? (initial as () => unknown)() : initial, () => {}],
     useEffect: () => {},
+    useRef: (initial: unknown) => ({ current: initial }),
   }
-  const jsxRuntimeStub = {
-    jsx: (type: unknown, props: Record<string, unknown>) => ({ type, props }),
-    jsxs: (type: unknown, props: Record<string, unknown>) => ({ type, props }),
-    Fragment: 'Fragment',
-  }
-  const requireStub = (spec: string): unknown => spec === 'react' ? reactStub : jsxRuntimeStub
+  const requireStub = (spec: string): unknown => spec === 'react'
+    ? reactStub
+    : spec === '@deepseek-ai/dsh-client-ui-primitives' ? primitivesStub : jsxRuntimeStub
 
-  /** 渲染一次卡片，返回渲染出来的 JSX 树。 */
-  const render = (snapshot: unknown): { type: unknown, props: Record<string, unknown> } => {
-    const card = loadBundle()['MemorySettingsCard'] as (props: unknown) => { type: unknown, props: Record<string, unknown> }
-    return card({
-      useMemoplus4dshScope: () => snapshot,
-      writeField: async () => {},
-    })
+  /**
+   * 挂载一张卡片。
+   *
+   * `useState` 用**真实的状态槽**，跨多次渲染保留：测试才能像用户一样点开折叠再看一次。
+   * 只回放初始值的话，折起来的内容永远测不到 —— 而这张卡的内容全在折叠里。
+   * @returns 该挂载点的渲染入口。
+   */
+  function mountCard() {
+    const slots: unknown[] = []
+    let cursor = 0
+    const hooks = {
+      useState: (initial: unknown) => {
+        const index = cursor++
+        if (!(index in slots)) {
+          slots[index] = typeof initial === 'function' ? (initial as () => unknown)() : initial
+        }
+        const set = (next: unknown): void => {
+          slots[index] = typeof next === 'function' ? (next as (prev: unknown) => unknown)(slots[index]) : next
+        }
+        return [slots[index], set]
+      },
+      useEffect: () => {},
+      useRef: (initial: unknown) => ({ current: initial }),
+    }
+    const card = loadBundle((spec: string) => spec === 'react' ? hooks : requireStub(spec))['MemorySettingsCard'] as
+      (props: unknown) => { type: unknown, props: Record<string, unknown> }
+    /** 按当前状态渲染一次。 */
+    const render = (snapshot: unknown): { type: unknown, props: Record<string, unknown> } => {
+      cursor = 0
+      return card({ useMemoplus4dshScope: () => snapshot, writeField: async () => {} })
+    }
+    return { render }
   }
 
   /** 树里所有文本节点。 */
@@ -453,6 +494,51 @@ describe.skipIf(!clientReady)('lib/client.js (the browser half)', () => {
     .filter(id => id.startsWith('memoplus4dsh-') && id !== 'memoplus4dsh-import-json')
     .map(id => id.slice('memoplus4dsh-'.length))
 
+  /** 树里所有 `<button>`，按文档顺序。 */
+  function buttons(node: unknown, out: { props: Record<string, unknown> }[] = []): { props: Record<string, unknown> }[] {
+    if (node === null || node === undefined || typeof node !== 'object') return out
+    if (Array.isArray(node)) { for (const child of node) buttons(child, out); return out }
+    const element = node as { type?: unknown, props?: Record<string, unknown> }
+    const props = element.props
+    if (props === undefined) return out
+    if (element.type === 'button') out.push(element as { props: Record<string, unknown> })
+    buttons(props['children'], out)
+    return out
+  }
+
+  /** 点开树里第一个文本包含 `label` 的按钮。 */
+  function clickButton(tree: unknown, label: string): void {
+    const target = buttons(tree).find(element => texts(element).join('').includes(label))
+    expect(target, `no <button> containing ${label}`).toBeDefined()
+    ;(target!.props['onClick'] as () => void)()
+  }
+
+  /**
+   * 树按文档顺序展开成的记号流：元素的 `id` 与文本各算一个记号。
+   *
+   * 位置断言靠它 —— "字段出现过"抓不到"字段渲染在了标题上面"。
+   * @param node - 子树根。
+   * @param out - 累积的记号。
+   * @returns 文档顺序的记号。
+   */
+  function order(node: unknown, out: string[] = []): string[] {
+    if (node === null || node === undefined || typeof node === 'boolean') return out
+    if (typeof node === 'string' || typeof node === 'number') { out.push(String(node)); return out }
+    if (Array.isArray(node)) { for (const child of node) order(child, out); return out }
+    const props = (node as { props?: Record<string, unknown> }).props
+    if (props === undefined) return out
+    if (typeof props['id'] === 'string') out.push(props['id'])
+    order(props['children'], out)
+    return out
+  }
+
+  /** 展开最外层折叠后的树：字段、保存与导入导出都在那一层里。 */
+  function renderOpened(snapshot: unknown): { type: unknown, props: Record<string, unknown> } {
+    const card = mountCard()
+    clickButton(card.render(snapshot), 'memoplus4dsh 记忆插件')
+    return card.render(snapshot)
+  }
+
   it('exposes the namespace the Host half registers', () => {
     const loaded = loadBundle()
     expect(loaded['MEMOPLUS_NAMESPACE']).toBe(MEMOPLUS_NAMESPACE)
@@ -480,20 +566,59 @@ describe.skipIf(!clientReady)('lib/client.js (the browser half)', () => {
   it('gives every Host-owned key exactly one surface, so the two lists cannot drift', () => {
     const tiers = surfaceTiers()
     expect(Object.keys(tiers).sort()).toEqual([...MEMORY_SETTING_KEYS].sort())
-    // 折叠态只渲染常改的那一档；其余两档必须能在展开后到达，否则这个键就是死的。
-    const tree = render({ status: 'ready', value: {}, user: {}, base: {}, writable: true, revision: 1 })
+    const ready = { status: 'ready', value: {}, user: {}, base: {}, writable: true, revision: 1 }
+    const card = mountCard()
+    // 收起态只有外壳：折叠本身不该把字段当内容渲染出来。
+    expect(cardKeys(card.render(ready))).toEqual([])
+    // 展开外壳后只渲染常改的那一档。
+    clickButton(card.render(ready), 'memoplus4dsh 记忆插件')
+    const tree = card.render(ready)
     expect(cardKeys(tree).sort()).toEqual(
       Object.keys(tiers).filter(key => tiers[key] === 'common').sort(),
     )
     // 折叠区标题报出被收起来的键数，并说明那里要重启才生效 —— 用户在展开前就该知道。
     // `join('')`：标题里的计数是插值，`texts` 的分隔符是测试脚手架的产物，不是 DOM 里的。
     const flat = texts(tree).join('')
-    expect(flat).toContain(`高级设置（${MEMORY_SETTING_KEYS.length - cardKeys(tree).length} 项）`)
+    expect(flat).toContain(`高级设置（${Object.keys(tiers).filter(key => tiers[key] !== 'common').length} 项）`)
     expect(flat).toContain('都要重启 dsh 才生效')
+    // 再展开高级区：另外两档全部可达，所以没有一个键是死的（`raw` 由 JSON 承载，不是控件）。
+    clickButton(tree, '高级设置')
+    expect(cardKeys(card.render(ready)).sort()).toEqual(
+      Object.keys(tiers).filter(key => tiers[key] !== 'raw').sort(),
+    )
+  })
+
+  /**
+   * 回归：「高级设置」展开后，里面的字段曾经渲染到标题**上面**去 —— 点开的人看不到
+   * 自己在看什么。所以断言的是文档顺序，只断言"出现过"抓不到这个 bug。
+   */
+  it('renders every advanced field under the 高级设置 heading, never above it', () => {
+    const tiers = surfaceTiers()
+    const advanced = Object.keys(tiers).filter(key => tiers[key] === 'advanced')
+    expect(advanced.length).toBeGreaterThan(0)
+    const ready = { status: 'ready', value: {}, user: {}, base: {}, writable: true, revision: 1 }
+    const card = mountCard()
+    clickButton(card.render(ready), 'memoplus4dsh 记忆插件')
+    const opened = card.render(ready)
+    // 高级区还收着时一个高级字段都不渲染：它们不再混进常改档的分组里。
+    expect(cardKeys(opened).filter(key => advanced.includes(key))).toEqual([])
+    clickButton(opened, '高级设置')
+    const marks = order(card.render(ready))
+    const heading = marks.findIndex(mark => mark.includes('高级设置（'))
+    expect(heading).toBeGreaterThanOrEqual(0)
+    for (const key of advanced) {
+      const at = marks.indexOf(`memoplus4dsh-${key}`)
+      expect(at, `${key} 没有渲染`).toBeGreaterThanOrEqual(0)
+      expect(at, `${key} 渲染在了「高级设置」标题上面`).toBeGreaterThan(heading)
+    }
+    // JSON 面板也排在标题和最后一个高级字段之后。
+    const jsonAt = marks.findIndex(mark => mark.includes('其余配置（JSON）'))
+    expect(jsonAt).toBeGreaterThan(heading)
+    expect(jsonAt).toBeGreaterThan(marks.indexOf(`memoplus4dsh-${advanced[advanced.length - 1]!}`))
   })
 
   it('labels every field with the apply semantic of the surface that owns it', () => {
-    const tree = render({ status: 'ready', value: {}, user: {}, base: {}, writable: true, revision: 1 })
+    const tree = renderOpened({ status: 'ready', value: {}, user: {}, base: {}, writable: true, revision: 1 })
     const tiers = surfaceTiers()
     const common = Object.keys(tiers).filter(key => tiers[key] === 'common')
     const marks = badges(tree)
@@ -514,19 +639,73 @@ describe.skipIf(!clientReady)('lib/client.js (the browser half)', () => {
     expect(rendered).toContain('确认导入')
   })
 
+  /**
+   * 卡片里的按钮必须走共享 `Button`（有主题：hover / disabled / focus 都在样式表里），
+   * 不能是浏览器默认样式的裸 `<button>` —— 唯一的例外是最外层折叠标题，它照
+   * `PluginCard` 的头部复刻，自带 token 样式。
+   */
+  it('renders every button through the shared themed primitive', () => {
+    const ready = { status: 'ready', value: {}, user: {}, base: {}, writable: true, revision: 1 }
+    const card = mountCard()
+    clickButton(card.render(ready), 'memoplus4dsh 记忆插件')
+    clickButton(card.render(ready), '高级设置')
+    const all = buttons(card.render(ready))
+    const header = all.filter(element => texts(element).join('').includes('memoplus4dsh 记忆插件'))
+    const themed = all.filter(element => element.props['data-shared-button'] === true)
+    expect(all.length).toBeGreaterThan(1)
+    expect(header).toHaveLength(1)
+    expect(all.length - header.length).toBe(themed.length)
+  })
+
+  /**
+   * 只读状态块：卡片读得到的就是 settings 里那两个键。逐段 prompt 的实际来源只有 Host 侧
+   * 算得出来，所以那一栏必须**明确指向 memory_status**，而不是猜一个可能不对的值填上去。
+   */
+  it('shows which profile file is in play and points at memory_status for per-stage provenance', () => {
+    // `join('')`：这些断言要复刻插值相邻的原文（`{forcedProfile}（由 …）` 是两个文本节点），
+    // `texts` 的分隔符是脚手架的产物，不是 DOM 里的。
+    const shown = texts(renderOpened({
+      status: 'ready', value: { promptProfile: 'deepseek-v4.1-flash', promptProfilesDir: '/srv/prompts' },
+      user: {}, base: {}, writable: true, revision: 1,
+    })).join('')
+    expect(shown).toContain('提示词来源（只读）')
+    expect(shown).toContain('deepseek-v4.1-flash（由 promptProfile 强制指定）')
+    expect(shown).toContain('deepseek-v4.1-flash.prompts')
+    expect(shown).toContain('/srv/prompts')
+    // 内置 default 没有文件，这一点必须说清楚。
+    expect(shown).toContain('内置 default')
+    // 逐段来源只有 Host 算得出来 —— 指向 memory_status，不编值。
+    expect(shown).toContain('memory_status')
+
+    const auto = texts(renderOpened({
+      status: 'ready', value: {}, user: {}, base: {}, writable: true, revision: 1,
+    })).join('')
+    expect(auto).toContain('自动：按每次调用实际使用的路由匹配')
+    expect(auto).toContain('取决于命中的是哪个 profile')
+    expect(auto).toContain('未设置 —— 用默认目录')
+  })
+
+  it('keeps the prompt-source block read-only, with no key of its own', () => {
+    const ready = {
+      status: 'ready', value: { promptProfile: 'x' }, user: {}, base: {}, writable: true, revision: 1,
+    }
+    // 那一块是纯展示：它不能悄悄多出一个可写控件，也不能改变卡片拥有的键。
+    expect(cardKeys(renderOpened(ready))).toEqual(['injectTopK', 'debug'])
+  })
+
   it('degrades instead of throwing on a missing, empty, or wrong-typed snapshot', () => {
     // 没有快照：可读的降级文案，不抛。
-    expect(texts(render(undefined)).join(' ')).toContain('设置快照尚未到达')
+    expect(texts(renderOpened(undefined)).join(' ')).toContain('设置快照尚未到达')
     // 只读 / 空对象：所有输入禁用，仍然渲染。
-    const readOnly = texts(render({})).join(' ')
+    const readOnly = texts(renderOpened({})).join(' ')
     expect(readOnly).toContain('当前设置文档只读')
     // 类型全错：value/user/base 不是对象、revision 不是数字、writable 不是布尔。
-    const broken = render({ status: 7, value: 'nope', user: 5, base: [], writable: 'yes', revision: 'x' })
+    const broken = renderOpened({ status: 7, value: 'nope', user: 5, base: [], writable: 'yes', revision: 'x' })
     const brokenText = texts(broken).join(' ')
     expect(brokenText).toContain('injectTopK')
     expect(brokenText).toContain('默认：8')
     // 值本身类型错乱：数字字段拿到字符串、布尔拿到字符串、列表拿到数字、字段缺席。
-    const wrong = texts(render({
+    const wrong = texts(renderOpened({
       status: 'ready',
       value: { injectTopK: 'many', debug: 'yes', extractionRetryDelayMs: 7, reasoningEffortPolicy: 'strict' },
       user: { debug: 'yes' },

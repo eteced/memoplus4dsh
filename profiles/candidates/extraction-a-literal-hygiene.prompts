@@ -1,3 +1,8 @@
+# memoplus4dsh prompt profile — one file is one profile; the file name is its name.
+# Stage bodies are verbatim: nothing is escaped. Only a line that opens with
+# "@@" is reserved, so a prompt cannot contain one.
+
+@@ stage extraction
 You extract facts from conversation for a memory graph. Read ONLY the turn below and extract ALL explicitly stated facts.
 
 Output one row per fact, pipe-separated, in EXACTLY this column order:
@@ -38,21 +43,19 @@ Rules:
 - Explicitly named works and titles (books, films, cartoons, songs, paintings, shows) are always facts worth a row, even when mentioned mid-list as examples ("the cartoon X mocked Y" -> row about X).
 - Do NOT extract instructions, rules, or meta statements about the task or conversation itself (e.g. "answer only from the knowledge pool", "each fact has a serial number") — only facts about people, things, and events.
 - ONLY output facts from this turn.
+- Write NORMALIZED_FACT and DETAILS in the same language as the conversation turn.
 
-Names and values:
-- CANONICAL_NAME is a NAME, never a bare value: no row whose subject is only a number, version string, date, boolean, count, or duration (not 8192, not v0.2-modularization, not true). Those belong in OBJECT or NORMALIZED_FACT, with the thing they describe as CANONICAL_NAME; if the turn names nothing for the value to belong to, skip the row.
-- Names that differ by a qualifier, suffix, prefix, or number are DIFFERENT entities: opencode-go-extra ≠ opencode-go, deepseek-v4.1-flash ≠ deepseek-v4-flash, glm-5 ≠ glm. Never normalize a qualifier away, and never group several listed names into one entity or one family name.
-- ALIASES holds only genuine alternative names for the very same referent (nickname, spelling, translation, full/short form). Related, similar, narrower, broader, or sibling names are NOT aliases; merge two mentions only when the turn explicitly states they are the same thing.
-- Keep every name exactly as written, including version suffix, case, hyphens, dots, and script.
-
-Strict row format (a parser reads this line by line):
-- EXACTLY 9 fields separated by 8 pipes; never put a pipe inside a field — reword instead.
-- ENTITY_TYPE, CANONICAL_NAME, PREDICATE, NORMALIZED_FACT are never empty; ALIASES, OBJECT, TIME_EXPR, DETAILS use _ when empty. KIND is fact or speech.
-- Rows only: no header, no numbering, no bullets, no code fence, no commentary. One row per fact; no duplicate rows; ALIASES never repeats its own CANONICAL_NAME.
-
-Language: write NORMALIZED_FACT and DETAILS in the turn's own language — a Chinese turn gets Chinese fact sentences, an English turn gets English ones. Only names, identifiers, and quoted wording keep their original form; do not translate a fact sentence into another language.
+CANONICAL_NAME is a NAME, never a value:
+- CANONICAL_NAME must be a name a human would use for a person, thing, place, or concept. It is NEVER a bare number, version string, date, percentage, boolean, filename, path, command, or code/config identifier — for example none of these may be a CANONICAL_NAME: 8192, 3, v0.2-modularization, 2026-09-13, true, false, null, extractionMaxTokens, promptProfilesDir, memory_status, session.v3.jsonl.zstd, /home/claw/dsh_workspace.
+- Such values are facts ABOUT something: put the value in OBJECT, TIME_EXPR, NORMALIZED_FACT, or DETAILS and make CANONICAL_NAME the person/thing the value belongs to (the setting, the file, the plugin, the model, the task). "抽取预算改成 8192" -> CANONICAL_NAME is the budget setting, OBJECT/NORMALIZED_FACT carries 8192.
+- Never create a row whose subject is only a value. If no thing is named for the value to belong to, skip the row entirely.
+- A config key, filename, command, or model ID may be a CANONICAL_NAME only when the turn treats that item itself as the topic (e.g. "the plugin memoplus4dsh", "the setting extractionMaxTokens"). When it is merely the value of something, the subject is the something.
+- Numbers that are part of a real name stay (e.g. "GPT-4", "v0.1 release", "M9 F-1" as a named milestone, "QQBot"), but a name that is only digits, only a version string, or only a boolean is not a name.
+- Do not turn an enumeration index, a count, a line number, a token count, or a duration into an entity.
 
 Conversation turn:
 {turn_text}
 
 Rows:
+
+@@ end

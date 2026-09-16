@@ -68,6 +68,22 @@ git pull && npm run build
 
 不需要重装：profile 通过 `file:` 依赖符号链接到这个 checkout，重新构建 `lib/` 就是更新的全部——然后**重启 dsh** 生效。（dsh 的 live reload 只覆盖配置：`cordis.patch.yml` 的修改即时生效，插件代码不会热替换。）只有挂载块或安装脚本本身发生变化时才需要重跑 `scripts/install.sh`（幂等，会顺便构建）。`<dsh-home>/memoplus4dsh/` 下的记忆数据不受影响。
 
+## 换一台机器运行
+
+有两样东西不跟着 checkout 走，而且**都是静默失败**：
+
+- **`lib/` 被 gitignore**：全新克隆（或整目录拷贝）没有构建产物，在构建之前插件根本加载不起来。`scripts/install.sh` 安装时会顺带构建；已有 checkout 上单纯 `git pull` 仍然需要 `npm run build`。
+- **`profiles/` 不参与运行时。** 插件从 `<dataDir>/prompts`（默认 `~/.dsh/memoplus4dsh/prompts`）读 profile 文件，而这个目录**初始是空的**——所以新机器上在你把文件放进去之前，五个阶段跑的都是内置 `default`：
+
+```sh
+npm install && npm run build
+scripts/install.sh --profile web
+node scripts/prompts.mjs import profiles/deepseek-v4.1-flash.prompts   # 或直接 cp 进 <dataDir>/prompts/
+# 重启 dsh，然后用 memory_status 确认
+```
+
+`memory_status` 就是"profile 到底加载了没"的检查点：它会列出目录与找到的文件，并**逐阶段**报出这段 prompt 来自 profile 还是内置默认。没加载上的 profile 否则完全看不见——每个阶段只是安静地跑内置文本。
+
 > **自己的配置请放在受管块之外。** `scripts/install.sh` 会整块重写 `# >>> memoplus4dsh` 标记块，所以**加在块内**的内容会在下次重装时丢失。请把自定义项写成另一条 `id: memoplus4dsh` 的 patch entry（见「Prompt profile 与 embedding 升级」里的示例）；由于这种 entry 会替换整行的 `config`，需要把仍要保留的键一并重述。记忆数据不受任何影响。
 
 **验证安装**：`node scripts/doctor.mjs [--profile <name>] [--dsh-home <path>]` 输出挂载状态、生效配置（默认值 vs 你的覆盖）、组件探测（harrier/ONNX 嵌入链、NER 检测链、模型缓存）和记忆数据状态（图规模、抽取队列、最近抽取活动）——并给出启用完整版后端的提示。
@@ -122,7 +138,7 @@ scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 | `snapshotThreshold` | `1000` | 两次快照压缩之间的 journal 操作数 |
 | `debug` | `false` | 诊断开关。打开后把每个 session 事件的 `listener-saw` 轨迹与空内容调用的 `llm-empty` 现场记录写进 `extraction-debug.jsonl`（正常也能到每天近千行）。**默认关闭，不要给用户默认打开**；关掉不影响损失账本（`failed` / `abandoned` / `requeue` 等仍无条件写） |
 | `promptProfiles` | （无） | 具名 prompt profile，按声明顺序与**该次调用实际使用的模型**匹配。每项形如 `{ name, match: { provider?, model? }, stages: { <阶段>: { prompt, maxTokens?, timeoutMs?, reasoningEffort? } } }`，`*` 为通配。内置 `default` profile 承载 v0.1 的原始 prompt，始终兜底 |
-| `promptProfilesDir` | `<dataDir>/prompts` | 外部 profile 文件目录。每个 `*.json` 可放一个 profile、一个数组或 `{"profiles": [...]}`；文件名序加载，**排在内联 `promptProfiles` 之后**（内联先匹配，文件只做扩展）。坏文件在启动时即报错，不会带着它去调用模型 |
+| `promptProfilesDir` | `<dataDir>/prompts` | 外部 profile 文件目录。**一个 `*.prompts` 文件就是一个 profile**，文件名即 profile 名；文件名序加载，**排在内联 `promptProfiles` 之后**（内联先匹配，文件只做扩展）。prompt 正文逐字、不转义；声明了某阶段就必须带上该阶段的 prompt。坏文件在启动时即报错（带文件名与行号），不会带着它去调用模型 |
 | `promptProfile` | （自动） | 强制使用某个 profile，跳过路由匹配 |
 | `reasoningEffortPolicy` | `adapt` | 某阶段的档位不被该路由支持时怎么办。`adapt`（默认）：内置默认 `off` 按 dsh 暴露的档位适配——支持 `off` 就发 `off`，否则取该路由的最低档（只声明 `low/high/max` 的路由即 `low`），一档都拿不到（模型没有 reasoning 元数据、路由查不到）就整个省略 effort，交给 dsh/模型默认；用户显式设置的档位不被支持时同样降级，并在日志里每个路由告警一次。`strict`：配置什么就发什么，不支持的档位由 dsh 拒绝（`UNSUPPORTED_REASONING_EFFORT`） |
 | `thinkingTokenHeadroom` | `3` | 思考预算余量倍数；`1` = 关闭。**实际生效的 effort 不是 `off`**（thinking 开启——内置 `off` 被适配成最低档，或 effort 被整个省略）时，把该阶段解析出的 `maxTokens` 乘以这个倍数，给可见输出留位置：本路由实测同一条抽取输入、同样 8192 的预算，thinking 开着时两次都 `finish=length`、可见内容 0 字符、8192/8192 token 全在思考上。`off` 时不乘，保持旧行为与旧成本。`STAGE_DEFAULTS` 与 profile/override 的解析值本身不变，乘的只是这一枪实际发出的值（`memory_status` 各阶段显示的就是它）。路由能派发 `off` 时这个倍数不会触发——**推荐做法是在路由上声明 `off`**（见下文），它是兜底 |
@@ -134,22 +150,22 @@ scripts/uninstall.sh [--profile <name>] [--dsh-home <path>]
 
 「实际使用的模型」在配置了 `extractionProvider` + `extractionModel` 时尤其重要：这两个键会替换**所有**辅助调用的路由，所以 profile 是按**覆盖后的路由**匹配的，而不是按输入框里选的那个模型。`memory_status` 会同时打印会话路由与这个覆盖项，就是为了让你能看出 profile 究竟匹配到了哪个。
 
-优先级从高到低：`prompts.<阶段>` → 选中的 profile（`promptProfile`，否则第一个 `match` 命中的 `promptProfiles` 条目）→ 内置 `default`。`extractionMaxTokens` / `extractionCallTimeoutMs` 等价于 `prompts.extraction` 的对应项。`memory_status` 会报出每个阶段当前用的 profile。
+优先级从高到低：`prompts.<阶段>` → 选中的 profile（`promptProfile`，否则第一个 `match` 命中的 `promptProfiles` 条目）→ 内置 `default`。`extractionMaxTokens` / `extractionCallTimeoutMs` 等价于 `prompts.extraction` 的对应项。profile 允许只覆盖部分阶段，所以 `memory_status` 会**逐阶段报出这段 prompt 来自 profile 还是内置默认**——profile 没提到的阶段不可能看起来像“配好了”。
 
 **profile 也可以放在外部文件里**——便于评审、进版本库、换机器。默认目录 `<dataDir>/prompts`（即 `~/.dsh/memoplus4dsh/prompts`），可用 `promptProfilesDir` 改。`scripts/prompts.mjs` 提供与插件同一套校验的导入导出：
 
 ```sh
 npm run build                                             # CLI 复用构建产物
-node scripts/prompts.mjs init --name my-models            # 生成示例文件
-node scripts/prompts.mjs list                             # 列出目录里的 profile（含文件名）
-node scripts/prompts.mjs validate ./team-profiles.json    # 只校验，不改动任何东西
-node scripts/prompts.mjs import ./team-profiles.json --name team
-node scripts/prompts.mjs export --out /tmp/all.json --include-default
+node scripts/prompts.mjs init --name my-model             # 生成示例文件
+node scripts/prompts.mjs list                             # 列出 profile，并报出各自覆盖了哪些阶段
+node scripts/prompts.mjs validate ./my-model.prompts      # 只校验，不改动任何东西
+node scripts/prompts.mjs import ./my-model.prompts --name my-model
+node scripts/prompts.mjs export --out /tmp/all --include-default
 ```
 
 导入前会先用 `validateProfiles` 校验（缺必需占位符、未知阶段、非正数上限都会拒绝），所以坏文件不会被写进目录。文件在 dsh 启动时读取，导入后重启生效——profile 本身是按调用解析的，不需要其它步骤。
 
-**仓库里随包提供一份调优过的参考 profile**（`profiles/`），而且是**实测**出来的、不是声明的：`profiles/deepseek-v4.1-flash.json` **只按模型名匹配**（`match.model = "deepseek-v4.1-flash*"`，不带 `provider`——同名即同模型，谁提供这条路由都套用），承载四个候选里实测最优的抽取 prompt（收益主要在"中文轮事实句的语言一致性"，报告里明确写了它**没有**改善什么），并固定 `maxTokens: 8192` 与 `reasoningEffort: "off"`。把它拷进 `<dataDir>/prompts/`（或 `scripts/prompts.mjs import`）后重启即可。18 个真实 turn 的冻结语料（`profiles/ab-corpus.jsonl`）、候选、脚手架（`scripts/ab-extraction-prompts.mjs`）、图侧审计（`scripts/audit-literal-entities.mjs`）、全部数字，以及同样重要的——**这次 A/B 没有证明什么**——都写在 [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md)。
+**仓库里随包提供一份调优过的参考 profile**（`profiles/`），而且是**实测**出来的、不是声明的：`profiles/deepseek-v4.1-flash.prompts` **只按模型名匹配**（`model: deepseek-v4.1-flash*`，不带 `provider`——同名即同模型，谁提供这条路由都套用），承载四个候选里实测最优的抽取 prompt（收益主要在"中文轮事实句的语言一致性"，报告里明确写了它**没有**改善什么），并固定 `maxTokens: 8192` 与 `reasoningEffort: "off"`。把它拷进 `<dataDir>/prompts/`（或 `scripts/prompts.mjs import`）后重启即可。18 个真实 turn 的冻结语料（`profiles/ab-corpus.jsonl`）、候选、脚手架（`scripts/ab-extraction-prompts.mjs`）、图侧审计（`scripts/audit-literal-entities.mjs`）、全部数字，以及同样重要的——**这次 A/B 没有证明什么**——都写在 [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md)。
 
 **v0.2 起，随包默认抽取 prompt 也有意改了。** 默认 prompt 不再逐字节等于 v0.1：它现在回喂**已记录谓词**，并把否定编码进 `OBJECT` 而不是谓词。理由是断言与撤回否则配不上对 —— 详见 [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md) §8。`tests/fixtures/v01-prompts.json` 只对 extraction 一项放行，其余四个阶段仍钉在 v0.1，偏离本身记在该 fixture 的 `deviations` 里。
 
@@ -179,6 +195,8 @@ llm-pi-ai:
 ### 配置页面（Web GUI）
 
 插件在 dsh 的 settings 服务上注册 `memoplus4dsh` 命名空间，因此 **设置 → 插件 → 插件配置** 里会出现一张「memoplus4dsh 记忆插件」卡片，按分组编辑这个命名空间拥有的 **11 个键**：`promptProfile`、`promptProfilesDir`（提示词）、`injectTopK`、`reasoningEffortPolicy`、`thinkingTokenHeadroom`（检索与推理）、`extractionConcurrency`、`extractionJobIntervalMs`、`extractionRetryDelayMs`、`extractionMaxRetries`、`extractionMaxFailureRounds`（抽取队列）、`debug`（诊断）。标签页只渲染「Host 服务了该命名空间」且「有卡片以该命名空间为键注册」的交集，两半都在本包里（Host 半侧 `src/settings.ts`，浏览器半侧 `src/client/`），无需改动 dsh 本身。
+
+卡片里还有一块**只读**的「提示词来源」：当前生效的 profile（`promptProfile`，未设则「按路由自动匹配」）、它的文件名（`<名字>.prompts`）、profile 目录，以及回退（内置 `default`，是源码常量、没有文件）。**逐段**来源——哪些阶段来自插件配置覆盖、哪些来自所选 profile、哪些来自内置默认——这里**刻意不显示**：那是 Host 侧 `PromptRegistry` 在每次调用时算出来的，浏览器半边没有通道拿到。所以那一块会写明这一点，并指向 `memory_status`（它报的才是逐段真实来源）。直接问 agent「当前 prompt 用的是哪份」是最快的路径。
 
 每一行都写着这一项**怎么生效**：
 

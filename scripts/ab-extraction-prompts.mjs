@@ -51,7 +51,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = fileURLToPath(new URL('..', import.meta.url))
@@ -63,7 +63,7 @@ if (!existsSync(libExtraction)) {
 const { EXTRACTION_PROMPT_TURN, parseExtractionOutput, capTurnText, MAX_TURN_TEXT_CHARS } =
   await import(libExtraction)
 const { renderPrompt } = await import(join(here, 'lib', 'text.js'))
-const { parseProfiles } = await import(join(here, 'lib', 'prompts-file.js'))
+const { parseProfile } = await import(join(here, 'lib', 'prompts-file.js'))
 
 // ── args ─────────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2)
@@ -108,7 +108,7 @@ const MODEL_NAMES = [
 // ── prompt sets ──────────────────────────────────────────────────────────────
 /**
  * Load one prompt set per candidate: the built-in baseline plus every profile
- * file named on the command line (or every `profiles/candidates/*.json`).
+ * file named on the command line (or every `profiles/candidates/*.prompts`).
  * A profile's `stages.extraction.maxTokens` becomes the default budget for its
  * own calls unless `--max-tokens` says otherwise.
  */
@@ -121,7 +121,7 @@ function loadPromptSets() {
     maxTokens: undefined,
   }]
   const files = names ?? (existsSync(join(here, 'profiles', 'candidates'))
-    ? readdirSync(join(here, 'profiles', 'candidates')).filter(name => name.endsWith('.json')).sort()
+    ? readdirSync(join(here, 'profiles', 'candidates')).filter(name => name.endsWith('.prompts')).sort()
       .map(name => join('profiles', 'candidates', name))
     : [])
   for (const file of files) {
@@ -131,22 +131,20 @@ function loadPromptSets() {
       console.error(`候选 profile 不存在：${path}`)
       process.exit(2)
     }
-    const profiles = parseProfiles(readFileSync(path, 'utf8'), path)
-    for (const profile of profiles) {
-      const stage = profile.stages?.extraction
-      if (stage?.prompt === undefined) {
-        console.error(`候选 ${path} 的 profile "${profile.name}" 没有 stages.extraction.prompt`)
-        process.exit(2)
-      }
-      // Two profiles carrying the same prompt text would double the calls for one
-      // column; the shipped reference reuses the winning candidate's prompt
-      // verbatim, so this also covers `default,<reference>,<candidate>`.
-      if (sets.some(set => set.prompt === stage.prompt)) {
-        console.log(`跳过 ${profile.name}（prompt 与已有候选逐字相同）`)
-        continue
-      }
-      sets.push({ id: profile.name, file, prompt: stage.prompt, maxTokens: stage.maxTokens })
+    const profile = parseProfile(readFileSync(path, 'utf8'), path, basename(path, '.prompts'))
+    const stage = profile.stages?.extraction
+    if (stage?.prompt === undefined) {
+      console.error(`候选 ${path} 没有 extraction 阶段（这个 harness 只测抽取）`)
+      process.exit(2)
     }
+    // Two profiles carrying the same prompt text would double the calls for one
+    // column; the shipped reference reuses the winning candidate's prompt
+    // verbatim, so this also covers `default,<reference>,<candidate>`.
+    if (sets.some(set => set.prompt === stage.prompt)) {
+      console.log(`跳过 ${profile.name}（prompt 与已有候选逐字相同）`)
+      continue
+    }
+    sets.push({ id: profile.name, file, prompt: stage.prompt, maxTokens: stage.maxTokens })
   }
   return sets
 }

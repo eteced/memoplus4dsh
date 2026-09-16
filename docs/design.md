@@ -73,13 +73,13 @@ ETMS 的核心**算法**用 TS 重新实现（都是轻量逻辑）；重依赖�
 
 效果最依赖模型的两处——**各阶段 prompt** 与 **embedding 模型**——原先都写死成单一模型族的调参，换模型要改源码。v0.2 把它们变成配置，且**按调用解析**。
 
-- **prompt profile**：`{ name, match: { provider?, model? }, stages }`，`match` 支持 `*` 通配。优先级：`prompts.<阶段>`（显式覆盖）→ 选中 profile（`promptProfile`，否则按声明顺序取首个命中）→ 内置 `default`。五个阶段：extraction / entityMerge / supersede / queryExpansion / queryDistill。
+- **prompt profile**：一个 `<name>.prompts` 文件 = 一个 profile，文件名即 profile 名；头部 `model` / `provider` 支持 `*` 通配（不写 `model` 则只能由 `promptProfile` 选中），正文由 `@@ stage <阶段>`…`@@ end` 包住、**逐字不转义**。优先级：`prompts.<阶段>`（显式覆盖）→ 选中 profile（`promptProfile`，否则按声明顺序取首个命中）→ 内置 `default`。profile 可只覆盖部分阶段，未覆盖的逐阶段报为内置默认。五个阶段：extraction / entityMerge / supersede / queryExpansion / queryDistill。
 - **按调用解析，因为路由按调用**：写路径取该 turn 记录的路由，查询侧取会话最近的 request header；若配置了 `extractionProvider` + `extractionModel`，则两者都先被替换为该覆盖路由 —— profile 始终按**调用实际使用的模型**匹配，绝不按会话里选的那个。因此在 Models 页面切模型后，**下一个 turn 即生效，无需重载插件**。
 - **默认等于 v0.1**：内置 `default` profile 直接引用原五个 prompt 常量（有逐字节相等的测试断言），数值默认与 `reasoningEffort: 'off'` 原值保留；`extractionMaxTokens` / `extractionCallTimeoutMs` 折算为最高优先级的 `prompts.extraction` 覆盖项，即它们原本的层级——既有配置无需改动。
 - **校验 fail loud**：未知阶段名、空 prompt、非正数上限、必填占位符缺失一律拒绝加载（extraction 需 `{turn_text}`，两个裁决阶段需 `{lines}`，两个查询侧需 `{query}`）；`{known_entities}` / `{candidate_mentions}` 缺失仅告警。宁可拒绝启动，也不让模型收到没有输入的 prompt。
 - **`reasoningEffort` 也可配置**：原为写死的 `'off'`（M9 F-1 的规避——deepseek-v4-flash 在密集抽取输入上失控推理、烧空预算且输出为空）。需要思考才抽得好的模型可提高到 `low/high/max`。
 - **embedding 也是接缝**：`embeddingModel` 按名字解析（内置 + 用户 `embeddingModels` 表，未知名字加载期拒绝）；`embeddingSidecarModel` / `embeddingSidecarQueryPrompt` 选择 sidecar 模型与其查询指令。**sidecar 握手报出的真实维度现在被采纳**（此前硬编码 1024），否则换非 1024 维模型后，检索的「维度不符即过期」判定会每次查询都重嵌入一次。
-- **可观测**：`memory_status` 报出已配置 profile、当前路由、每阶段生效的 `profile/maxTokens/effort/timeoutMs`，以及实际 embedding 模型与维度；profile 选择与切换写入 `extraction-debug.jsonl`（每次变化一条）。
+- **可观测**：`memory_status` 报出已配置 profile、当前路由、**每阶段的 prompt 到底来自哪里**（profile / 插件配置覆盖 / 内置默认）与其生效的 `maxTokens/effort/timeoutMs`，以及实际 embedding 模型与维度；profile 选择与切换写入 `extraction-debug.jsonl`（每次变化一条）。
 
 配套模块 `src/prompts.ts`；各阶段组件通过构造参数接收 prompt（默认仍为原常量），因此它们的既有单测无需改动。
 

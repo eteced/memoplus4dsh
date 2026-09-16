@@ -7,17 +7,25 @@
  * 字段清单也必须与 `MEMORY_SETTING_FIELDS` 一致（那份元数据在 Host 侧；浏览器
  * 半侧不能值导入 Host 模块——会把 schemastery 打进 bundle）。
  *
- * 卡片按分组排版（提示词 / 检索与推理 / 抽取队列 / 诊断），每个字段标注生效语义
+ * 卡片最外层是一个折叠：收起时只露标题、说明与"未保存"标记，展开才出现字段与导入导出。
+ * 外壳（标题压在说明上的排版、箭头、展开语义、悬停与焦点反馈）与仓库内其他插件卡片
+ * 对齐——共享的 `PluginCard` 不对外导出，所以这里用共享的 `ui-primitives`（箭头图标、
+ * 徽标）复刻同一套外观。
+ *
+ * 展开后按分组排版（提示词 / 检索与推理 / 抽取队列 / 诊断），每个字段标注生效语义
  * （保存即生效 / 重启后生效）、默认值与"是否被覆盖"；数字与数字列表字段先本地校验，
  * 非法输入阻塞保存而**不丢草稿**。另有配置导入导出：导出下载 / 复制 JSON，导入支持
  * 选文件与粘贴 JSON，先解析校验、再让用户看"将写入哪些键"，坏文件绝不写进设置文档。
  *
- * 一切读写都走 `ctx.settingsScope`（它用读取时的 revision 为写入设栅）。除 `react`
- * （页面模块表里的共享实例）外不引入任何运行时依赖：其余导入全部是 `import type`，
- * 构建时被擦除。
+ * 一切读写都走 `ctx.settingsScope`（它用读取时的 revision 为写入设栅）。运行时依赖只有
+ * 页面模块表里的两个共享实例（`react`、`@deepseek-ai/dsh-client-ui-primitives`）：其余
+ * 导入全部是 `import type`，构建时被擦除。
  */
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+// 值导入：页面模块表（`scripts/build-client.mjs` 的 PLATFORM_MODULES）里的共享基础件。
+// 卡片外壳只有用同一套图标与徽标，才能和仓库内其他插件卡片长得一模一样。
+import { Button, IconChevronDownOutline14, Tag } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // 仅类型：槽位键 `settings.plugin.item` 的声明，以及 `ctx.settingsScope` 的
 // Context 合并。跨插件的值导入会被浏览器 bundle 纯净度门禁拒绝。
@@ -30,6 +38,14 @@ export const MEMOPLUS_NAMESPACE = 'memoplus4dsh'
 /** 导入导出的格式版本与插件名（写进导出文件，导入时校验）。 */
 export const CONFIG_FORMAT_VERSION = 1
 export const CONFIG_PLUGIN = MEMOPLUS_NAMESPACE
+
+/**
+ * profile 文件扩展名。
+ *
+ * Host 半侧叫 `PROFILE_FILE_EXTENSION`；浏览器半边不能值导入 Host 模块（会把 Host 的依赖
+ * 打进 bundle），所以这里按同一个值复述一遍 —— 只用来把文件名展示给人看。
+ */
+const PROFILE_FILE_SUFFIX = '.prompts'
 
 /** 卡片需要的基础服务：槽位注册与设置读写。 */
 export const inject = ['slots', 'settingsScope']
@@ -245,6 +261,19 @@ const RAW_FIELDS: readonly FieldSpec[] = FIELDS.filter(spec => SURFACE[spec.key]
 
 /** 折叠区里的键数（含 JSON 承载的那些）。 */
 const ADVANCED_COUNT = FIELDS.filter(spec => SURFACE[spec.key] !== 'common').length
+
+/**
+ * 一个分组里某一档的字段。
+ *
+ * 常改档渲染在分组标题下（始终可见）；高级档渲染在「高级设置」折叠区里。折叠标题承诺
+ * 的键数就是"高级档 + JSON 承载的那些"，所以两处必须用同一个判定，否则标题与内容对不上。
+ * @param group - 分组名。
+ * @param tier - 档位。
+ * @returns 该分组中属于这一档的字段，顺序沿用 {@link FIELDS}。
+ */
+function specsInGroup(group: string, tier: Surface): readonly FieldSpec[] {
+  return FIELDS.filter(spec => spec.group === group && SURFACE[spec.key] === tier)
+}
 
 /** 稳定的选择器：快照引用在两次变更之间不变，恒等选择器即最小订阅。 */
 const identity = (snapshot: ScopeSnapshot | undefined): ScopeSnapshot | undefined => snapshot
@@ -508,41 +537,135 @@ function rawTextFrom(user: Record<string, unknown>): string {
   return Object.keys(picked).length === 0 ? '' : JSON.stringify(picked, null, 2)
 }
 
+// 外壳与仓库内 `PluginCard.module.css` 对齐（那份 CSS 不对外发布，只能按同一套
+// `--dsw-*` token 复刻）：卡片本身不留内边距，留白由标题按钮与正文各自负责。
 const cardStyle = {
   listStyle: 'none',
-  border: '0.5px solid var(--dsw-alias-border-l4, #d8d8d8)',
+  // 长写而非 `border` 短写：变体之间只切 `borderColor`，而 react 在某个键消失时会把它
+  // 设成空串 —— 若底色来自短写，那次清空会把边框颜色一起抹掉。
+  borderWidth: '0.5px',
+  borderStyle: 'solid',
+  borderColor: 'var(--dsw-alias-border-l4, #d8d8d8)',
   borderRadius: '16px',
   background: 'var(--dsw-alias-bg-layer-3, transparent)',
-  padding: '14px 16px',
   margin: '0 0 12px',
+  transition: 'border-color .16s, background .16s',
+} as const
+/** 悬停 / 展开：边框提亮一档，展开时底色再下沉一档。 */
+const cardHighlightStyle = { ...cardStyle, borderColor: 'var(--dsw-alias-label-dimmed, #b8b8b8)' } as const
+const cardOpenStyle = { ...cardHighlightStyle, background: 'var(--dsw-alias-bg-layer-2, transparent)' } as const
+const headerStyle = {
+  width: '100%',
+  appearance: 'none',
+  border: 0,
+  background: 'none',
+  font: 'inherit',
+  color: 'inherit',
+  textAlign: 'left',
+  cursor: 'pointer',
+  display: 'flex',
+  alignItems: 'center',
+  gap: '12px',
+  padding: '14px 16px',
+  borderRadius: '12px',
+} as const
+const headerFocusStyle = {
+  ...headerStyle,
+  outline: '2px solid var(--dsw-alias-brand-primary, #4d6bfe)',
+  outlineOffset: '-2px',
+} as const
+// 名称压在说明上：说明才是区分两张卡片的依据，所以它独占一行而不是跟在名称后面。
+const headTextStyle = { flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: '4px' } as const
+const nameStyle = {
+  fontSize: '15px', fontWeight: 600, lineHeight: 1.4, color: 'var(--dsw-alias-label-primary, inherit)',
+} as const
+const descriptionStyle = {
+  fontSize: '13px', lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary, inherit)',
+} as const
+const chevronStyle = {
+  flex: 'none', display: 'inline-flex', color: 'var(--dsw-alias-label-tertiary, inherit)', transition: 'transform .16s',
+} as const
+const chevronOpenStyle = { ...chevronStyle, transform: 'rotate(180deg)' } as const
+/** 只定位置：胶囊的几何与配色来自 `Tag` 自己。 */
+const pendingStyle = { flex: 'none' } as const
+const bodyStyle = {
+  borderTop: '0.5px solid var(--dsw-alias-border-l2, #e4e4e4)',
+  margin: '0 16px',
+  paddingBottom: '8px',
 } as const
 
-const rowStyle = { display: 'flex', flexDirection: 'column', gap: '4px', margin: '10px 0' } as const
-const labelStyle = { fontSize: '13px', fontWeight: 600 } as const
-const hintStyle = { fontSize: '12px', opacity: 0.7 } as const
-const errorStyle = { fontSize: '12px', color: 'var(--dsw-alias-text-danger, #c62828)' } as const
+// 字段行与控件按 dsh 自己的设置表单对齐（`ui-settings-plugins/fields.module.css` 的
+// 那套 token）：行是上下 12px 留白的竖排、行间一条 hairline；输入框 34px 高、radius 8、
+// 底 layer-3、13px；标签 13/500 label-primary，提示 12 label-tertiary，错误 label-error。
+const rowStyle = {
+  display: 'flex', flexDirection: 'column', gap: '6px', padding: '12px 0',
+} as const
+/** 相邻两行之间的那条 hairline（dsh 的 `.field + .field`）。 */
+const rowDividerStyle = { borderTop: '0.5px solid var(--dsw-alias-border-l2, #e4e4e4)' } as const
+/** 标签在左、徽标与"清除覆盖"在右，与 dsh 字段头同构。 */
+const fieldHeadStyle = { display: 'flex', alignItems: 'center', gap: '8px' } as const
+const labelStyle = {
+  flex: 1, minWidth: 0, fontSize: '13px', fontWeight: 500, lineHeight: 1.5,
+  color: 'var(--dsw-alias-label-primary, inherit)',
+} as const
+const badgesStyle = { display: 'inline-flex', alignItems: 'center', gap: '8px' } as const
+const hintStyle = {
+  fontSize: '12px', lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary, inherit)',
+} as const
+const errorStyle = {
+  fontSize: '12px', lineHeight: 1.5, color: 'var(--dsw-alias-label-error, #c62828)',
+} as const
 const inputStyle = {
   width: '100%',
   boxSizing: 'border-box',
-  padding: '6px 8px',
+  height: '34px',
+  padding: '0 12px',
+  // 同上：焦点 / 非法两档只改 `borderColor`，短写会让"离开焦点"这一步把颜色清没。
+  borderWidth: '0.5px',
+  borderStyle: 'solid',
+  borderColor: 'var(--dsw-alias-border-l4, #d8d8d8)',
   borderRadius: '8px',
-  border: '0.5px solid var(--dsw-alias-border-l4, #d8d8d8)',
-  background: 'transparent',
-  color: 'inherit',
+  background: 'var(--dsw-alias-bg-layer-3, transparent)',
+  color: 'var(--dsw-alias-label-primary, inherit)',
   font: 'inherit',
+  fontSize: '13px',
+  lineHeight: 1.5,
+} as const
+/** 焦点与非法输入的边框色：内联样式写不出 `:focus-visible`，焦点那档用状态复刻。 */
+const inputFocusStyle = { ...inputStyle, borderColor: 'var(--dsw-alias-brand-primary, #4d6bfe)' } as const
+const inputInvalidStyle = { ...inputStyle, borderColor: 'var(--dsw-alias-label-error, #c62828)' } as const
+const checkboxRowStyle = {
+  ...hintStyle, display: 'flex', alignItems: 'center', gap: '6px',
 } as const
 const footerStyle = {
-  display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginTop: '12px',
+  display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginTop: '8px',
 } as const
 const groupStyle = {
-  marginTop: '12px', paddingTop: '8px', borderTop: '0.5px solid var(--dsw-alias-border-l4, #d8d8d8)',
-  fontSize: '13px', fontWeight: 700,
+  marginTop: '12px', paddingTop: '8px', borderTop: '0.5px solid var(--dsw-alias-border-l2, #e4e4e4)',
+  fontSize: '13px', fontWeight: 600, color: 'var(--dsw-alias-label-primary, inherit)',
 } as const
-const badgeStyle = {
-  fontSize: '11px', fontWeight: 500, opacity: 0.75, marginLeft: '6px',
-  border: '0.5px solid var(--dsw-alias-border-l4, #d8d8d8)', borderRadius: '6px', padding: '0 4px',
+/** 折叠区的标题行：主题化的小按钮 + 一直可见的代价说明。 */
+const advancedHeadStyle = {
+  display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', marginTop: '10px',
 } as const
-const textareaStyle = { ...inputStyle, minHeight: '64px', fontFamily: 'monospace', fontSize: '12px' } as const
+const textareaStyle = {
+  ...inputStyle, height: 'auto', minHeight: '64px', padding: '8px 12px',
+  fontFamily: 'monospace', fontSize: '12px',
+} as const
+const jsonTextareaStyle = { ...textareaStyle, minHeight: '120px', whiteSpace: 'pre' } as const
+/** 折叠区整体：左侧一条竖线把它和常改档分开。 */
+const advancedPanelStyle = {
+  marginTop: '8px', paddingLeft: '8px', borderLeft: '2px solid var(--dsw-alias-border-l2, #e4e4e4)',
+} as const
+/** 只读状态行的两列：键在左固定宽，值在右可换行。 */
+const statusRowStyle = { display: 'flex', gap: '8px', padding: '3px 0', alignItems: 'baseline' } as const
+const statusKeyStyle = {
+  flex: '0 0 88px', fontSize: '12px', lineHeight: 1.5, color: 'var(--dsw-alias-label-tertiary, inherit)',
+} as const
+const statusValueStyle = {
+  flex: 1, minWidth: 0, fontSize: '12px', lineHeight: 1.5,
+  color: 'var(--dsw-alias-label-secondary, inherit)', wordBreak: 'break-all',
+} as const
 
 /**
  * 渲染 memoplus4dsh 的配置卡片。
@@ -561,6 +684,13 @@ export function MemorySettingsCard(props: CardProps) {
   const revision = typeof snapshot?.revision === 'number' ? snapshot.revision : -1
   const ready = snapshot !== undefined && typeof snapshot === 'object'
 
+  /** 最外层折叠；默认收起，与仓库内其他插件卡片一致。 */
+  const [open, setOpen] = useState(false)
+  /** 悬停与焦点反馈：内联样式写不出 `:hover` / `:focus-visible`，只能用状态复刻。 */
+  const [hover, setHover] = useState(false)
+  const [focus, setFocus] = useState(false)
+  /** 正在聚焦的字段键：内联样式写不出 `:focus-visible`，用它复刻焦点边框。 */
+  const [focusedField, setFocusedField] = useState('')
   const [drafts, setDrafts] = useState<Drafts>(() => draftsFrom(resolved))
   const [busy, setBusy] = useState(false)
   const [note, setNote] = useState('')
@@ -574,6 +704,13 @@ export function MemorySettingsCard(props: CardProps) {
   const [rawText, setRawText] = useState(() => rawTextFrom(overridden))
   /** 高级区 JSON 的解析/归属错误；非空即阻塞保存。 */
   const [rawError, setRawError] = useState('')
+  /**
+   * 真正的 file input 藏起来，由主题化按钮触发。
+   *
+   * 原生 `<input type="file">` 的可见部分（"选择文件"那个灰盒子）没法用内联样式改，
+   * 只能不给它露面 —— 与 dsh 自己取文件的方式一致（隐藏 input + 按钮 click()）。
+   */
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   /**
    * 把高级区文本折进同一份草稿。走 `drafts` 而不是另开写入面，所以本地校验、
@@ -634,6 +771,19 @@ export function MemorySettingsCard(props: CardProps) {
   const invalid = rawError === '' ? Object.keys(errors) : [...Object.keys(errors), '高级区 JSON']
   const dirty = changed.length > 0
   const canWrite = writable && !busy
+  /** 外壳：展开 > 悬停 > 常态；焦点轮廓只在键盘聚焦时出现。 */
+  const shell = open ? cardOpenStyle : (hover ? cardHighlightStyle : cardStyle)
+  const header = focus ? headerFocusStyle : headerStyle
+  /**
+   * 只读状态能显示的部分。
+   *
+   * 卡片读得到的就是 settings 里那两个键：`promptProfile`（强制指定时才有值）与
+   * `promptProfilesDir`。**逐段 prompt 的实际来源算不出来** —— 那是 Host 侧
+   * `PromptRegistry` 解析出来的，浏览器半边没有拿到它的通道，所以下面把那一栏明确
+   * 指向 `memory_status`，而不是猜一个可能不对的值填上去。
+   */
+  const forcedProfile = text(resolved['promptProfile'])
+  const profileDir = text(resolved['promptProfilesDir'])
 
   const write = (field: string, value: unknown): void => {
     setBusy(true)
@@ -750,186 +900,307 @@ export function MemorySettingsCard(props: CardProps) {
     )
   }
 
-  return (
-    <li style={cardStyle}>
-      <div style={{ ...labelStyle, fontSize: '14px' }}>memoplus4dsh 记忆插件</div>
-      <div style={hintStyle}>
-        本卡片拥有 {FIELDS.length} 个键；其余配置（extraction / embedding* / promptProfiles 等）仍只由 cordis.yml 提供，
-        导入导出都不会回写它们。
+  /**
+   * 一个字段的控件行。
+   *
+   * 常改档和高级档用的是同一套行标记；提取成一处，两边的控件、徽标与生效语义才不会
+   * 各自漂移。
+   * @param spec - 要渲染的字段。
+   * @returns 该字段的控件行。
+   */
+  const renderField = (spec: FieldSpec, first: boolean) => {
+    const draft = drafts[spec.key] ?? draftOf(spec, resolved[spec.key])
+    const isOverridden = overridden[spec.key] !== undefined
+    const inherited = !isOverridden && base[spec.key] !== undefined
+    const state = isOverridden
+      ? `已覆盖；清除后回到 ${inherited ? `cordis.yml: ${fmt(base[spec.key])}` : `默认：${spec.defaultHint}`}`
+      : inherited ? `继承 cordis.yml: ${fmt(base[spec.key])}` : `默认：${spec.defaultHint}`
+    const id = `memoplus4dsh-${spec.key}`
+    const invalid = errors[spec.key] !== undefined
+    return (
+      <div key={spec.key} style={first ? rowStyle : { ...rowStyle, ...rowDividerStyle }}>
+        <div style={fieldHeadStyle}>
+          <label htmlFor={id} style={labelStyle}>{spec.key}</label>
+          <span style={badgesStyle}>
+            <Tag tone="outline">{spec.applies === 'live' ? '保存即生效' : '重启后生效'}</Tag>
+            {isOverridden ? <Tag tone="neutral">已覆盖</Tag> : null}
+            {isOverridden ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={!canWrite}
+                onClick={() => { write(spec.key, '') }}
+              >
+                清除覆盖（回到 {inherited ? 'cordis.yml' : '默认值'}）
+              </Button>
+            ) : null}
+          </span>
+        </div>
+        {spec.kind === 'boolean' ? (
+          <label style={checkboxRowStyle}>
+            <input
+              id={id}
+              type="checkbox"
+              checked={draft === 'true'}
+              disabled={!canWrite}
+              onChange={(event) => {
+                setDrafts(previous => ({ ...previous, [spec.key]: event.target.checked ? 'true' : 'false' }))
+                setNote('')
+              }}
+            />
+            {draft === 'true' ? '开' : '关'}
+          </label>
+        ) : (
+          <input
+            id={id}
+            type="text"
+            style={invalid ? inputInvalidStyle : (focusedField === spec.key ? inputFocusStyle : inputStyle)}
+            value={draft}
+            disabled={!canWrite}
+            placeholder={spec.placeholder ?? ''}
+            onFocus={() => { setFocusedField(spec.key) }}
+            onBlur={() => { setFocusedField('') }}
+            onChange={(event) => {
+              setDrafts(previous => ({ ...previous, [spec.key]: event.target.value }))
+              setNote('')
+            }}
+          />
+        )}
+        <span style={hintStyle}>{spec.hint}</span>
+        <span style={invalid ? errorStyle : hintStyle}>
+          {invalid ? `输入无效：${errors[spec.key]}（不会保存这一项）` : state}
+        </span>
       </div>
-      {!ready ? <div style={{ ...hintStyle, marginTop: '6px' }}>设置快照尚未到达（Host 未服务该命名空间，或连接未就绪）。</div> : null}
-      {ready && !writable ? <div style={{ ...hintStyle, marginTop: '6px' }}>当前设置文档只读（memory 模式或 Host 未开启写入）。</div> : null}
+    )
+  }
 
-      {GROUPS.map(group => {
-        // `raw` 档不渲染控件（由折叠区的 JSON 承载，一个键只有一个主人）；
-        // `advanced` 档只在展开时出现。
-        const specs = FIELDS.filter(spec =>
-          spec.group === group
-          && (SURFACE[spec.key] === 'common' || (showAdvanced && SURFACE[spec.key] === 'advanced')))
-        if (specs.length === 0) return null
-        return (
-        <div key={group}>
-          <div style={groupStyle}>{group}</div>
-          {specs.map(spec => {
-            const draft = drafts[spec.key] ?? draftOf(spec, resolved[spec.key])
-            const isOverridden = overridden[spec.key] !== undefined
-            const inherited = !isOverridden && base[spec.key] !== undefined
-            const state = isOverridden
-              ? `已覆盖；清除后回到 ${inherited ? `cordis.yml: ${fmt(base[spec.key])}` : `默认：${spec.defaultHint}`}`
-              : inherited ? `继承 cordis.yml: ${fmt(base[spec.key])}` : `默认：${spec.defaultHint}`
+  return (
+    <li
+      style={shell}
+      onMouseEnter={() => { setHover(true) }}
+      onMouseLeave={() => { setHover(false) }}
+    >
+      <button
+        type="button"
+        style={header}
+        aria-expanded={open}
+        aria-label={`${open ? '收起' : '展开'}：memoplus4dsh 记忆插件`}
+        onClick={() => { setOpen(value => !value) }}
+        onFocus={(event) => { setFocus(event.currentTarget.matches(':focus-visible')) }}
+        onBlur={() => { setFocus(false) }}
+      >
+        <span style={headTextStyle}>
+          <span style={nameStyle}>memoplus4dsh 记忆插件</span>
+          <span style={descriptionStyle}>
+            本卡片拥有 {FIELDS.length} 个键；其余配置（extraction / embedding* / promptProfiles 等）仍只由 cordis.yml 提供，
+            导入导出都不会回写它们。
+          </span>
+        </span>
+        {dirty ? <span style={pendingStyle}><Tag tone="neutral">未保存</Tag></span> : null}
+        <span style={open ? chevronOpenStyle : chevronStyle}><IconChevronDownOutline14 /></span>
+      </button>
+      {open ? (
+        <div style={bodyStyle}>
+          {!ready ? <div style={{ ...hintStyle, marginTop: '6px' }}>设置快照尚未到达（Host 未服务该命名空间，或连接未就绪）。</div> : null}
+          {ready && !writable ? <div style={{ ...hintStyle, marginTop: '6px' }}>当前设置文档只读（memory 模式或 Host 未开启写入）。</div> : null}
+
+          {GROUPS.map(group => {
+            // 这里只渲染常改档。`advanced` 与 `raw` 都归下面的「高级设置」折叠区 ——
+            // 一个键只有一个渲染面，展开时它必须出现在那个标题下面，而不是冒到上面来。
+            const specs = specsInGroup(group, 'common')
+            if (specs.length === 0) return null
             return (
-              <div key={spec.key} style={rowStyle}>
-                <label htmlFor={`memoplus4dsh-${spec.key}`} style={labelStyle}>
-                  {spec.key}
-                  <span style={badgeStyle}>{spec.applies === 'live' ? '保存即生效' : '重启后生效'}</span>
-                  {isOverridden ? <span style={badgeStyle}>已覆盖</span> : null}
-                </label>
-                {spec.kind === 'boolean' ? (
-                  <label style={{ ...hintStyle, display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <input
-                      id={`memoplus4dsh-${spec.key}`}
-                      type="checkbox"
-                      checked={draft === 'true'}
-                      disabled={!canWrite}
-                      onChange={(event) => {
-                        setDrafts(previous => ({ ...previous, [spec.key]: event.target.checked ? 'true' : 'false' }))
-                        setNote('')
-                      }}
-                    />
-                    {draft === 'true' ? '开' : '关'}
-                  </label>
-                ) : (
-                  <input
-                    id={`memoplus4dsh-${spec.key}`}
-                    type="text"
-                    style={inputStyle}
-                    value={draft}
-                    disabled={!canWrite}
-                    placeholder={spec.placeholder ?? ''}
-                    onChange={(event) => {
-                      setDrafts(previous => ({ ...previous, [spec.key]: event.target.value }))
-                      setNote('')
-                    }}
-                  />
-                )}
-                <span style={hintStyle}>{spec.hint}</span>
-                <span style={errors[spec.key] !== undefined ? errorStyle : hintStyle}>
-                  {errors[spec.key] !== undefined ? `输入无效：${errors[spec.key]}（不会保存这一项）` : state}
-                </span>
-                {isOverridden ? (
-                  <button
-                    type="button"
-                    style={{ ...hintStyle, alignSelf: 'flex-start' }}
-                    disabled={!canWrite}
-                    onClick={() => { write(spec.key, '') }}
-                  >
-                    清除覆盖（回到 {inherited ? 'cordis.yml' : '默认值'}）
-                  </button>
-                ) : null}
+              <div key={group}>
+                <div style={groupStyle}>{group}</div>
+                {specs.map((spec, index) => renderField(spec, index === 0))}
               </div>
             )
           })}
-        </div>
-        )
-      })}
 
-      <button
-        type="button"
-        style={{ ...hintStyle, marginTop: '10px', cursor: 'pointer' }}
-        aria-expanded={showAdvanced}
-        onClick={() => { setShowAdvanced(value => !value) }}
-      >
-        {showAdvanced ? '▾' : '▸'} 高级设置（{ADVANCED_COUNT} 项）—— 少改、改错有后果的那些，以及其余配置（都要重启 dsh 才生效）的 JSON
-      </button>
-
-      {showAdvanced ? (
-        <div style={{ marginTop: '8px', paddingLeft: '8px', borderLeft: '2px solid var(--dsw-alias-border-l4, #e4e4e4)' }}>
-          <div style={{ ...groupStyle, marginTop: '4px' }}>其余配置（JSON）</div>
-          <div style={hintStyle}>
-            这个区域只管 {RAW_FIELDS.map(spec => spec.key).join(' / ')} 这几个键，它们
-            <strong>都要重启 dsh 才生效</strong>。写 {'{}'} 或清空 = 全部回到默认 / 继承。
-            不在这里的键（含生效值）不受影响 —— 导出快照可以看到每项的当前来源。
+          <div style={groupStyle}>提示词来源（只读）</div>
+          <div style={statusRowStyle}>
+            <div style={statusKeyStyle}>当前 profile</div>
+            <div style={statusValueStyle}>
+              {forcedProfile === ''
+                ? '自动：按每次调用实际使用的路由匹配（未强制指定）'
+                : `${forcedProfile}（由 promptProfile 强制指定）`}
+            </div>
           </div>
-          <textarea
-            aria-label="其余配置（JSON）"
-            style={{ ...inputStyle, width: '100%', minHeight: '120px', fontFamily: 'monospace', whiteSpace: 'pre' }}
-            value={rawText}
-            disabled={!canWrite}
-            placeholder={'{\n  "extractionConcurrency": 3\n}'}
-            onChange={(event) => { applyRawText(event.target.value); setNote('') }}
-          />
-          <span style={rawError !== '' ? errorStyle : hintStyle}>
-            {rawError !== ''
-              ? `JSON 无效：${rawError}（保存已阻塞，草稿保留）`
-              : '每个键只在这里或上面的控件里出现一次；两边不会互相覆盖。'}
-          </span>
+          <div style={statusRowStyle}>
+            <div style={statusKeyStyle}>profile 文件</div>
+            <div style={statusValueStyle}>
+              {forcedProfile === ''
+                ? '取决于命中的是哪个 profile，形如 <名字>.prompts'
+                : `${forcedProfile}${PROFILE_FILE_SUFFIX}`}
+            </div>
+          </div>
+          <div style={statusRowStyle}>
+            <div style={statusKeyStyle}>profile 目录</div>
+            <div style={statusValueStyle}>
+              {profileDir === ''
+                ? '未设置 —— 用默认目录（数据目录下的 prompts），绝对路径见 memory_status'
+                : profileDir}
+            </div>
+          </div>
+          <div style={statusRowStyle}>
+            <div style={statusKeyStyle}>回退</div>
+            <div style={statusValueStyle}>
+              内置 default —— 插件源码里的常量，没有文件；profile 没有覆盖的阶段都走它
+            </div>
+          </div>
+          <div style={{ ...hintStyle, marginTop: '6px' }}>
+            逐段 prompt 的<strong>实际</strong>来源（插件配置覆盖 / 所选 profile / 内置默认）
+            只有 Host 侧算得出来，卡片拿不到。让 agent 跑一次 <code>memory_status</code>，
+            或直接问「当前 prompt 用的是哪份」，就能看到逐段来源、覆盖情况与生效值。
+          </div>
+
+          <div style={advancedHeadStyle}>
+            <Button
+              variant="ghost"
+              size="sm"
+              aria-expanded={showAdvanced}
+              icon={(
+                <span style={showAdvanced ? chevronOpenStyle : chevronStyle}>
+                  <IconChevronDownOutline14 />
+                </span>
+              )}
+              onClick={() => { setShowAdvanced(value => !value) }}
+            >
+              高级设置（{ADVANCED_COUNT} 项）
+            </Button>
+            <span style={hintStyle}>
+              少改、改错有后果的那些，以及其余配置（都要重启 dsh 才生效）的 JSON
+            </span>
+          </div>
+
+          {showAdvanced ? (
+            <div style={advancedPanelStyle}>
+              {GROUPS.map(group => {
+                // 高级档按同一套分组顺序排在折叠区里：标题承诺的键数与这里逐项对应。
+                const specs = specsInGroup(group, 'advanced')
+                if (specs.length === 0) return null
+                return (
+                  <div key={group}>
+                    <div style={groupStyle}>{group}</div>
+                    {specs.map((spec, index) => renderField(spec, index === 0))}
+                  </div>
+                )
+              })}
+              <div style={groupStyle}>其余配置（JSON）</div>
+              <div style={hintStyle}>
+                这个区域只管 {RAW_FIELDS.map(spec => spec.key).join(' / ')} 这几个键，它们
+                <strong>都要重启 dsh 才生效</strong>。写 {'{}'} 或清空 = 全部回到默认 / 继承。
+                不在这里的键（含生效值）不受影响 —— 导出快照可以看到每项的当前来源。
+              </div>
+              <textarea
+                aria-label="其余配置（JSON）"
+                style={jsonTextareaStyle}
+                value={rawText}
+                disabled={!canWrite}
+                placeholder={'{\n  "extractionConcurrency": 3\n}'}
+                onChange={(event) => { applyRawText(event.target.value); setNote('') }}
+              />
+              <span style={rawError !== '' ? errorStyle : hintStyle}>
+                {rawError !== ''
+                  ? `JSON 无效：${rawError}（保存已阻塞，草稿保留）`
+                  : '每个键只在这里或上面的控件里出现一次；两边不会互相覆盖。'}
+              </span>
+            </div>
+          ) : null}
+
+          <div style={footerStyle}>
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={!canWrite || !dirty || invalid.length > 0}
+              onClick={saveAll}
+            >
+              保存
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!canWrite}
+              onClick={() => { discardDrafts() }}
+            >
+              丢弃改动
+            </Button>
+            {note !== '' ? <span style={hintStyle} role="status">{note}</span> : null}
+          </div>
+          {invalid.length > 0 ? (
+            <div style={errorStyle}>有 {invalid.length} 个字段输入无效，保存已阻塞（草稿保留）：{invalid.join(', ')}</div>
+          ) : null}
+
+          <div style={groupStyle}>配置导入导出</div>
+          <div style={hintStyle}>
+            格式：<code>{'{"version":1,"plugin":"memoplus4dsh","exportedAt":"…","values":{…},"sources":{…}}'}</code>。
+            导出的是完整生效快照（设置层 &gt; cordis.yml &gt; 默认值）并标明每项来源；
+            导入只回写 <code>sources</code> 为 <code>settings</code> 的键（手写的文件没有 sources 就按 values 里拥有的键写入），
+            其余键只报告不写。坏文件整份拒绝，设置文档不会被改动。
+          </div>
+          <div style={footerStyle}>
+            <Button variant="outline" size="sm" disabled={!ready} onClick={() => { doExport('download') }}>
+              导出配置（下载 JSON）
+            </Button>
+            <Button variant="outline" size="sm" disabled={!ready} onClick={() => { doExport('clipboard') }}>
+              复制到剪贴板
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busy}
+              onClick={() => { fileInputRef.current?.click() }}
+            >
+              选择文件导入
+            </Button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json,application/json"
+              disabled={busy}
+              hidden
+              onChange={(event) => { readFile(event.target.files?.[0] ?? undefined) }}
+            />
+          </div>
+          <div style={rowStyle}>
+            <label htmlFor="memoplus4dsh-import-json" style={labelStyle}>粘贴 JSON 导入</label>
+            <textarea
+              id="memoplus4dsh-import-json"
+              style={textareaStyle}
+              value={importText}
+              disabled={busy}
+              placeholder='{"version":1,"plugin":"memoplus4dsh","values":{"injectTopK":12}}'
+              onChange={(event) => { setImportText(event.target.value); setPlan(undefined); setNote('') }}
+            />
+            <span style={hintStyle}>
+              {plan === undefined
+                ? '先「解析并预览」，看清将写入哪些键再确认导入。'
+                : plan.error !== undefined
+                  ? `已拒绝：${plan.error}`
+                  : `将写入 ${plan.writes.length} 个键：${plan.writes.map(entry => entry.key).join(', ') || '（无）'}`
+                    + (plan.skipped.length > 0 ? `；忽略：${plan.skipped.join('、')}` : '')}
+            </span>
+          </div>
+          <div style={footerStyle}>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={busy || importText.trim() === ''}
+              onClick={previewImport}
+            >
+              解析并预览
+            </Button>
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={!canWrite || plan === undefined || plan.error !== undefined || plan.writes.length === 0}
+              onClick={applyImport}
+            >
+              确认导入（{plan !== undefined && plan.error === undefined ? plan.writes.length : 0} 个键）
+            </Button>
+          </div>
         </div>
       ) : null}
-
-      <div style={footerStyle}>
-        <button type="button" disabled={!canWrite || !dirty || invalid.length > 0} onClick={saveAll}>保存</button>
-        <button
-          type="button"
-          disabled={!canWrite}
-          onClick={() => { discardDrafts() }}
-        >
-          丢弃改动
-        </button>
-        {note !== '' ? <span style={hintStyle} role="status">{note}</span> : null}
-      </div>
-      {invalid.length > 0 ? (
-        <div style={errorStyle}>有 {invalid.length} 个字段输入无效，保存已阻塞（草稿保留）：{invalid.join(', ')}</div>
-      ) : null}
-
-      <div style={{ ...groupStyle }}>配置导入导出</div>
-      <div style={hintStyle}>
-        格式：<code>{'{"version":1,"plugin":"memoplus4dsh","exportedAt":"…","values":{…},"sources":{…}}'}</code>。
-        导出的是完整生效快照（设置层 &gt; cordis.yml &gt; 默认值）并标明每项来源；
-        导入只回写 <code>sources</code> 为 <code>settings</code> 的键（手写的文件没有 sources 就按 values 里拥有的键写入），
-        其余键只报告不写。坏文件整份拒绝，设置文档不会被改动。
-      </div>
-      <div style={footerStyle}>
-        <button type="button" disabled={!ready} onClick={() => { doExport('download') }}>导出配置（下载 JSON）</button>
-        <button type="button" disabled={!ready} onClick={() => { doExport('clipboard') }}>复制到剪贴板</button>
-        <label style={{ ...hintStyle, display: 'flex', alignItems: 'center', gap: '6px' }}>
-          选择文件导入
-          <input
-            type="file"
-            accept=".json,application/json"
-            disabled={busy}
-            onChange={(event) => { readFile(event.target.files?.[0] ?? undefined) }}
-          />
-        </label>
-      </div>
-      <div style={rowStyle}>
-        <label htmlFor="memoplus4dsh-import-json" style={labelStyle}>粘贴 JSON 导入</label>
-        <textarea
-          id="memoplus4dsh-import-json"
-          style={textareaStyle}
-          value={importText}
-          disabled={busy}
-          placeholder='{"version":1,"plugin":"memoplus4dsh","values":{"injectTopK":12}}'
-          onChange={(event) => { setImportText(event.target.value); setPlan(undefined); setNote('') }}
-        />
-        <span style={hintStyle}>
-          {plan === undefined
-            ? '先「解析并预览」，看清将写入哪些键再确认导入。'
-            : plan.error !== undefined
-              ? `已拒绝：${plan.error}`
-              : `将写入 ${plan.writes.length} 个键：${plan.writes.map(entry => entry.key).join(', ') || '（无）'}`
-                + (plan.skipped.length > 0 ? `；忽略：${plan.skipped.join('、')}` : '')}
-        </span>
-      </div>
-      <div style={footerStyle}>
-        <button type="button" disabled={busy || importText.trim() === ''} onClick={previewImport}>解析并预览</button>
-        <button
-          type="button"
-          disabled={!canWrite || plan === undefined || plan.error !== undefined || plan.writes.length === 0}
-          onClick={applyImport}
-        >
-          确认导入（{plan !== undefined && plan.error === undefined ? plan.writes.length : 0} 个键）
-        </button>
-      </div>
     </li>
   )
 }

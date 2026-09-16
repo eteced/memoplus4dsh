@@ -17,6 +17,7 @@ import {
   REQUIRED_PLACEHOLDERS,
   STAGE_DEFAULTS,
   matchesRoute,
+  stagesWithPrompt,
   validateProfiles,
 } from '../src/prompts.js'
 import { SUPERSEDE_ADJUDICATION_PROMPT } from '../src/supersede.js'
@@ -167,6 +168,37 @@ describe('PromptRegistry resolution', () => {
   it('resolves without a route to the fallback profile', () => {
     const registry = new PromptRegistry({ profiles: [{ name: 'matched', match: { model: '*' }, stages: { extraction: { prompt: 'M {turn_text}' } } }] })
     expect(registry.resolve('extraction').profile).toBe('default')
+  })
+
+  /**
+   * 一个 profile 允许只覆盖部分阶段 —— 那么"选中了哪个 profile"就说不出这个阶段的
+   * prompt 到底是谁的。逐阶段报出真正来源，未被覆盖的阶段必须自报内置默认；
+   * 同一个 profile 选中的其它阶段不能看起来像"profile 里配好了"。
+   */
+  it('reports where each stage prompt really came from, not just which profile was selected', () => {
+    const registry = new PromptRegistry({
+      profiles: [{ name: 'partial', match: { model: '*' }, stages: { extraction: { prompt: 'M {turn_text}' } } }],
+    })
+    const route = { provider: 'p', model: 'm' }
+    const extraction = registry.resolve('extraction', route)
+    expect(extraction).toMatchObject({ profile: 'partial', promptFrom: 'profile' })
+    expect(extraction.prompt).toBe('M {turn_text}')
+    // 同一个 profile 之下的 entityMerge 并没有 prompt：它必须报 builtin，否则读的人
+    // 会以为那 937 字的合并 prompt 来自这个 profile。
+    const merge = registry.resolve('entityMerge', route)
+    expect(merge).toMatchObject({ profile: 'partial', promptFrom: 'builtin' })
+    expect(merge.prompt).toBe(DEFAULT_PROFILE.stages!.entityMerge!.prompt)
+    // 逐阶段来源与"这个 profile 覆盖了哪些阶段"是同一件事的两种视图。
+    expect(stagesWithPrompt(registry.profileFor(route))).toEqual(['extraction'])
+  })
+
+  it('marks a plugin-config override as the prompt source, ahead of any profile', () => {
+    const registry = new PromptRegistry({
+      profiles: [{ name: 'partial', match: { model: '*' }, stages: { extraction: { prompt: 'M {turn_text}' } } }],
+      overrides: { extraction: { prompt: 'O {turn_text}' } },
+    })
+    expect(registry.resolve('extraction', { provider: 'p', model: 'm' }))
+      .toMatchObject({ promptFrom: 'override', prompt: 'O {turn_text}', profile: 'partial' })
   })
 })
 

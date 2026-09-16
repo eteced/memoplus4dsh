@@ -159,8 +159,30 @@ export interface ResolvedStage {
    * degraded with a warning.
    */
   reasoningEffortExplicit: boolean
-  /** Profile that supplied the prompt — reported for logging and `memory_status`. */
+  /** Profile selected for this call — reported for logging and `memory_status`. */
   profile: string
+  /**
+   * Where {@link ResolvedStage.prompt} actually came from.
+   *
+   * A profile may cover only some stages, so the selected profile's name cannot
+   * answer "is this the prompt the profile declares, or the built-in one?" —
+   * `profile` names the selection, this names the source. Reporting must show
+   * both, otherwise a stage the profile never mentions looks configured.
+   */
+  promptFrom: PromptSource
+}
+
+/** Which layer supplied one stage's prompt. */
+export type PromptSource = 'override' | 'profile' | 'builtin'
+
+/**
+ * Stages a profile declares a prompt for, in {@link PROMPT_STAGES} order.
+ *
+ * @param profile - the profile to inspect.
+ * @returns The stages it covers; the rest fall back to {@link DEFAULT_PROFILE}.
+ */
+export function stagesWithPrompt(profile: PromptProfile): PromptStage[] {
+  return PROMPT_STAGES.filter(stage => profile.stages?.[stage]?.prompt !== undefined)
 }
 
 /** One glob dimension match: absent or `*` accepts anything. */
@@ -321,6 +343,9 @@ export class PromptRegistry {
     // The two layers above the built-in default are the user speaking; the
     // fallback is the plugin's own choice, which the call site adapts per route.
     const explicitEffort = override?.reasoningEffort ?? fromProfile?.reasoningEffort
+    const promptFrom: PromptSource = override?.prompt !== undefined
+      ? 'override'
+      : fromProfile?.prompt !== undefined ? 'profile' : 'builtin'
     return {
       stage,
       prompt: override?.prompt ?? fromProfile?.prompt ?? DEFAULT_PROFILE.stages![stage]!.prompt!,
@@ -329,6 +354,7 @@ export class PromptRegistry {
       reasoningEffort: explicitEffort ?? fallback.reasoningEffort,
       reasoningEffortExplicit: explicitEffort !== undefined,
       profile: profile.name,
+      promptFrom,
     }
   }
 

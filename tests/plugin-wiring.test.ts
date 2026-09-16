@@ -236,19 +236,19 @@ describe('apply() boot wiring', () => {
     expect(report).toContain('[prompts]')
     expect(report).toContain('configured: default')
     expect(report).toContain('route: (none observed yet')
-    expect(report).toContain('extraction: profile default, maxTokens 8192, effort off')
-    expect(report).toContain('entityMerge: profile default, maxTokens 4096, effort off')
-    expect(report).toContain('supersede: profile default, maxTokens 4096, effort off')
-    expect(report).toContain('queryExpansion: profile default, maxTokens 1024, effort off, timeoutMs 30000')
-    expect(report).toContain('queryDistill: profile default, maxTokens 1024, effort off, timeoutMs 30000')
+    expect(report).toContain('extraction: prompt from profile default, maxTokens 8192, effort off')
+    expect(report).toContain('entityMerge: prompt from profile default, maxTokens 4096, effort off')
+    expect(report).toContain('supersede: prompt from profile default, maxTokens 4096, effort off')
+    expect(report).toContain('queryExpansion: prompt from profile default, maxTokens 1024, effort off, timeoutMs 30000')
+    expect(report).toContain('queryDistill: prompt from profile default, maxTokens 1024, effort off, timeoutMs 30000')
   })
 
   it('keeps the legacy extraction bounds working through the override layer', async () => {
     const h = boot({ extractionMaxTokens: 4242, extractionCallTimeoutMs: 9000 })
     const report = await status(h)
-    expect(report).toContain('extraction: profile default, maxTokens 4242, effort off, timeoutMs 9000')
+    expect(report).toContain('extraction: prompt from profile default, maxTokens 4242, effort off, timeoutMs 9000')
     // Legacy keys describe the extraction stage alone.
-    expect(report).toContain('entityMerge: profile default, maxTokens 4096')
+    expect(report).toContain('entityMerge: prompt from profile default, maxTokens 4096')
   })
 
   it('selects a profile from the route the session actually used', async () => {
@@ -261,11 +261,12 @@ describe('apply() boot wiring', () => {
     observeRoute(h)
     const report = await status(h)
     expect(report).toContain(`route: ${ROUTE.provider}/${ROUTE.model}`)
-    expect(report).toContain('extraction: profile v41, maxTokens 8192')       // prompt from default, budget from the stage default
+    // v41 只声明了 entityMerge 的预算与档位，没有 prompt：逐阶段来源必须自报内置默认。
+    expect(report).toContain('extraction: prompt from built-in default (profile v41 declares no extraction), maxTokens 8192')
     // `high` means thinking is on, so the budget actually sent is 16384 × the
     // default 3x thinking headroom (see the "adaptive reasoning effort" suite).
-    expect(report).toContain('entityMerge: profile v41, maxTokens 49152 (16384 × 3 thinking headroom), effort high')
-    expect(report).toContain('supersede: profile v41, maxTokens 4096, effort off')
+    expect(report).toContain('entityMerge: prompt from built-in default (profile v41 declares no entityMerge), maxTokens 49152 (16384 × 3 thinking headroom), effort high')
+    expect(report).toContain('supersede: prompt from built-in default (profile v41 declares no supersede), maxTokens 4096, effort off')
     // The catch-all matches nothing here because the first match wins.
     expect(report).toContain('configured: default, v41, catch-all')
   })
@@ -279,7 +280,7 @@ describe('apply() boot wiring', () => {
       ],
     })
     observeRoute(h)
-    expect(await status(h)).toContain('extraction: profile forced, maxTokens 777')
+    expect(await status(h)).toContain('extraction: prompt from built-in default (profile forced declares no extraction), maxTokens 777')
   })
 
   it('records each stage profile selection in the debug log', async () => {
@@ -312,9 +313,9 @@ describe('apply() boot wiring', () => {
     expect(report).toContain('route: chat-host/session-large')
     expect(report).toContain('extraction override: memory-host/small-8b — stages above are matched on this route')
     // Every stage follows the override, including the write path and query side.
-    expect(report).toContain('extraction: profile for-memory-model, maxTokens 222')
-    expect(report).toContain('entityMerge: profile for-memory-model')
-    expect(report).toContain('queryExpansion: profile for-memory-model')
+    expect(report).toContain('extraction: prompt from built-in default (profile for-memory-model declares no extraction), maxTokens 222')
+    expect(report).toContain('entityMerge: prompt from built-in default (profile for-memory-model declares no entityMerge)')
+    expect(report).toContain('queryExpansion: prompt from built-in default (profile for-memory-model declares no queryExpansion)')
     // The session's profile is configured but must not be selected by any stage.
     expect(report).toContain('configured: default, for-session-model, for-memory-model')
     expect(report).not.toContain('profile for-session-model')
@@ -326,7 +327,7 @@ describe('apply() boot wiring', () => {
     })
     observeRoute(h, { provider: 'chat-host', model: 'session-large' })
     const report = await status(h)
-    expect(report).toContain('extraction: profile by-session, maxTokens 333')
+    expect(report).toContain('extraction: prompt from built-in default (profile by-session declares no extraction), maxTokens 333')
     expect(report).not.toContain('extraction override')
   })
 
@@ -398,24 +399,24 @@ describe('settings page coupling', () => {
   it('applies a profile chosen in the settings card without a restart', async () => {
     const h = boot({ promptProfiles: [{ name: 'alpha', match: { model: 'm' } }] })
     observeRoute(h, { provider: 'p', model: 'other' })
-    expect(await status(h)).toContain('extraction: profile default')
+    expect(await status(h)).toContain('extraction: prompt from profile default')
     h.settings.push({ promptProfile: 'alpha' })
-    expect(await status(h)).toContain('extraction: profile alpha')
+    expect(await status(h)).toContain('extraction: prompt from built-in default (profile alpha declares no extraction)')
     h.settings.push({ promptProfile: 'default' })
-    expect(await status(h)).toContain('extraction: profile default')
+    expect(await status(h)).toContain('extraction: prompt from profile default')
   })
 
   it('switches the profile directory from the settings card', async () => {
     const h = boot()
     const alt = join(dir, 'alt')
     mkdirSync(alt, { recursive: true })
-    writeFileSync(join(alt, 'x.json'), JSON.stringify([{ name: 'from-alt', stages: { supersede: { maxTokens: 777 } } }]), 'utf8')
+    writeFileSync(join(alt, 'from-alt.prompts'), '@@ stage supersede maxTokens=777\nAdjudicate.\n{lines}\n@@ end\n', 'utf8')
     expect(await status(h)).toContain('configured: default')
     h.settings.push({ promptProfilesDir: alt, promptProfile: 'from-alt' })
     const report = await status(h)
     expect(report).toContain('configured: default, from-alt')
     expect(report).toContain(`profiles dir: ${alt}`)
-    expect(report).toContain('supersede: profile from-alt, maxTokens 777')
+    expect(report).toContain('supersede: prompt from profile from-alt, maxTokens 777')
   })
 
   it('refuses a profile name the deployment does not define', () => {
@@ -429,20 +430,26 @@ describe('settings page coupling', () => {
 describe('external profile files', () => {
   it('loads profiles from <dataDir>/prompts and reports the directory', async () => {
     mkdirSync(join(dir, 'prompts'), { recursive: true })
-    writeFileSync(join(dir, 'prompts', 'models.json'), JSON.stringify([
-      { name: 'from-file', match: { model: 'file-model' }, stages: { entityMerge: { maxTokens: 2048 } } },
-    ]), 'utf8')
+    writeFileSync(join(dir, 'prompts', 'from-file.prompts'), [
+      'model: file-model',
+      '',
+      '@@ stage entityMerge maxTokens=2048',
+      'Resolve every new mention below.',
+      '{lines}',
+      '@@ end',
+      '',
+    ].join('\n'), 'utf8')
     const h = boot()
     observeRoute(h, { provider: 'p', model: 'file-model' })
     const report = await status(h)
     expect(report).toContain('configured: default, from-file')
     expect(report).toContain(`profiles dir: ${join(dir, 'prompts')}`)
-    expect(report).toContain('models.json')
-    expect(report).toContain('entityMerge: profile from-file, maxTokens 2048')
+    expect(report).toContain('from-file.prompts')
+    expect(report).toContain('entityMerge: prompt from profile from-file, maxTokens 2048')
   })
 
   it('refuses to boot on an invalid profile file instead of calling the model with it', () => {
-    writeFileSync(join(dir, 'broken.json'), JSON.stringify({ name: 'broken', stages: { extraction: { prompt: 'no placeholder' } } }), 'utf8')
+    writeFileSync(join(dir, 'broken.prompts'), '@@ stage extraction\nno placeholder here\n@@ end\n', 'utf8')
     expect(() => boot({ promptProfilesDir: '.' })).toThrow(/required placeholder/)
   })
 })
@@ -906,15 +913,15 @@ describe('adaptive reasoning effort', () => {
     const report = await status(h)
     expect(report).toContain('thinking headroom: 3x when thinking is on')
     // 实际发出值 + 配置值与倍数；档位被适配掉时也显示出来（off → low）。
-    expect(report).toContain('extraction: profile default, maxTokens 24576 (8192 × 3 thinking headroom), effort off → low')
-    expect(report).toContain('queryExpansion: profile default, maxTokens 3072 (1024 × 3 thinking headroom), effort off → low, timeoutMs 30000')
+    expect(report).toContain('extraction: prompt from profile default, maxTokens 24576 (8192 × 3 thinking headroom), effort off → low')
+    expect(report).toContain('queryExpansion: prompt from profile default, maxTokens 3072 (1024 × 3 thinking headroom), effort off → low, timeoutMs 30000')
 
     // headroom=1：策略行说明余量关闭，各阶段报配置值本身。
     const off1 = boot({ thinkingTokenHeadroom: 1 }, undefined, noOff)
     observeRoute(off1)
     const report1 = await status(off1)
     expect(report1).toContain('thinking headroom: off (1x')
-    expect(report1).toContain('extraction: profile default, maxTokens 8192, effort off → low')
+    expect(report1).toContain('extraction: prompt from profile default, maxTokens 8192, effort off → low')
   })
 })
 
