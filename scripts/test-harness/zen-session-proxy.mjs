@@ -26,6 +26,15 @@ const UPSTREAM = process.env.ZEN_UPSTREAM ?? 'https://opencode.ai/zen/go'
 const SESSION_ID = process.env.ZEN_SESSION_ID ?? `memoplus4dsh-bench-${randomBytes(8).toString('hex')}`
 const PORT = Number(process.env.ZEN_PROXY_PORT ?? 0)
 
+// A dead proxy silently poisons a long benchmark run (queries recorded as
+// empty answers). Never let one bad socket kill the process.
+process.on('uncaughtException', error => {
+  console.error(`uncaughtException (kept alive): ${error.message}`)
+})
+process.on('unhandledRejection', error => {
+  console.error(`unhandledRejection (kept alive): ${error instanceof Error ? error.message : String(error)}`)
+})
+
 const server = createServer((req, res) => {
   const chunks = []
   req.on('data', c => chunks.push(c))
@@ -57,13 +66,19 @@ const server = createServer((req, res) => {
       return
     }
     // Verbatim streaming passthrough (no payload inspection or rewrite).
-    const reader = upstream.body.getReader()
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      res.write(Buffer.from(value))
+    // The upstream socket dying mid-stream (UND_ERR_SOCKET) must not crash
+    // the proxy: end the response, log, keep serving later requests.
+    try {
+      const reader = upstream.body.getReader()
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        res.write(Buffer.from(value))
+      }
+    } catch (error) {
+      console.error(`upstream stream error (kept alive): ${error.message}`)
     }
-    res.end()
+    try { res.end() } catch { /* client already gone */ }
   })
 })
 
