@@ -194,7 +194,7 @@ def main():
     dataset_config.setdefault("debug", False)
     agent_config = {
         "agent_name": AGENT_NAME,
-        "model": "deepseek-v4-flash",
+        "model": os.environ.get("BENCH_MODEL", "deepseek-v4-flash"),
         "combo": "deepseek-harness sdk profile + memoplus4dsh (default config)",
         "retrieve_num": 8,
     }
