@@ -227,7 +227,7 @@ class MemoplusDshAgent:
         session = f"bench-q{self._query_count}-{self.context_tag}"
         start = time.time()
         try:
-            resp = self.driver.call("ask", session=session, text=query, timeout=900)
+            resp = self.driver.call("ask", session=session, text=query, timeout=int(os.environ.get("BENCH_ASK_TIMEOUT", "900")))
         except DriverError as error:
             query_time = time.time() - start
             print(f"\n[ask] query failed after {query_time:.0f}s ({error}); recorded as wrong answer")
