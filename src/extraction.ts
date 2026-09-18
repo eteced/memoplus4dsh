@@ -5,7 +5,8 @@
  * with its validated rules (pronoun/back-reference resolution, one row per
  * list item, `is` for static attributes, DETAILS column, verbatim time
  * expressions), the fault-tolerant pipe parser, the relevance-filtered
- * known-entities hint, and a serial extraction queue with bounded retries.
+ * known-entities hint, and a paced extraction queue with bounded, jittered
+ * retries whose backoff waits outside the worker slots.
  */
 
 import type { Entity, EntityType, MemoryEvent, MemoryStore, NewEvent, TimePrecision } from './store.js'
@@ -15,6 +16,7 @@ import type { LlmEntityMerger, MergeMention } from './entity-merge.js'
 import type { LlmSupersedeResolver } from './supersede.js'
 import type { NerDetector } from './ner.js'
 import { NULL_NER } from './ner.js'
+import { renderPrompt } from './text.js'
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs'
 
 /**
@@ -63,6 +65,18 @@ Rules:
 - Do NOT extract instructions, rules, or meta statements about the task or conversation itself (e.g. "answer only from the knowledge pool", "each fact has a serial number") — only facts about people, things, and events.
 - ONLY output facts from this turn.
 - Write NORMALIZED_FACT and DETAILS in the same language as the conversation turn.
+
+Predicates already recorded for the entities above. PREDICATE is a reused identifier, not free prose:
+- When this turn states a relation one of these already names, copy that EXACT string into PREDICATE — same letters, same singular or plural. Do not write "supports" where the record says "support"; do not restate "exist" as "is_in" or "has". Invent a new predicate only when none of them names the relation.
+- Never record one relation under two different predicate strings across turns.
+Recorded predicates: {recorded_predicates}
+
+Negation is carried by OBJECT, never by PREDICATE:
+- Keep PREDICATE positive and identical between a fact and its negation: write "support" for both "supports" and "does not support".
+- When the relation has a target, prefix the target with "not " in OBJECT: OBJECT=image input versus OBJECT=not image input.
+- When the relation has no target (existence, installed, available, supported), put the truth value in OBJECT: OBJECT=true, or OBJECT=false for a negation.
+- Never write does_not_, cannot_, is_not_, has_no, or a Chinese negation (不/没/未/无/非) inside PREDICATE.
+- Record only what is true now. A turn that corrects an earlier statement yields one row stating the current value; never add a row describing what was previously believed.
 
 Conversation turn:
 {turn_text}
@@ -131,6 +145,48 @@ function parsePipeRow(parts: string[]): ExtractedRow | null {
  * Parse pipe-separated model output into entity and event rows. Fault
  * tolerant: blank lines, headers, and malformed rows are skipped.
  */
+/**
+ * Distinct predicates already recorded for the entities this segment names.
+ *
+ * Predicates were never fed back — only entity names were — so the extraction
+ * model could not reuse one it had already produced, and free-form predicate
+ * drift was structural rather than a compliance failure. Measured on retraction
+ * turns: with this list present both the `not_`-prefix and the polarity-in-
+ * OBJECT conventions reached 7-8/8 paired retractions; without it, 2/4. The
+ * load-bearing change is the reuse, not the convention.
+ *
+ * Only entities the segment mentions contribute, so the block stays bounded by
+ * the turn rather than by the graph.
+ * @param store - Graph the recorded predicates come from.
+ * @param entities - Entities the caller already resolved for this segment.
+ * @param contextText - The segment whose mentions select contributing entities.
+ * @returns Comma-separated predicates, or `(none yet)` when nothing applies.
+ */
+export function formatRecordedPredicates(
+  store: MemoryStore,
+  entities: readonly Entity[],
+  contextText: string,
+): string {
+  const lower = contextText.toLowerCase()
+  const predicates = new Set<string>()
+  for (const entity of entities) {
+    const names = [entity.canonicalName, ...entity.aliases]
+    if (!names.some(name => name.length > 1 && lower.includes(name.toLowerCase()))) continue
+    for (const event of store.eventsForEntity(entity.id)) {
+      if (event.predicate.length > 0) predicates.add(event.predicate)
+    }
+  }
+  if (predicates.size === 0) return '(none yet)'
+  return [...predicates].slice(0, RECORDED_PREDICATE_LIMIT).join(', ')
+}
+
+/**
+ * Cap on fed-back predicates per segment. One long-lived entity can carry
+ * hundreds; the block is prompt text paid on every turn, and the point is
+ * reuse of the recent vocabulary, not a full dictionary.
+ */
+export const RECORDED_PREDICATE_LIMIT = 60
+
 export function parseExtractionOutput(text: string): ParsedExtraction {
   const entities = new Map<string, { type: EntityType; canonical: string; aliases: string[] }>()
   const events: ExtractedRow[] = []
@@ -215,6 +271,16 @@ export function formatKnownEntities(
   }
   return result
 }
+
+/**
+ * 抽取调用没有产出任何可见文本时的错误前缀。
+ *
+ * 放在这里是为了让"空内容"只有一个字面量来源：`ExtractionPipeline` 直接装配
+ * 时抛它；线上装配（`src/index.ts` 的 `callPluginLlm`）用同一个字面量抛出，
+ * 并在后面无条件补上流现场（finish/chunks/chars）——只有那一层看得到全部
+ * chunk，是唯一能取证的位置。
+ */
+export const EMPTY_EXTRACTION_ERROR = 'extraction produced empty content'
 
 /** Minimal fact length below which a row is dropped as too weak. */
 export const MIN_FACT_LENGTH = 12
@@ -312,6 +378,14 @@ export interface ExtractionPipelineOptions {
   store: MemoryStore
   /** One LLM call: prompt in, raw text out. Throws on failure. */
   callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
+  /**
+   * Extraction template, or a resolver called once per turn. Defaults to
+   * {@link EXTRACTION_PROMPT_TURN}. A prompt profile supplies an override, so
+   * it must keep `{turn_text}` and may keep `{known_entities}` /
+   * `{candidate_mentions}`. The resolver form exists because the route is
+   * per turn: extraction follows the route the turn was recorded with.
+   */
+  prompt?: string | ((job: ExtractionJob) => string)
   /** Optional LLM entity-merge adjudication for exact-miss mentions (m11). */
   entityMerger?: LlmEntityMerger
   /** Optional LLM supersede detection for same-(subject, predicate) updates (m11 P1-B). */
@@ -327,6 +401,7 @@ export interface ExtractionPipelineOptions {
 export class ExtractionPipeline {
   private readonly store: MemoryStore
   private readonly callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
+  private readonly promptFor: (job: ExtractionJob) => string
   private readonly entityMerger?: LlmEntityMerger
   private readonly supersedeResolver?: LlmSupersedeResolver
   private readonly ner: NerDetector
@@ -334,6 +409,8 @@ export class ExtractionPipeline {
   constructor(options: ExtractionPipelineOptions) {
     this.store = options.store
     this.callLlm = options.callLlm
+    const source = options.prompt
+    this.promptFor = typeof source === 'function' ? source : () => source ?? EXTRACTION_PROMPT_TURN
     this.entityMerger = options.entityMerger
     this.supersedeResolver = options.supersedeResolver
     this.ner = options.ner ?? NULL_NER
@@ -348,19 +425,32 @@ export class ExtractionPipeline {
     // and the rows are merged.
     const rows: ExtractedRow[] = []
     for (const segment of segmentTurnText(turnText)) {
-      const known = formatKnownEntities(this.store.listEntities(), segment)
+      const template = this.promptFor(job)
+      const entities = this.store.listEntities()
+      const known = formatKnownEntities(entities, segment)
+      // A prompt that carries no such block pays no graph scan for it: the
+      // default profile is frozen at v0.1 and does not mention the placeholder.
+      const recorded = template.includes('{recorded_predicates}')
+        ? formatRecordedPredicates(this.store, entities, segment)
+        : ''
       // m12: NER 候选区（检测器不可用 → 无候选，与旧行为一致）
       const mentions = await this.ner.detect(segment)
       const candidateMentions = mentions === null || mentions.length === 0
         ? '(none)'
         : mentions.map(m => `${m.text} (${m.type})`).join(', ')
-      // Replacement-function form: turn text may contain $-patterns.
-      const prompt = EXTRACTION_PROMPT_TURN
-        .replace('{turn_text}', () => segment)
-        .replace('{known_entities}', () => known)
-        .replace('{candidate_mentions}', () => candidateMentions)
+      // One-pass substitution: an inserted turn text is never rescanned, so a
+      // turn that literally contains a placeholder name stays literal.
+      const prompt = renderPrompt(template, {
+        '{turn_text}': segment,
+        '{known_entities}': known,
+        '{candidate_mentions}': candidateMentions,
+        '{recorded_predicates}': recorded,
+      })
       const raw = (await this.callLlm(prompt, job)).trim()
-      if (raw.length === 0) throw new Error('extraction produced empty content')
+      // 这条守卫兜住不走 callPluginLlm 的调用方（直接装配 pipeline 的场景）；
+      // 线上装配在 callPluginLlm 里就地抛错，那里能带上流现场信息，见
+      // `src/index.ts` 的 EMPTY_EXTRACTION_ERROR 用法。
+      if (raw.length === 0) throw new Error(EMPTY_EXTRACTION_ERROR)
       const parsed = parseExtractionOutput(raw)
       coerceSpeakerTypes(parsed, speakers)
       rows.push(...parsed.events.filter(row => row.fact.length >= MIN_FACT_LENGTH))
@@ -458,20 +548,91 @@ export class ExtractionPipeline {
   }
 }
 
+/**
+ * Default retry backoff: delay before retry attempt N+1, in ms; the last entry
+ * repeats, each entry jittered by ±{@link RETRY_JITTER_RATIO}. 15s/60s/180s/600s
+ * instead of the old 5s/30s because the upstream gateway fails in windows
+ * lasting tens of seconds (2026-09-13 incident): sub-10s retries burned a full
+ * prompt per attempt and still landed inside the same bad window.
+ */
+export const DEFAULT_EXTRACTION_RETRY_DELAY_MS: readonly number[] = [15_000, 60_000, 180_000, 600_000]
+
+/** Retries after the first attempt (default 4, i.e. five attempts per round). */
+export const DEFAULT_EXTRACTION_MAX_RETRIES = 4
+
+/**
+ * Minimum spacing between adjacent job *starts*, in ms (default). The queue
+ * used to start every queued job back-to-back, so a restart with a backlog
+ * fired all of it at the gateway as one burst — straight into a failing
+ * window. 3s spreads 14 backlogged turns over ~40s and is imperceptible for a
+ * live turn (one job, started immediately).
+ */
+export const DEFAULT_EXTRACTION_JOB_INTERVAL_MS = 3_000
+
+/** Retry-delay jitter as a fraction of the nominal delay (±20%). */
+export const RETRY_JITTER_RATIO = 0.2
+
+/**
+ * Default extraction worker pool size (3).
+ *
+ * The pool size is *not* the burst-rate lever: {@link
+ * DEFAULT_EXTRACTION_JOB_INTERVAL_MS} (3s) is measured between adjacent job
+ * *starts*, so three in-flight jobs still start 3s apart and the request rate
+ * at the gateway is unchanged. What 3 buys is that a job waiting out a retry
+ * backoff (up to 10 minutes) no longer owns the only slot: with concurrency=1
+ * the pool would be idle-but-busy for the whole wait while other turns sat in
+ * the queue. Retries are unchanged per job; each job's attempts stay serial and
+ * bounded by the same retry rules.
+ */
+export const DEFAULT_EXTRACTION_CONCURRENCY = 3
+
+/**
+ * Apply ±{@link RETRY_JITTER_RATIO} jitter to one retry delay, so jobs that
+ * failed together do not retry in lockstep and re-create the burst.
+ *
+ * @param baseMs - Nominal delay in ms.
+ * @param random - Random source in [0,1); injectable so tests can pin it.
+ * @returns Delay in [0.8·baseMs, 1.2·baseMs], rounded to whole ms.
+ */
+export function jitterRetryDelay(baseMs: number, random: () => number = Math.random): number {
+  return Math.round(baseMs * (1 + RETRY_JITTER_RATIO * (2 * random() - 1)))
+}
+
 export interface ExtractionQueueOptions {
-  /** Retries after the first attempt; the job is skipped once exhausted. Default 2. */
+  /**
+   * Retries after the first attempt before the round is booked failed.
+   * Default {@link DEFAULT_EXTRACTION_MAX_RETRIES} (4): the endpoint recovers
+   * on a minutes scale, and a turn's memories are worth more than the calls.
+   */
   maxRetries?: number
   /**
    * Delay before retry attempt N (1-based), in ms; the last entry repeats.
-   * Default [5000, 30000]: immediate retries mostly re-hit the same
-   * rate-limit/timeout while burning another full prompt.
+   * Default {@link DEFAULT_EXTRACTION_RETRY_DELAY_MS}: a few dense retries
+   * cannot outlast the upstream's multi-second-to-minute fault windows, so
+   * each attempt waits long enough for the window to close.
    */
-  retryDelayMs?: number[]
+  retryDelayMs?: readonly number[]
   /**
-   * Worker pool size (default 1 = strict serial). >1 overlaps extraction
-   * calls — the main lever against wall-clock cost on write-heavy loads
-   * (LME context ingest: ~50min serial). Raise only when the endpoint's
-   * rate limit tolerates it; retries/backoff are unchanged per job.
+   * Minimum delay between two fresh job starts, in ms; 0 disables. Default
+   * {@link DEFAULT_EXTRACTION_JOB_INTERVAL_MS}. Applies to start-up requeues,
+   * in-run requeues, and fresh enqueues alike — one spacing rule for every path
+   * into the queue. A re-queued retry is not paced again: its jittered backoff
+   * is already the spacing.
+   */
+  jobIntervalMs?: number
+  /**
+   * Random source for retry jitter in [0,1); injectable so tests can pin the
+   * delay. Default `Math.random`.
+   */
+  random?: () => number
+  /**
+   * Worker pool size (default {@link DEFAULT_EXTRACTION_CONCURRENCY} = 3). >1
+   * overlaps extraction calls and shortens the wall clock only when the start
+   * interval allows it: the interval is measured between starts, so it paces
+   * the pool rather than being bypassed by it. The default is 3 rather than 1
+   * because starts — not slots — set the request rate, and a slot that would
+   * otherwise be held by a job waiting out a minutes-long retry can serve the
+   * next turn instead. Retries/backoff are unchanged per job.
    */
   concurrency?: number
   /** Called when a job is skipped after exhausting retries. */
@@ -481,29 +642,64 @@ export interface ExtractionQueueOptions {
 }
 
 /**
- * Extraction queue: keyed dedupe, bounded retries, then skip-and-record.
- * The queue never rejects — one failing job must not stall the
- * conversation's memory writes. concurrency=1 keeps the historical strict
- * serial behavior; N>1 runs a small worker pool over the same guarantees.
+ * One queued job plus the attempt number its next worker slot must run.
+ *
+ * `attempt` is 1 for a fresh enqueue and N+1 for a job re-queued after attempt
+ * N failed: the retry chain's bookkeeping travels with the job, so parking it
+ * outside a worker slot loses nothing.
+ */
+interface QueuedJob {
+  job: ExtractionJob
+  attempt: number
+}
+
+/**
+ * Extraction queue: keyed dedupe, paced starts, bounded retries, then
+ * skip-and-record. The queue never rejects — one failing job must not stall the
+ * conversation's memory writes. N>1 runs a small worker pool over the same
+ * guarantees, and `jobIntervalMs` keeps adjacent starts apart so a backlog is
+ * spread instead of fired as one burst at a flaky endpoint.
+ *
+ * A retry backoff is *not* slept inside a worker slot: a failed job with
+ * attempts left is parked on a timer ({@link scheduleRetry}) and its slot is
+ * released immediately, so a 10-minute wait cannot starve the queue even at
+ * concurrency=1. When the timer fires the job re-enters at the *tail*, so a
+ * failing job also cannot jump ahead of the jobs queued behind it.
  */
 export class ExtractionQueue {
   private readonly run: (job: ExtractionJob) => Promise<unknown>
   private readonly maxRetries: number
-  private readonly retryDelayMs: number[]
+  private readonly retryDelayMs: readonly number[]
+  private readonly jobIntervalMs: number
+  private readonly random: () => number
   private readonly concurrency: number
   private readonly onSkip?: (job: ExtractionJob, error: unknown) => void
   private readonly onAttemptFailed?: (job: ExtractionJob, attempt: number, error: unknown) => void
-  private queue: ExtractionJob[] = []
+  private queue: QueuedJob[] = []
   private activeWorkers = 0
   private readonly idleResolvers: (() => void)[] = []
   private pendingKeys = new Set<string>()
   private skippedCount = 0
+  /** Earliest time the next job may start; 0 = no pacing constraint yet. */
+  private nextStartAt = 0
+  /** Pending re-pump scheduled for {@link nextStartAt}; never left dangling. */
+  private pumpTimer: ReturnType<typeof setTimeout> | undefined
+  /**
+   * Delayed retries parked outside any worker slot, keyed by their timer so
+   * {@link close} can clear them all. A non-empty set means the queue is *not*
+   * idle: those jobs are still in flight (their keys stay in
+   * {@link pendingKeys}) and are only waiting for their timer.
+   */
+  private readonly retryTimers = new Set<ReturnType<typeof setTimeout>>()
+  private closed = false
 
   constructor(run: (job: ExtractionJob) => Promise<unknown>, options: ExtractionQueueOptions = {}) {
     this.run = run
-    this.maxRetries = options.maxRetries ?? 2
-    this.retryDelayMs = options.retryDelayMs ?? [5_000, 30_000]
-    this.concurrency = Math.max(1, options.concurrency ?? 1)
+    this.maxRetries = Math.max(0, options.maxRetries ?? DEFAULT_EXTRACTION_MAX_RETRIES)
+    this.retryDelayMs = options.retryDelayMs ?? DEFAULT_EXTRACTION_RETRY_DELAY_MS
+    this.jobIntervalMs = Math.max(0, options.jobIntervalMs ?? DEFAULT_EXTRACTION_JOB_INTERVAL_MS)
+    this.random = options.random ?? Math.random
+    this.concurrency = Math.max(1, options.concurrency ?? DEFAULT_EXTRACTION_CONCURRENCY)
     this.onSkip = options.onSkip
     this.onAttemptFailed = options.onAttemptFailed
   }
@@ -513,69 +709,230 @@ export class ExtractionQueue {
     return this.skippedCount
   }
 
-  /** Enqueue one turn; a duplicate (sessionId, turn) already queued is dropped. */
+  /**
+   * Enqueue one turn; a duplicate (sessionId, turn) already queued is dropped.
+   * A job parked in a delayed retry still owns its key, so re-enqueuing it
+   * during the wait returns false.
+   */
   enqueue(job: ExtractionJob): boolean {
+    if (this.closed) return false
     const key = `${job.sessionId}:${job.turn}`
     if (this.pendingKeys.has(key)) return false
     this.pendingKeys.add(key)
-    this.queue.push(job)
+    this.queue.push({ job, attempt: 1 })
     this.pump()
     return true
   }
 
-  /** Resolves when every job enqueued so far has settled. */
+  /**
+   * Resolves when every job enqueued so far has settled. A job waiting out the
+   * start interval, and equally a job parked in a delayed retry, keeps the
+   * queue from being idle, so this waits for its timer to fire and for it to
+   * settle — it never returns early into a gap between attempts.
+   */
   async whenIdle(): Promise<void> {
-    if (this.queue.length === 0 && this.activeWorkers === 0) return
+    if (this.isIdle()) return
     await new Promise<void>(resolve => this.idleResolvers.push(resolve))
+  }
+
+  /** True when nothing is queued, running, or waiting out a retry backoff. */
+  private isIdle(): boolean {
+    return this.queue.length === 0 && this.activeWorkers === 0 && this.retryTimers.size === 0
+  }
+
+  /** Resolve {@link whenIdle} waiters once the last in-flight job is gone. */
+  private maybeResolveIdle(): void {
+    if (!this.isIdle()) return
+    for (const resolve of this.idleResolvers.splice(0)) resolve()
+  }
+
+  /**
+   * Stop accepting jobs, cancel any pending start timer, drop every parked
+   * retry, drain what is already queued without further spacing, and release
+   * the idle waiters.
+   *
+   * Shutdown (`dispose`) awaits {@link whenIdle}; draining immediately keeps
+   * that wait bounded by the jobs' own call timeouts instead of also paying the
+   * start interval per backlogged job, and clearing the retry timers keeps it
+   * from waiting out a minutes-long retry delay. A job cut short mid-round
+   * books nothing: its durable enqueue line is still in the log, so the next
+   * start retries it with the failure count it already had, and clearing every
+   * timer guarantees a closed and drained queue leaves nothing on the event
+   * loop.
+   */
+  close(): void {
+    if (this.closed) return
+    this.closed = true
+    this.clearPumpTimer()
+    for (const timer of [...this.retryTimers]) clearTimeout(timer)
+    this.retryTimers.clear()
+    this.nextStartAt = 0
+    this.pump()
+    // A queue whose only remaining work was a parked retry is idle now, and no
+    // worker completion will fire to notice it.
+    this.maybeResolveIdle()
+  }
+
+  private clearPumpTimer(): void {
+    if (this.pumpTimer === undefined) return
+    clearTimeout(this.pumpTimer)
+    this.pumpTimer = undefined
   }
 
   private pump(): void {
     while (this.activeWorkers < this.concurrency && this.queue.length > 0) {
-      const job = this.queue.shift()!
-      const key = `${job.sessionId}:${job.turn}`
-      this.activeWorkers++
-      void this.runWithRetries(job).finally(() => {
-        this.activeWorkers--
-        this.pendingKeys.delete(key)
-        this.pump()
-        if (this.activeWorkers === 0 && this.queue.length === 0) {
-          for (const resolve of this.idleResolvers.splice(0)) resolve()
+      const entry = this.queue[0]!
+      // Pace fresh starts while running; a closed queue drains unthrottled.
+      // A re-queued retry (attempt > 1) is *not* interval-paced: its own
+      // jittered backoff already spaces it, and that is what the delay tests
+      // pin — the interval exists to stop a backlog of *new* jobs bursting.
+      if (!this.closed && this.jobIntervalMs > 0 && entry.attempt === 1) {
+        const now = Date.now()
+        if (now < this.nextStartAt) {
+          this.schedulePump(this.nextStartAt - now)
+          return
         }
-      })
+        this.nextStartAt = now + this.jobIntervalMs
+      }
+      this.queue.shift()
+      this.activeWorkers++
+      // The worker's own promise settles when the job settles *or* is parked for
+      // a retry; `parked` is what tells the two apart.
+      let parked = false
+      void this.runWithRetries(entry.job, entry.attempt)
+        .then(value => { parked = value })
+        .finally(() => this.releaseWorker(entry, parked))
     }
   }
 
-  private async runWithRetries(job: ExtractionJob): Promise<void> {
+  /**
+   * Release one worker slot and let the next queued job start.
+   *
+   * @param entry - The job that occupied the slot.
+   * @param parked - True when a delayed retry now owns the job: it is still in
+   * flight, so its dedupe key stays and the queue is not idle.
+   */
+  private releaseWorker(entry: QueuedJob, parked: boolean): void {
+    this.activeWorkers--
+    if (!parked) this.pendingKeys.delete(`${entry.job.sessionId}:${entry.job.turn}`)
+    this.pump()
+    this.maybeResolveIdle()
+  }
+
+  /**
+   * Schedule a re-pump for a paced start. At most one timer is live: the timer
+   * exists only while jobs are queued, and is cleared on close, so it can never
+   * hold the process open after the queue is drained.
+   */
+  private schedulePump(delayMs: number): void {
+    if (this.pumpTimer !== undefined) return
+    this.pumpTimer = setTimeout(() => {
+      this.pumpTimer = undefined
+      this.pump()
+    }, delayMs)
+  }
+
+  /**
+   * Nominal-then-jittered delay before the retry that follows `attempt`.
+   *
+   * @param attempt - The attempt that just failed (1-based).
+   * @returns Jittered delay in ms, or 0 when the configured entry is 0.
+   */
+  private retryDelayFor(attempt: number): number {
+    const base = this.retryDelayMs[attempt - 1] ?? this.retryDelayMs[this.retryDelayMs.length - 1] ?? 0
+    return base > 0 ? Math.max(0, jitterRetryDelay(base, this.random)) : 0
+  }
+
+  /**
+   * Park a job for its backoff *outside* any worker slot, then re-queue it at
+   * the tail and pump. The slot is free for the whole wait, so at concurrency=1
+   * a job waiting out a retry no longer blocks the queue; re-entering at the
+   * tail keeps the order FIFO, so a failing job cannot starve the jobs behind
+   * it. The job keeps its dedupe key and its attempt counter while parked.
+   *
+   * @param job - Job to retry.
+   * @param nextAttempt - Attempt number the re-queued job resumes at.
+   * @param delayMs - Jittered backoff in ms (always > 0).
+   */
+  private scheduleRetry(job: ExtractionJob, nextAttempt: number, delayMs: number): void {
+    const timer = setTimeout(() => {
+      this.retryTimers.delete(timer)
+      if (this.closed) return
+      this.queue.push({ job, attempt: nextAttempt })
+      this.pump()
+    }, delayMs)
+    this.retryTimers.add(timer)
+  }
+
+  /**
+   * Run one job's remaining attempts, releasing the worker slot for any wait
+   * longer than zero.
+   *
+   * @param job - Job to run.
+   * @param firstAttempt - Attempt to resume at (1 for a fresh job).
+   * @returns `true` when the job was parked in a delayed retry (still in
+   * flight, nothing booked), `false` when it settled or was booked skipped.
+   */
+  private async runWithRetries(job: ExtractionJob, firstAttempt = 1): Promise<boolean> {
     const attempts = 1 + this.maxRetries
     let lastError: unknown
-    for (let attempt = 1; attempt <= attempts; attempt++) {
-      if (attempt > 1) {
-        const delay = this.retryDelayMs[attempt - 2] ?? this.retryDelayMs[this.retryDelayMs.length - 1] ?? 0
-        if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay))
-      }
+    for (let attempt = firstAttempt; attempt <= attempts; attempt++) {
       try {
         await this.run(job)
-        return
+        return false
       } catch (error) {
         lastError = error
         this.onAttemptFailed?.(job, attempt, error)
+        if (attempt >= attempts) break
+        const delay = this.retryDelayFor(attempt)
+        // A zero delay has nothing to move off the slot: retry in place, as
+        // before. A close during the backoff abandons the remaining attempts
+        // without booking the round: the durable log still lists the job as
+        // pending.
+        if (delay <= 0) continue
+        if (this.closed) return false
+        this.scheduleRetry(job, attempt + 1, delay)
+        return true
       }
     }
     this.skippedCount++
     this.onSkip?.(job, lastError)
+    return false
   }
 }
 
+/** Abandoned records kept across compaction; oldest loss evidence is dropped first. */
+const ABANDONED_KEPT = 100
+
+/** One outstanding job plus the failure history the log holds for it. */
+export interface OutstandingJob {
+  /** The job to retry; absent when the log kept failures for a compacted-away enqueue. */
+  job?: ExtractionJob
+  sessionId: string
+  turn: number
+  /** Failure rounds survived so far; one round exhausts `extractionMaxRetries`. */
+  failures: number
+  lastError?: string
+  lastAt?: string
+}
+
 /**
- * Durable pending-job log (m8 P2): one JSONL line per enqueue and one
- * settle tombstone per terminal outcome (success or skip). On restart,
- * jobs without a tombstone were interrupted mid-flight and are requeued —
- * a crashed process no longer silently loses a turn's memories.
+ * Durable job log (m8 P2): one JSONL line per enqueue, one per exhausted
+ * retry round, and one terminal tombstone — `settled` for success,
+ * `abandoned` for a turn whose memories were given up on. On restart, jobs
+ * with neither terminal tombstone were interrupted mid-flight or failed
+ * their retries, and are requeued: a crashed process and a failing endpoint
+ * both stop silently losing a turn's memories.
  *
- * The settle tombstone is written synchronously right after the job's
- * terminal callback; the crash window between the store writes inside
- * `extractTurn` and the tombstone is tiny, and a duplicate re-extraction
- * only costs one LLM call plus duplicate rows, never corruption.
+ * A failed round is recorded rather than tombstoned so the job stays
+ * outstanding — retried on the next enqueue and on the next start — until
+ * {@link outstanding} reports the failure cap reached. `abandoned` is the
+ * only record that admits a turn's memories will never be written.
+ *
+ * Terminal records are written synchronously right after the job's terminal
+ * callback; the crash window between the store writes inside `extractTurn`
+ * and the tombstone is tiny, and a duplicate re-extraction only costs one
+ * LLM call plus duplicate rows, never corruption.
  *
  * All I/O is best-effort: persistence must never break extraction.
  */
@@ -583,41 +940,133 @@ export class PendingJobLog {
   constructor(private readonly filePath: string) {}
 
   /**
-   * Enqueued jobs without a settle tombstone — the outstanding backlog.
+   * Outstanding jobs — the backlog, failed-but-retryable rounds included.
    * Read-only, so a live process can report queue health without consuming
    * the log the way {@link loadPending} does.
    *
    * @returns Number of jobs still awaiting a terminal outcome.
    */
   countUnsettled(): number {
-    return this.readUnsettled().size
+    return this.readOutstanding().size
   }
 
-  /** Jobs enqueued but never settled; truncates the file for a fresh start. */
-  loadPending(): ExtractionJob[] {
-    const pending = this.readUnsettled()
+  /**
+   * Outstanding jobs with their failure history, in first-enqueue order.
+   * @returns One entry per job that has neither settled nor been abandoned.
+   */
+  outstanding(): OutstandingJob[] {
+    return [...this.readOutstanding().values()]
+  }
+
+  /**
+   * Failure rounds already survived by one turn.
+   * @param sessionId - Owning session.
+   * @param turn - Turn number within that session.
+   * @returns Completed failure rounds; 0 when the turn is not in the log.
+   */
+  failuresOf(sessionId: string, turn: number): number {
+    return this.readOutstanding().get(`${sessionId}:${turn}`)?.failures ?? 0
+  }
+
+  /**
+   * Turns recorded as abandoned — their memories are not in the graph.
+   * @returns Count of terminal `abandoned` records.
+   */
+  abandonedCount(): number {
+    if (!existsSync(this.filePath)) return 0
+    let abandoned = 0
     try {
-      writeFileSync(this.filePath, '', 'utf8')
+      for (const line of readFileSync(this.filePath, 'utf8').split('\n')) {
+        if (line.trim().length === 0) continue
+        try {
+          if ((JSON.parse(line) as { kind?: string }).kind === 'abandoned') abandoned++
+        } catch {
+          // Skip corrupt lines; a half-written tail line is expected after a crash.
+        }
+      }
+    } catch {
+      return 0
+    }
+    return abandoned
+  }
+
+  /** Jobs enqueued but never settled; compacts the file for a fresh start. */
+  loadPending(): ExtractionJob[] {
+    const pending = this.readOutstanding()
+    try {
+      writeFileSync(this.filePath, this.abandonedLines().join(''), 'utf8')
     } catch {
       // Truncation failure only means the next restart re-reads old lines.
     }
-    return [...pending.values()]
+    return [...pending.values()].flatMap(entry => entry.job === undefined ? [] : [entry.job])
   }
 
-  /** Replay the log into the set of jobs that never settled. */
-  private readUnsettled(): Map<string, ExtractionJob> {
+  /**
+   * Raw `abandoned` lines, newest {@link ABANDONED_KEPT} kept. These are the
+   * only record that a turn's memories will never be written, so compaction
+   * keeps them while recovering the jobs the caller re-records.
+   *
+   * @returns One JSONL line per retained abandoned record.
+   */
+  private abandonedLines(): string[] {
+    if (!existsSync(this.filePath)) return []
+    const kept: string[] = []
+    try {
+      for (const line of readFileSync(this.filePath, 'utf8').split('\n')) {
+        if (line.trim().length === 0) continue
+        try {
+          if ((JSON.parse(line) as { kind?: string }).kind === 'abandoned') kept.push(`${line}\n`)
+        } catch {
+          // Skip corrupt lines; a half-written tail line is expected after a crash.
+        }
+      }
+    } catch {
+      return []
+    }
+    return kept.slice(-ABANDONED_KEPT)
+  }
+
+  /** Replay the log into the outstanding jobs that never reached a terminal outcome. */
+  private readOutstanding(): Map<string, OutstandingJob> {
     if (!existsSync(this.filePath)) return new Map()
-    const pending = new Map<string, ExtractionJob>()
+    const outstanding = new Map<string, OutstandingJob>()
     try {
       for (const line of readFileSync(this.filePath, 'utf8').split('\n')) {
         if (line.trim().length === 0) continue
         try {
           const entry = JSON.parse(line) as
-            | { kind: 'pending'; job: ExtractionJob }
+            | { kind: 'pending'; job: ExtractionJob; failures?: number; lastError?: string; lastAt?: string }
+            | { kind: 'failed'; sessionId: string; turn: number; error?: string; at?: string; failures?: number }
             | { kind: 'settled'; sessionId: string; turn: number }
-          const key = entry.kind === 'pending' ? `${entry.job.sessionId}:${entry.job.turn}` : `${entry.sessionId}:${entry.turn}`
-          if (entry.kind === 'pending') pending.set(key, entry.job)
-          else pending.delete(key)
+            | { kind: 'abandoned'; sessionId: string; turn: number }
+          if (entry.kind === 'pending') {
+            const key = `${entry.job.sessionId}:${entry.job.turn}`
+            const prior = outstanding.get(key)
+            // A requeue carries the failure count and last failure forward, so a
+            // retried turn keeps reporting why it is being retried.
+            const lastError = entry.lastError ?? prior?.lastError
+            const lastAt = entry.lastAt ?? prior?.lastAt
+            outstanding.set(key, {
+              job: entry.job, sessionId: entry.job.sessionId, turn: entry.job.turn,
+              failures: entry.failures ?? prior?.failures ?? 0,
+              ...(lastError === undefined ? {} : { lastError }),
+              ...(lastAt === undefined ? {} : { lastAt }),
+            })
+            continue
+          }
+          const key = `${entry.sessionId}:${entry.turn}`
+          if (entry.kind === 'failed') {
+            const prior = outstanding.get(key)
+            const failures = entry.failures ?? (prior?.failures ?? 0) + 1
+            outstanding.set(key, {
+              ...(prior?.job === undefined ? {} : { job: prior.job }),
+              sessionId: entry.sessionId, turn: entry.turn, failures,
+              ...(entry.error === undefined ? {} : { lastError: entry.error }),
+              ...(entry.at === undefined ? {} : { lastAt: entry.at }),
+            })
+            continue
+          }
+          outstanding.delete(key)
         } catch {
           // Skip corrupt lines; a half-written tail line is expected after a crash.
         }
@@ -625,15 +1074,45 @@ export class PendingJobLog {
     } catch {
       return new Map()
     }
-    return pending
+    return outstanding
   }
 
-  /** Append one enqueue record. */
-  recordEnqueue(job: ExtractionJob): void {
-    this.append({ kind: 'pending', job })
+  /**
+   * Append one enqueue record.
+   * @param job - Job being queued.
+   * @param carry - Failure history to keep for a requeued job, so the reason it
+   * is being retried survives the truncation a requeue follows.
+   */
+  recordEnqueue(job: ExtractionJob, carry: { failures?: number; lastError?: string; lastAt?: string } = {}): void {
+    this.append({ kind: 'pending', job, failures: carry.failures ?? 0, ...(carry.lastError === undefined ? {} : { lastError: carry.lastError }), ...(carry.lastAt === undefined ? {} : { lastAt: carry.lastAt }) })
   }
 
-  /** Append one settle tombstone (success or skip — both are terminal). */
+  /**
+   * Append one failed-round record; the job stays outstanding and retryable.
+   * @param job - Job whose retries were exhausted.
+   * @param error - Last failure message.
+   * @param failures - Completed failure rounds, this one included.
+   */
+  recordFailed(job: ExtractionJob, error: unknown, failures: number): void {
+    this.append({
+      kind: 'failed', sessionId: job.sessionId, turn: job.turn, failures,
+      error: error instanceof Error ? error.message : String(error),
+      at: new Date().toISOString(),
+    })
+  }
+
+  /**
+   * Append the terminal record for a turn whose memories will not be written.
+   * @param sessionId - Owning session.
+   * @param turn - Turn number within that session.
+   * @param error - Last failure message.
+   * @param failures - Completed failure rounds when the cap was reached.
+   */
+  recordAbandoned(sessionId: string, turn: number, error: string, failures: number): void {
+    this.append({ kind: 'abandoned', sessionId, turn, error, failures, at: new Date().toISOString() })
+  }
+
+  /** Append one settle tombstone (success is terminal). */
   recordSettled(sessionId: string, turn: number): void {
     this.append({ kind: 'settled', sessionId, turn })
   }

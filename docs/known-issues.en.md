@@ -31,11 +31,18 @@ and never rewrites payloads).
 
 ## F2 — dsh 0.1.5's default maxTokens=256000 rejected by some gateways (external, mitigated on the benchmark side)
 
-**Symptom**: since 0.1.5, dsh `llm-deepseek` sends `max_tokens: 256000` on every request by default;
+**Symptom** (recorded 2026-09-10): since 0.1.5, dsh `llm-deepseek` sends `max_tokens: 256000` on every request by default;
 the OpenCode Go gateway accepts at most 128000 for deepseek-v4-flash and returns HTTP 400
 `INVALID_REQUEST` beyond that, ending the whole turn with `reason.kind: error`. Because the plugin's
 turn_end extraction deliberately skips errored turns (nothing to extract), ingest appears to run
 normally while the memory graph stays empty — and the query phase then spins on zero memories.
+
+> **Re-verified 2026-09-13: this limit no longer holds.** Calling
+> `POST https://opencode.ai/zen/go/v1/chat/completions` directly (model `deepseek-v4.1-flash`):
+> `max_tokens: 256000` → **HTTP 200**, `384000` → **HTTP 200**, and only `1000000` is rejected
+> (HTTP 400 `invalid_request_error`). The 128000 ceiling in F2 is therefore stale for the current
+> gateway; the mitigations below are kept as history and as a reference if the endpoint regresses.
+> On a pi-ai route a per-model `maxTokens` becomes the request default, so it can be set explicitly.
 
 **Mitigation** (applied to the benchmark profiles): set `config.maxTokens: 65536` on `llm-deepseek`
 in `cordis.patch.yml`. The benchmark side also has two fail-safes (since 2026-09-10):
@@ -49,6 +56,54 @@ in `cordis.patch.yml`. The benchmark side also has two fail-safes (since 2026-09
 
 `src/bridges.ts` landed in M8: goal/change, todo/write, schedule/change, and plan/mode are all projected as memory events (see docs/m8-progress-memory-eval.md). The retrieval layer dedups state-family events as "only the latest for the same entity and family", while full history remains in the graph.
 
+## E1 — Entity over-merging (LLM adjudication quality, drifts with the model)
+
+**Status**: ⚠️ not fixed — v0.2 ships the *means* to fix it (prompt profiles), not a fix.
+
+The adjudication prompt in `src/entity-merge.ts` already states rule 3 ("Merely sharing or resembling a word is NOT enough"), rule 6 ("When unsure, answer 0"), and requires the reason to cite contextual evidence. The model nevertheless **violates the instruction it was given**, typically through **part-whole confusion**:
+
+```json
+{"kind":"entity-merge","mention":"opencode-go-extra","into":"opencode-go",
+ "reason":"opencode-go-extra is a profile/router entry FOR the opencode-go provider."}
+```
+
+The stated reason itself says "for" — a distinct referent — yet the pair was merged. In one real turn (turn 10) at least 4 of 7 merges were wrong; the worst merged nine unrelated model names into the `DeepSeek V4.1 Flash` entity with the reason "Both refer to the DeepSeek V4.1 Flash model family in catalog." — after which asking about V4.1 Flash also surfaces glm/grok/kimi.
+
+**Why it pollutes the *current* state**: merging normalizes `(subject, predicate)` across two different subjects, and the supersede adjudicator then marks a still-true older value `supersededBy` (e.g. `opencode-go has 27 models` replaced by `opencode-go-extra has 1 model`). The supersede *mechanism* is by design (history preserved; discounted 0.3 in present-tense modes only, never in explicit past ranges); the **verdict** is what is wrong.
+
+**Why it is now addressable**: verdict quality depends strongly on which model runs it and with what prompt — exactly the motivation for making prompts profiles in v0.2. Candidate remedies (unverified):
+1. add explicit part-whole / name-suffix counterexamples (`X` vs `X-extra`) to the merge prompt;
+2. raise the confidence bar or require a verbatim evidence span (the reason field is capped at 15 words but never validated);
+3. add a structural guard for one obvious class of "subordinate naming".
+
+**Verification still owed**: a real A/B — replay the same turns under two profiles and compare the wrong-merge count. Clean the existing pollution recorded above first (the journal supports `entity.delete` / `entity.upsert` / `event.delete` / `event.add`, but only while dsh is stopped — otherwise the in-memory snapshot overwrites the edit).
+
+**Reproduction attempt, 2026-09-13: not reproduced, and the conditions cannot be reconstructed (important)**
+
+A new `scripts/ab-merge-prompts.mjs` freezes this entry's two over-merges as ground truth and drives the real `LlmEntityMerger`. Six combinations were run against deepseek-v4.1-flash:
+
+| prompt | thinking | both "must not merge" assertions |
+|---|---|---|
+| default (the built-in profile) | field not sent | ✅ all correct |
+| improved (adds part-whole/suffix and list-vs-item rules) | field not sent | ✅ all correct |
+| default | `off` (**what the live plugin sends**) | ✅ all correct |
+| default | `high` | ✅ all correct |
+| default (noisier: 5 candidates / 8 mentions) | `off` | ✅ all correct |
+
+So the over-merge **does not reproduce under these conditions**, and therefore nothing here demonstrates that changing the prompt fixes it (the improved prompt is no worse, but shows no provable gain). The hypothesis that over-merging came from disabling thinking on the adjudication stage is likewise unsupported — `off` and `high` agreed.
+
+**Hypotheses eliminated by measurement** (not by argument):
+1. ~~"over-merging came from disabling thinking on the adjudication stage"~~ — `off` and `high` agreed, so no;
+2. ~~"this script's candidate set is narrower than production's, which makes the verdict easier"~~ — `candidatesFor()` computes substring/token overlap first and **then adds cosine candidates when an embedder is present** (`src/entity-merge.ts:144`). With a deterministic embedder stub built to rank like the real one, `--candidates-only` shows the candidate sets are **essentially identical** (only 1 of 8 mentions gains 1 extra candidate). Candidate selection is not the reason. I had guessed this one first; it did not survive measurement.
+
+**Gaps that still hold**:
+1. `extraction-debug.jsonl` records only **confirmed merges** (mention / into / reason), never the **full input of the call** — the whole batch of mentions, each one's candidate list, aliases, and known-fact text. The live call's input therefore cannot be reconstructed verbatim; the script's fixture is an approximation.
+2. Each combination ran once (n=1), so a low-probability sample cannot be ruled out; a conclusion needs repeats and a larger sample.
+
+**Concluding recommendation (the first thing to do after v0.2)**: **to make per-model prompt tuning actually iterable, log the adjudication input first** (the mention batch, candidates, aliases, known facts — truncation is fine). Otherwise every improvement is guesswork validated only by "run it in production for a while". That is the prerequisite for turning `ab-merge-prompts.mjs` from a smoke test into a regression test, and for moving E1 from "unfixed" to verifiably fixed.
+
+**Observability**: every confirmed merge records its `reason` in `<dataDir>/extraction-debug.jsonl` (`kind: entity-merge`), so over-merges are auditable after the fact.
+
 ## Others
 
 - **Extraction consumes API quota**: each completed turn triggers one extraction call (plus query expansion during retrieval, disk-cached per query). If cost matters, use `extraction: 'off'` or `queryExpansion: false`.
@@ -58,3 +113,4 @@ in `cordis.patch.yml`. The benchmark side also has two fail-safes (since 2026-09
 - **Single-instance assumption**: the same `dataDir` should only be used by one dsh instance. If two instances run against the same data directory simultaneously, whichever snapshots later will overwrite the other's journal increments (M6 review of M4). Plugin hot-reload drains the queue, so the in-process scenario is safe.
 - **Embedding initialization failure is cached until process restart**: if the model download fails on first retrieval (network hiccup), keyword fallback persists for the lifetime of the process (M6 review, minor). Restart dsh to retry.
 - **When HuggingFace is unreachable**: use `hfBaseUrl` to configure a mirror (e.g. `https://hf-mirror.com`).
+- **`install.sh` rewrites the managed block wholesale, so config inside it is lost**: `scripts/_patch_yml.py add` *replaces* an existing block with the same marker rather than merging it (deliberate, for idempotency). Since v0.2 users put `promptProfiles` / `prompts` / `embeddingModels` and friends into `config`; written **inside** the managed block they are silently dropped the next time `install.sh` runs (the README's Update section, and `test-harness/start-test.sh` on every boot). Write them in a separate patch entry targeting `id: memoplus4dsh` instead — verified with the real loader (`dsh web --dump-config`) that such an entry **replaces the row's entire config**, so restate the keys you keep. Memory data is never affected. **Improvement not made**: have `install.sh` merge the block's `config` instead of replacing it.

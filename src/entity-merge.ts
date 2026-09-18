@@ -46,6 +46,12 @@ export interface LlmEntityMergerOptions {
   embedder?: TextEmbedder
   /** One LLM call: prompt in, raw text out. Receives the job for routing. */
   callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
+  /**
+   * Adjudication template, or a resolver called once per turn (the route is
+   * per turn). Defaults to {@link MERGE_ADJUDICATION_PROMPT}; an override must
+   * keep `{lines}`.
+   */
+  prompt?: string | ((job: ExtractionJob) => string)
   /** Cosine floor for candidate retrieval (loose; the LLM adjudicates). Default 0.6. */
   candidateThreshold?: number
   /** Max candidates per mention. Default 5. */
@@ -58,6 +64,7 @@ export class LlmEntityMerger {
   private readonly store: MemoryStore
   private readonly embedder?: TextEmbedder
   private readonly callLlm: (prompt: string, job: ExtractionJob) => Promise<string>
+  private readonly promptFor: (job: ExtractionJob) => string
   private readonly candidateThreshold: number
   private readonly topCandidates: number
   private readonly onLog?: (entry: Record<string, unknown>) => void
@@ -68,6 +75,8 @@ export class LlmEntityMerger {
     this.store = options.store
     this.embedder = options.embedder
     this.callLlm = options.callLlm
+    const source = options.prompt
+    this.promptFor = typeof source === 'function' ? source : () => source ?? MERGE_ADJUDICATION_PROMPT
     this.candidateThreshold = options.candidateThreshold ?? 0.6
     this.topCandidates = options.topCandidates ?? 5
     this.onLog = options.onLog
@@ -100,7 +109,7 @@ export class LlmEntityMerger {
         return `${j + 1}) "${c.canonicalName}" (${c.type}, aka: ${c.aliases.join('/') || '-'}, known fact: "${sample}")`
       }).join(' '),
     ).join('\n')
-    const prompt = MERGE_ADJUDICATION_PROMPT.replace('{lines}', () => lines)
+    const prompt = this.promptFor(job).replace('{lines}', () => lines)
 
     let raw: string
     try {

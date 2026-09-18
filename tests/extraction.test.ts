@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync, appendFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, appendFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   EXTRACTION_PROMPT_TURN,
   ExtractionPipeline,
@@ -11,6 +11,7 @@ import {
   coerceSpeakerTypes,
   extractSpeakers,
   formatKnownEntities,
+  jitterRetryDelay,
   parseExtractionOutput,
   segmentTurnText,
   resolveEventTime,
@@ -208,13 +209,16 @@ describe('ExtractionQueue', () => {
   it('runs jobs serially and in order', async () => {
     const order: number[] = []
     const inFlight: number[] = []
+    // jobIntervalMs: 0: these unit tests are not rate-limited, and the pacing
+    // default is 3000ms; spacing itself is covered by the pacing tests below.
+    // concurrency: 1 is explicit because this test asserts strict serial order.
     const queue = new ExtractionQueue(async job => {
       inFlight.push(job.turn)
       expect(inFlight).toHaveLength(1)
       await new Promise(r => setTimeout(r, 5))
       inFlight.pop()
       order.push(job.turn)
-    })
+    }, { concurrency: 1, jobIntervalMs: 0 })
     queue.enqueue(makeJob({ turn: 0 }))
     queue.enqueue(makeJob({ turn: 1 }))
     queue.enqueue(makeJob({ turn: 2 }))
@@ -227,7 +231,7 @@ describe('ExtractionQueue', () => {
     const queue = new ExtractionQueue(async () => {
       calls++
       await new Promise(r => setTimeout(r, 5))
-    })
+    }, { jobIntervalMs: 0 })
     expect(queue.enqueue(makeJob({ turn: 3 }))).toBe(true)
     expect(queue.enqueue(makeJob({ turn: 3 }))).toBe(false)
     expect(queue.enqueue(makeJob({ sessionId: 'session-2', turn: 3 }))).toBe(true)
@@ -240,7 +244,7 @@ describe('ExtractionQueue', () => {
     const queue = new ExtractionQueue(async () => {
       attempts++
       if (attempts < 3) throw new Error('boom')
-    }, { maxRetries: 2, retryDelayMs: [0] })
+    }, { maxRetries: 2, retryDelayMs: [0], jobIntervalMs: 0 })
     queue.enqueue(makeJob())
     await queue.whenIdle()
     expect(attempts).toBe(3)
@@ -259,6 +263,7 @@ describe('ExtractionQueue', () => {
       {
         maxRetries: 1,
         retryDelayMs: [0],
+        jobIntervalMs: 0,
         onSkip: job => skipped.push(job),
         onAttemptFailed: (_job, attempt) => failedAttempts.push(attempt),
       },
@@ -311,6 +316,56 @@ describe('PendingJobLog', () => {
 
   it('returns empty when the file does not exist', () => {
     expect(new PendingJobLog(join(dir, 'nope.jsonl')).loadPending()).toEqual([])
+  })
+
+  describe('countUnsettled', () => {
+    it('counts settled work as zero, not as a line count', () => {
+      // The bug this method exists for: the log keeps one `settled` tombstone per
+      // finished job, so counting lines reports a permanent backlog on a queue
+      // that is in fact empty — and the diagnostics read "growth means extraction
+      // is failing".
+      const path = join(dir, 'pending.jsonl')
+      const log = new PendingJobLog(path)
+      log.recordEnqueue(makeJob({ turn: 1 }))
+      log.recordSettled('session-1', 1)
+      log.recordEnqueue(makeJob({ turn: 2 }))
+      log.recordSettled('session-1', 2)
+      expect(new PendingJobLog(path).countUnsettled()).toBe(0)
+      expect(readFileSync(path, 'utf8').trim().split('\n')).toHaveLength(4)
+    })
+
+    it('counts only the jobs still awaiting a terminal outcome', () => {
+      const path = join(dir, 'pending.jsonl')
+      const log = new PendingJobLog(path)
+      log.recordEnqueue(makeJob({ turn: 1 }))
+      log.recordEnqueue(makeJob({ turn: 2 }))
+      log.recordEnqueue(makeJob({ turn: 3 }))
+      log.recordSettled('session-1', 1)
+      expect(new PendingJobLog(path).countUnsettled()).toBe(2)
+    })
+
+    it('is read-only, so a live queue keeps its crash-recovery log', () => {
+      // loadPending() truncates the file. Reporting queue health must not consume
+      // the log: a drained queue whose log was truncated cannot be requeued after
+      // a crash. This is the contract that keeps countUnsettled separate.
+      const path = join(dir, 'pending.jsonl')
+      const log = new PendingJobLog(path)
+      log.recordEnqueue(makeJob({ turn: 7 }))
+      const before = readFileSync(path, 'utf8')
+      expect(new PendingJobLog(path).countUnsettled()).toBe(1)
+      expect(readFileSync(path, 'utf8')).toBe(before)
+      // And the jobs are still there for an actual recovery.
+      expect(new PendingJobLog(path).loadPending().map(j => j.turn)).toEqual([7])
+    })
+
+    it('tolerates a corrupt tail line and a missing file', () => {
+      const path = join(dir, 'pending.jsonl')
+      const log = new PendingJobLog(path)
+      log.recordEnqueue(makeJob({ turn: 3 }))
+      appendFileSync(path, '{"kind":"pending","job":{"sess', 'utf8')
+      expect(new PendingJobLog(path).countUnsettled()).toBe(1)
+      expect(new PendingJobLog(join(dir, 'nope.jsonl')).countUnsettled()).toBe(0)
+    })
   })
 })
 
@@ -494,7 +549,7 @@ describe('ExtractionQueue concurrency', () => {
     const q = new ExtractionQueue(async job => {
       order.push(job.turn)
       await new Promise(r => setTimeout(r, 5))
-    }, { concurrency: 1 })
+    }, { concurrency: 1, jobIntervalMs: 0 })
     for (const t of [1, 2, 3]) q.enqueue(j(t))
     await q.whenIdle()
     expect(order).toEqual([1, 2, 3])
@@ -508,7 +563,7 @@ describe('ExtractionQueue concurrency', () => {
       maxActive = Math.max(maxActive, active)
       await new Promise(r => setTimeout(r, 20))
       active--
-    }, { concurrency: 3 })
+    }, { concurrency: 3, jobIntervalMs: 0 })
     const t0 = Date.now()
     for (const t of [1, 2, 3, 4, 5, 6, 1]) q.enqueue(j(t))  // 1 是重复，应被去重
     await q.whenIdle()
@@ -519,9 +574,516 @@ describe('ExtractionQueue concurrency', () => {
     const skipped: number[] = []
     const q2 = new ExtractionQueue(async job => {
       if (job.turn === 2) throw new Error('boom')
-    }, { concurrency: 2, maxRetries: 1, retryDelayMs: [1], onSkip: job => { skipped.push(job.turn) } })
+    }, { concurrency: 2, maxRetries: 1, retryDelayMs: [1], jobIntervalMs: 0, onSkip: job => { skipped.push(job.turn) } })
     for (const t of [1, 2, 3]) q2.enqueue(j(t))
     await q2.whenIdle()
     expect(skipped).toEqual([2])
+  })
+})
+
+describe('ExtractionQueue pacing, retry delays, and defaults', () => {
+  // Fake timers keep these exact without dragging the suite: the retry and
+  // pacing delays under test are seconds-to-minutes long, and the injection
+  // points (random) make the jittered numbers deterministic.
+  const withFakeTimers = async (body: () => Promise<void>): Promise<void> => {
+    vi.useFakeTimers({ now: 0 })
+    try {
+      await body()
+    } finally {
+      vi.useRealTimers()
+    }
+  }
+
+  it('waits the configured retry delay before retrying, not a hard-coded one', async () => {
+    await withFakeTimers(async () => {
+      const starts: number[] = []
+      const queue = new ExtractionQueue(async () => {
+        starts.push(Date.now())
+        throw new Error('boom')
+      }, { maxRetries: 2, retryDelayMs: [100, 250], random: () => 0.5, jobIntervalMs: 0 })
+      queue.enqueue(makeJob())
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(starts).toHaveLength(1) // first attempt immediate
+      await vi.advanceTimersByTimeAsync(99)
+      expect(starts).toHaveLength(1) // 100ms is the configured delay, not 5s/30s
+      await vi.advanceTimersByTimeAsync(1)
+      expect(starts).toEqual([0, 100])
+      await vi.advanceTimersByTimeAsync(250)
+      expect(starts).toEqual([0, 100, 350])
+      await idle
+      expect(queue.skipped).toBe(1)
+    })
+  })
+
+  it('keeps the configured minimum interval between adjacent job starts', async () => {
+    await withFakeTimers(async () => {
+      const starts: number[] = []
+      const queue = new ExtractionQueue(async () => { starts.push(Date.now()) }, { jobIntervalMs: 500 })
+      queue.enqueue(makeJob({ turn: 0 }))
+      queue.enqueue(makeJob({ turn: 1 }))
+      queue.enqueue(makeJob({ turn: 2 }))
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(starts).toEqual([0])
+      await vi.advanceTimersByTimeAsync(499)
+      expect(starts).toEqual([0]) // the second job may not start early
+      await vi.advanceTimersByTimeAsync(1)
+      expect(starts).toEqual([0, 500])
+      await vi.advanceTimersByTimeAsync(500)
+      expect(starts).toEqual([0, 500, 1000])
+      await idle
+    })
+  })
+
+  it('spreads a start-up backlog of N jobs instead of firing it as one burst', async () => {
+    await withFakeTimers(async () => {
+      const starts: number[] = []
+      const queue = new ExtractionQueue(async () => { starts.push(Date.now()) }, { jobIntervalMs: 100 })
+      // Exactly how start-up requeue enqueues: one synchronous loop over the backlog.
+      for (let turn = 0; turn < 14; turn++) queue.enqueue(makeJob({ turn }))
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(starts).toEqual([0]) // only the first job goes out immediately
+      await vi.advanceTimersByTimeAsync(13 * 100)
+      expect(starts).toEqual(Array.from({ length: 14 }, (_, i) => i * 100))
+      await idle
+    })
+  })
+
+  it('whenIdle waits for a job still queued behind the start interval', async () => {
+    await withFakeTimers(async () => {
+      const settled: number[] = []
+      const queue = new ExtractionQueue(async job => { settled.push(job.turn) }, { jobIntervalMs: 1_000 })
+      queue.enqueue(makeJob({ turn: 0 }))
+      queue.enqueue(makeJob({ turn: 1 }))
+      let idleResolved = false
+      const idle = queue.whenIdle().then(() => { idleResolved = true })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(settled).toEqual([0])
+      expect(idleResolved).toBe(false) // turn 1 is queued, waiting for its slot
+      await vi.advanceTimersByTimeAsync(999)
+      expect(idleResolved).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      await idle
+      expect(settled).toEqual([0, 1])
+      expect(idleResolved).toBe(true)
+    })
+  })
+
+  it('still enforces the concurrency cap while pacing starts, and dedupes', async () => {
+    await withFakeTimers(async () => {
+      let active = 0
+      let maxActive = 0
+      const queue = new ExtractionQueue(async () => {
+        active++
+        maxActive = Math.max(maxActive, active)
+        await new Promise(r => setTimeout(r, 200))
+        active--
+      }, { concurrency: 2, jobIntervalMs: 100 })
+      for (const turn of [0, 1, 2, 3, 4, 5, 0]) queue.enqueue(makeJob({ turn })) // turn 0 repeats
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(2_000)
+      await idle
+      expect(maxActive).toBe(2) // never more than the cap, pacing or not
+      expect(vi.getTimerCount()).toBe(0) // nothing left on the event loop
+    })
+  })
+
+  it('close() cancels the pending start timer, drains unthrottled, and refuses new jobs', async () => {
+    await withFakeTimers(async () => {
+      const done: number[] = []
+      const queue = new ExtractionQueue(async job => { done.push(job.turn) }, { jobIntervalMs: 10_000 })
+      queue.enqueue(makeJob({ turn: 0 }))
+      queue.enqueue(makeJob({ turn: 1 }))
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(done).toEqual([0])
+      expect(vi.getTimerCount()).toBe(1) // turn 1 waits out the 10s interval
+      queue.close()
+      expect(vi.getTimerCount()).toBe(0) // dispose must not leave a dangling timer
+      await idle // and must still drain what was queued
+      expect(done).toEqual([0, 1])
+      expect(queue.enqueue(makeJob({ turn: 2 }))).toBe(false)
+    })
+  })
+
+  it('close() interrupts a minutes-long backoff instead of waiting it out', async () => {
+    await withFakeTimers(async () => {
+      let attempts = 0
+      const onSkip = vi.fn()
+      const queue = new ExtractionQueue(async () => {
+        attempts++
+        throw new Error('boom')
+      }, { maxRetries: 4, retryDelayMs: [600_000], random: () => 0.5, jobIntervalMs: 0, onSkip })
+      queue.enqueue(makeJob())
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(attempts).toBe(1) // the retry is 600s away
+      queue.close()
+      await idle // resolves now, not ten minutes later
+      expect(attempts).toBe(1)
+      // The round is not booked failed: the durable log still has the job, so
+      // the next start retries it with its previous failure count.
+      expect(queue.skipped).toBe(0)
+      expect(onSkip).not.toHaveBeenCalled()
+      expect(vi.getTimerCount()).toBe(0)
+    })
+  })
+
+  it('jitters retry delays by ±20%, so lockstep failures desynchronize', async () => {
+    expect(jitterRetryDelay(1_000, () => 0.5)).toBe(1_000)
+    expect(jitterRetryDelay(1_000, () => 0)).toBe(800)
+    expect(jitterRetryDelay(1_000, () => 1)).toBe(1_200)
+    await withFakeTimers(async () => {
+      const starts: number[] = []
+      const queue = new ExtractionQueue(async () => {
+        starts.push(Date.now())
+        throw new Error('boom')
+      }, { maxRetries: 1, retryDelayMs: [1_000], random: () => 0 })
+      queue.enqueue(makeJob())
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(799)
+      expect(starts).toHaveLength(1) // the low end of the band is 800ms
+      await vi.advanceTimersByTimeAsync(1)
+      expect(starts).toHaveLength(2)
+      await idle
+    })
+  })
+
+  it('applies the new defaults: 4 retries with 15s/60s/180s/600s backoff', async () => {
+    await withFakeTimers(async () => {
+      const starts: number[] = []
+      const queue = new ExtractionQueue(async () => {
+        starts.push(Date.now())
+        throw new Error('boom')
+      }, { random: () => 0.5 }) // pin jitter to the nominal delay
+      queue.enqueue(makeJob())
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(starts).toHaveLength(1)
+      // 4 retries => 5 attempts, at exactly the shipped default delays.
+      for (const [index, delay] of [15_000, 60_000, 180_000, 600_000].entries()) {
+        await vi.advanceTimersByTimeAsync(delay - 1)
+        expect(starts).toHaveLength(index + 1)
+        await vi.advanceTimersByTimeAsync(1)
+        expect(starts).toHaveLength(index + 2)
+      }
+      await idle
+      expect(queue.skipped).toBe(1) // the round is booked failed after 5 attempts
+    })
+  })
+
+  it('applies the default 3000ms start interval', async () => {
+    await withFakeTimers(async () => {
+      const starts: number[] = []
+      const queue = new ExtractionQueue(async () => { starts.push(Date.now()) })
+      queue.enqueue(makeJob({ turn: 0 }))
+      queue.enqueue(makeJob({ turn: 1 }))
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(starts).toEqual([0])
+      await vi.advanceTimersByTimeAsync(2_999)
+      expect(starts).toEqual([0])
+      await vi.advanceTimersByTimeAsync(1)
+      expect(starts).toEqual([0, 3_000])
+      await idle
+    })
+  })
+})
+
+describe('ExtractionQueue: retry backoff outside the worker slot', () => {
+  // Fake timers keep the seconds-to-minutes backoffs exact without dragging the
+  // suite; `random` pins the jitter so every delay under test is a literal.
+  const withFakeTimers = async (body: () => Promise<void>): Promise<void> => {
+    vi.useFakeTimers({ now: 0 })
+    try {
+      await body()
+    } finally {
+      vi.useRealTimers()
+    }
+  }
+  /** Jitter source that yields the nominal delay (0.5 → 1 + 0.2·(2·0.5−1)). */
+  const pinJitter = (): number => 0.5
+
+  it('concurrency=1: a job waiting out a long backoff does not hold the slot', async () => {
+    await withFakeTimers(async () => {
+      const starts: { turn: number; at: number }[] = []
+      const queue = new ExtractionQueue(async job => {
+        starts.push({ turn: job.turn, at: Date.now() })
+        if (job.turn === 0) throw new Error('boom')
+      }, {
+        concurrency: 1, maxRetries: 1, retryDelayMs: [600_000],
+        random: pinJitter, jobIntervalMs: 0,
+      })
+      queue.enqueue(makeJob({ turn: 0 }))
+      await vi.advanceTimersByTimeAsync(0)
+      // Turn 0's first attempt failed and is parked 600s out; its slot is free.
+      expect(starts).toEqual([{ turn: 0, at: 0 }])
+      expect(vi.getTimerCount()).toBe(1)
+      queue.enqueue(makeJob({ turn: 1 }))
+      await vi.advanceTimersByTimeAsync(0)
+      // The old in-slot sleep would have made turn 1 wait until t=600s.
+      expect(starts).toEqual([{ turn: 0, at: 0 }, { turn: 1, at: 0 }])
+      await vi.advanceTimersByTimeAsync(600_000)
+      expect(starts).toEqual([
+        { turn: 0, at: 0 }, { turn: 1, at: 0 }, { turn: 0, at: 600_000 },
+      ])
+      await queue.whenIdle()
+      expect(queue.skipped).toBe(1) // 1 + maxRetries attempts, then booked failed
+      expect(vi.getTimerCount()).toBe(0)
+    })
+  })
+
+  it('re-queues a delayed retry at the tail, so a failing job cannot starve the queue', async () => {
+    await withFakeTimers(async () => {
+      const order: string[] = []
+      const queue = new ExtractionQueue(async job => {
+        order.push(`${job.sessionId}:${job.turn}`)
+        if (job.turn === 0) throw new Error('boom')
+      }, { concurrency: 1, maxRetries: 1, retryDelayMs: [1_000], random: pinJitter, jobIntervalMs: 0 })
+      queue.enqueue(makeJob({ turn: 0 }))
+      await vi.advanceTimersByTimeAsync(0) // attempt 1 fails, parked to t=1000
+      queue.enqueue(makeJob({ turn: 1 }))
+      queue.enqueue(makeJob({ turn: 2 }))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(order).toEqual(['session-1:0', 'session-1:1', 'session-1:2'])
+      await vi.advanceTimersByTimeAsync(1_000)
+      // The retry lands behind the two jobs queued after it, not ahead of them.
+      expect(order).toEqual(['session-1:0', 'session-1:1', 'session-1:2', 'session-1:0'])
+      await queue.whenIdle()
+    })
+  })
+
+  it('whenIdle waits for a parked retry instead of resolving in the gap', async () => {
+    await withFakeTimers(async () => {
+      let attempts = 0
+      const queue = new ExtractionQueue(async () => {
+        attempts++
+        if (attempts === 1) throw new Error('boom')
+      }, { maxRetries: 1, retryDelayMs: [60_000], random: pinJitter, jobIntervalMs: 0 })
+      queue.enqueue(makeJob())
+      let idleResolved = false
+      const idle = queue.whenIdle().then(() => { idleResolved = true })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(attempts).toBe(1)
+      expect(vi.getTimerCount()).toBe(1) // parked, so the queue is not idle
+      await vi.advanceTimersByTimeAsync(59_999)
+      expect(idleResolved).toBe(false) // no premature resolve during the backoff
+      await vi.advanceTimersByTimeAsync(1)
+      await idle
+      expect(attempts).toBe(2)
+      expect(idleResolved).toBe(true)
+      expect(queue.skipped).toBe(0)
+    })
+  })
+
+  it('close() clears the parked retry timer without booking the round', async () => {
+    await withFakeTimers(async () => {
+      let attempts = 0
+      const onSkip = vi.fn()
+      const queue = new ExtractionQueue(async () => {
+        attempts++
+        throw new Error('boom')
+      }, { maxRetries: 4, retryDelayMs: [600_000], random: pinJitter, jobIntervalMs: 0, onSkip })
+      queue.enqueue(makeJob())
+      let idleResolved = false
+      const idle = queue.whenIdle().then(() => { idleResolved = true })
+      await vi.advanceTimersByTimeAsync(0)
+      expect(attempts).toBe(1)
+      expect(vi.getTimerCount()).toBe(1)
+      queue.close()
+      // dispose must not leave the 600s retry (or anything else) on the loop…
+      expect(vi.getTimerCount()).toBe(0)
+      await idle
+      expect(idleResolved).toBe(true)
+      // …and the interrupted round books nothing: the durable log still lists
+      // the job as pending, so the next start retries it with its old failures.
+      expect(attempts).toBe(1)
+      expect(queue.skipped).toBe(0)
+      expect(onSkip).not.toHaveBeenCalled()
+    })
+  })
+
+  it('keeps a parked job deduped while it waits out its retry', async () => {
+    await withFakeTimers(async () => {
+      let attempts = 0
+      const queue = new ExtractionQueue(async () => {
+        attempts++
+        if (attempts === 1) throw new Error('boom')
+      }, { maxRetries: 1, retryDelayMs: [30_000], random: pinJitter, jobIntervalMs: 0 })
+      expect(queue.enqueue(makeJob({ turn: 7 }))).toBe(true)
+      await vi.advanceTimersByTimeAsync(0)
+      expect(attempts).toBe(1)
+      // Waiting for a retry is still in flight: the same key is refused…
+      expect(queue.enqueue(makeJob({ turn: 7 }))).toBe(false)
+      // …while another turn and another session are unaffected.
+      expect(queue.enqueue(makeJob({ sessionId: 'session-2', turn: 7 }))).toBe(true)
+      await vi.advanceTimersByTimeAsync(30_000)
+      await queue.whenIdle()
+      expect(attempts).toBe(3)
+      // Once it settles the key is free again.
+      expect(queue.enqueue(makeJob({ turn: 7 }))).toBe(true)
+      await queue.whenIdle()
+      expect(attempts).toBe(4)
+    })
+  })
+
+  it('books every attempt and callback across parked retries', async () => {
+    await withFakeTimers(async () => {
+      const starts: number[] = []
+      const failedAttempts: number[] = []
+      const skipped: ExtractionJob[] = []
+      const queue = new ExtractionQueue(async () => {
+        starts.push(Date.now())
+        throw new Error('boom')
+      }, {
+        maxRetries: 2, retryDelayMs: [1_000, 2_000], random: pinJitter, jobIntervalMs: 0,
+        onAttemptFailed: (_job, attempt) => failedAttempts.push(attempt),
+        onSkip: job => skipped.push(job),
+      })
+      queue.enqueue(makeJob())
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      await vi.advanceTimersByTimeAsync(1_000)
+      await vi.advanceTimersByTimeAsync(2_000)
+      await idle
+      // Still 1 + maxRetries attempts, each spaced by its own jittered delay.
+      expect(starts).toEqual([0, 1_000, 3_000])
+      expect(failedAttempts).toEqual([1, 2, 3])
+      expect(skipped.map(j => j.turn)).toEqual([0])
+      expect(queue.skipped).toBe(1)
+    })
+  })
+
+  it('concurrency=3: three in flight, yet starts still paced by jobIntervalMs', async () => {
+    await withFakeTimers(async () => {
+      const starts: number[] = []
+      let active = 0
+      let maxActive = 0
+      const queue = new ExtractionQueue(async () => {
+        starts.push(Date.now())
+        active++
+        maxActive = Math.max(maxActive, active)
+        await new Promise(r => setTimeout(r, 10_000))
+        active--
+      }, { concurrency: 3, jobIntervalMs: 3_000 })
+      for (const turn of [0, 1, 2]) queue.enqueue(makeJob({ turn }))
+      const idle = queue.whenIdle()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(starts).toEqual([0])
+      await vi.advanceTimersByTimeAsync(3_000)
+      expect(starts).toEqual([0, 3_000])
+      await vi.advanceTimersByTimeAsync(3_000)
+      expect(starts).toEqual([0, 3_000, 6_000])
+      // All three overlap now, but there was no burst: starts stayed 3s apart.
+      expect(maxActive).toBe(3)
+      await vi.advanceTimersByTimeAsync(10_000)
+      await idle
+      expect(vi.getTimerCount()).toBe(0)
+    })
+  })
+
+  it('defaults to a 3-worker pool, so one parked retry cannot idle the queue', async () => {
+    let active = 0
+    let maxActive = 0
+    const started: number[] = []
+    const releases: (() => void)[] = []
+    // concurrency omitted on purpose: the default is the subject here.
+    const queue = new ExtractionQueue(async job => {
+      started.push(job.turn)
+      active++
+      maxActive = Math.max(maxActive, active)
+      await new Promise<void>(resolve => releases.push(resolve))
+      active--
+    }, { jobIntervalMs: 0 })
+    for (const turn of [0, 1, 2, 3]) queue.enqueue(makeJob({ turn }))
+    expect(started).toEqual([0, 1, 2]) // three slots, the fourth job waits
+    expect(maxActive).toBe(3)
+    for (const release of releases.splice(0)) release()
+    await new Promise(r => setTimeout(r, 0)) // let the freed slot pick up turn 3
+    expect(started).toEqual([0, 1, 2, 3])
+    for (const release of releases.splice(0)) release()
+    await queue.whenIdle()
+    expect(maxActive).toBe(3)
+  })
+})
+
+describe('exhausted retries stay retryable (no silent turn loss)', () => {
+  let dir: string
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'memoplus4dsh-failed-'))
+  })
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+  const path = (): string => join(dir, 'extraction-pending.jsonl')
+
+  it('keeps a failed round outstanding instead of tombstoning the turn', () => {
+    const log = new PendingJobLog(path())
+    log.recordEnqueue(makeJob({ turn: 4 }))
+    log.recordFailed(makeJob({ turn: 4 }), new Error('extraction produced empty content'), 1)
+    const revived = new PendingJobLog(path())
+    // Still outstanding: the backlog reports it, and a restart retries it.
+    expect(revived.countUnsettled()).toBe(1)
+    expect(revived.failuresOf('session-1', 4)).toBe(1)
+    const [entry] = revived.outstanding()
+    expect(entry?.lastError).toBe('extraction produced empty content')
+    expect(entry?.lastAt).toBeDefined()
+    // Read the history before loadPending(), which truncates for the fresh start.
+    expect(revived.loadPending().map(j => j.turn)).toEqual([4])
+  })
+
+  it('clears the failure when the retry succeeds', () => {
+    const log = new PendingJobLog(path())
+    log.recordEnqueue(makeJob({ turn: 5 }))
+    log.recordFailed(makeJob({ turn: 5 }), new Error('boom'), 1)
+    log.recordSettled('session-1', 5)
+    const revived = new PendingJobLog(path())
+    expect(revived.countUnsettled()).toBe(0)
+    expect(revived.outstanding()).toEqual([])
+    expect(revived.loadPending()).toEqual([])
+  })
+
+  it('carries the failure count across a requeue, so the cap is real', () => {
+    const log = new PendingJobLog(path())
+    log.recordEnqueue(makeJob({ turn: 6 }), { failures: 2 })
+    expect(new PendingJobLog(path()).failuresOf('session-1', 6)).toBe(2)
+    // A plain enqueue (fresh turn) starts a new count.
+    log.recordEnqueue(makeJob({ turn: 7 }))
+    expect(new PendingJobLog(path()).failuresOf('session-1', 7)).toBe(0)
+  })
+
+  it('records an abandoned turn as terminal and countable', () => {
+    const log = new PendingJobLog(path())
+    log.recordEnqueue(makeJob({ turn: 8 }))
+    log.recordFailed(makeJob({ turn: 8 }), new Error('boom'), 1)
+    log.recordAbandoned('session-1', 8, 'boom', 3)
+    const revived = new PendingJobLog(path())
+    expect(revived.countUnsettled()).toBe(0)
+    expect(revived.abandonedCount()).toBe(1)
+    expect(revived.loadPending()).toEqual([])
+  })
+
+  it('counts only terminal records as abandoned', () => {
+    const log = new PendingJobLog(path())
+    log.recordEnqueue(makeJob({ turn: 9 }))
+    log.recordFailed(makeJob({ turn: 9 }), new Error('boom'), 1)
+    expect(new PendingJobLog(path()).abandonedCount()).toBe(0)
+  })
+
+  it('carries the failure reason across a requeue that truncates the log', () => {
+    const log = new PendingJobLog(path())
+    log.recordEnqueue(makeJob({ turn: 10 }))
+    log.recordFailed(makeJob({ turn: 10 }), new Error('extraction produced empty content'), 1)
+    const [before] = new PendingJobLog(path()).outstanding()
+    // Requeue exactly as start-up does: read the history, truncate, re-record.
+    new PendingJobLog(path()).loadPending()
+    log.recordEnqueue(makeJob({ turn: 10 }), { failures: before?.failures, lastError: before?.lastError, lastAt: before?.lastAt })
+    const [after] = new PendingJobLog(path()).outstanding()
+    expect(after?.failures).toBe(1)
+    expect(after?.lastError).toBe('extraction produced empty content')
+    expect(after?.lastAt).toBeDefined()
   })
 })

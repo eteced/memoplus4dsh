@@ -61,6 +61,10 @@ const harness = new DeepSeekHarness({
   dshBin: DSH_BIN,
   dshHome: DSH_HOME,
   profile: 'sdk',
+  // sdk-client 的会话模型默认值（?? 'deepseek-v4-flash'）优先级高于
+  // agent-default-model 插件——模型必须在创建 harness 时显式给，
+  // 否则 profile patch 怎么改都轮不到它（2026-09-17 v02 排查结论）。
+  model: process.env.BENCH_MODEL ?? 'deepseek-v4-flash',
   processCwd: WORKSPACE,
   cwd: WORKSPACE,
   env: {

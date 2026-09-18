@@ -157,6 +157,12 @@ export interface QueryExpanderOptions {
   callLlm: (prompt: string) => Promise<string>
   /** Disk cache path; expansion results are keyed by normalized query text. */
   cachePath: string
+  /**
+   * Expansion template, or a resolver called once per query (query-side
+   * prompts follow the session's current route). Defaults to
+   * {@link QUERY_EXPANSION_PROMPT}; an override must keep `{query}`.
+   */
+  prompt?: string | (() => string)
 }
 
 /**
@@ -166,6 +172,8 @@ export interface QueryExpanderOptions {
  */
 export function createQueryExpander(options: QueryExpanderOptions): (query: string) => Promise<string[]> {
   const cache = makeDiskCache<string[]>(options.cachePath)
+  const templateSource = options.prompt
+  const templateFor = typeof templateSource === 'function' ? templateSource : () => templateSource ?? QUERY_EXPANSION_PROMPT
   return async query => {
     const key = cacheKeyOf(query)
     const hit = cache.get(key)
@@ -173,7 +181,7 @@ export function createQueryExpander(options: QueryExpanderOptions): (query: stri
     const words = new Set<string>()
     try {
       // Replacement-function form: user text may contain $-patterns.
-      const content = await options.callLlm(QUERY_EXPANSION_PROMPT.replace('{query}', () => query))
+      const content = await options.callLlm(templateFor().replace('{query}', () => query))
       for (const line of content.split('\n')) {
         const cleaned = line.trim().replace(/^[-•]\s*/, '').trim()
         if (cleaned.length > 0) for (const w of wordsOf(cleaned)) words.add(w)
@@ -190,6 +198,11 @@ export function createQueryExpander(options: QueryExpanderOptions): (query: stri
 export interface QueryDistillerOptions {
   callLlm: (prompt: string) => Promise<string>
   cachePath: string
+  /**
+   * Distillation template, or a resolver called once per query. Defaults to
+   * {@link QUERY_DISTILL_PROMPT}; an override must keep `{query}`.
+   */
+  prompt?: string | (() => string)
 }
 
 /**
@@ -200,13 +213,15 @@ export interface QueryDistillerOptions {
  */
 export function createQueryDistiller(options: QueryDistillerOptions): (query: string) => Promise<string | undefined> {
   const cache = makeDiskCache<string>(options.cachePath)
+  const templateSource = options.prompt
+  const templateFor = typeof templateSource === 'function' ? templateSource : () => templateSource ?? QUERY_DISTILL_PROMPT
   return async query => {
     const key = cacheKeyOf(query)
     const hit = cache.get(key)
     if (hit !== undefined) return hit
     let distilled: string
     try {
-      distilled = (await options.callLlm(QUERY_DISTILL_PROMPT.replace('{query}', () => query))).trim()
+      distilled = (await options.callLlm(templateFor().replace('{query}', () => query))).trim()
     } catch {
       return undefined
     }

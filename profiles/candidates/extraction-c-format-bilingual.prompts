@@ -1,0 +1,69 @@
+# memoplus4dsh prompt profile — one file is one profile; the file name is its name.
+# Stage bodies are verbatim: nothing is escaped. Only a line that opens with
+# "@@" is reserved, so a prompt cannot contain one.
+
+@@ stage extraction
+You extract facts from conversation for a memory graph. Read ONLY the turn below and extract ALL explicitly stated facts.
+
+Output one row per fact, pipe-separated, in EXACTLY this column order:
+ENTITY_TYPE|CANONICAL_NAME|ALIASES|PREDICATE|OBJECT|TIME_EXPR|NORMALIZED_FACT|DETAILS|KIND
+
+Column rules:
+- ENTITY_TYPE: one of PERSON, OBJECT, CONCEPT.
+- CANONICAL_NAME: who/what the fact is about (a person, place, thing...). Use names from "Known names" if present.
+- ALIASES: comma-separated nicknames, or _.
+- PREDICATE: short relation/verb.
+- OBJECT: target entity/thing, or _.
+- TIME_EXPR: copied VERBATIM from the text (e.g. "last year", "last Saturday"); never compute dates yourself.
+- NORMALIZED_FACT: one self-contained sentence with the key fact.
+- DETAILS: extra context phrases that don't fit the main fact, or _.
+- KIND: "speech" when the row only records that someone asked/said/answered/commented (a conversational act), otherwise "fact".
+
+Example:
+PERSON|Alice|_|is_from|hometown|_|Alice is from her hometown.|_|fact
+PERSON|Bob|Bobby|painted|landscape|last year|Bob painted a landscape last year.|_|fact
+PERSON|Alice|_|asked|weekend plans|_|Alice asked about the weekend plans.|_|speech
+
+Known names so far, with their established types in parentheses (reuse both name and type; add nicknames as aliases):
+{known_entities}
+
+Candidate mentions spotted by a fast detector (may include noise — verify each against the text, adopt or drop it; you may also add entities it missed):
+{candidate_mentions}
+
+Rules:
+- Use _ for empty fields. No headers, no example rows in output.
+- Speakers are PERSON. When a speaker states/asks/comments on a topic, CANONICAL_NAME is the speaker and the predicate reflects the speech act (said, asked, praised).
+- One row per list item ("likes A, B, C" -> 3 rows).
+- Put created/shown objects (including photo references like "that cup") in OBJECT.
+- Resolve pronouns (we, they, the kids) to the concrete people using the speaker labels. If "we" includes the speaker and another participant, name all of them in NORMALIZED_FACT.
+- Replace back-references to earlier-mentioned activities or things (it, that, this, "we did it", "did so") with the concrete activity/entity name, so every fact is understandable without the surrounding conversation.
+- For "as a X" roles/status, also output a separate is|X row.
+- For static attributes (identity, relationship status, home country), use PREDICATE=is and the value in OBJECT.
+- Extract EVERY fact explicitly stated. Do not skip details.
+- Explicitly named works and titles (books, films, cartoons, songs, paintings, shows) are always facts worth a row, even when mentioned mid-list as examples ("the cartoon X mocked Y" -> row about X).
+- Do NOT extract instructions, rules, or meta statements about the task or conversation itself (e.g. "answer only from the knowledge pool", "each fact has a serial number") — only facts about people, things, and events.
+- ONLY output facts from this turn.
+- Write NORMALIZED_FACT and DETAILS in the same language as the conversation turn.
+
+Output format is a strict machine format — a parser reads it line by line:
+- Every row has EXACTLY 9 fields separated by 8 pipes: ENTITY_TYPE|CANONICAL_NAME|ALIASES|PREDICATE|OBJECT|TIME_EXPR|NORMALIZED_FACT|DETAILS|KIND. Never 8, never 10.
+- Never put a pipe inside a field, not even inside NORMALIZED_FACT or DETAILS. Reword the sentence instead (write "and", "or", a comma, or a semicolon).
+- ENTITY_TYPE is exactly one of PERSON, OBJECT, CONCEPT in capitals. KIND is exactly fact or speech, lowercase.
+- ENTITY_TYPE, CANONICAL_NAME, PREDICATE, and NORMALIZED_FACT are never empty. ALIASES, OBJECT, TIME_EXPR, and DETAILS use _ when empty; the other four must carry real text.
+- Output rows and nothing else: no header line, no column names, no numbering, no bullets, no code fence, no blank lines inside a row, no commentary before, between, or after the rows. The first character of your answer starts the first row.
+- One row per fact. Do not emit two rows that state the same fact in different words, and do not repeat a row to emphasize it.
+- A row's ALIASES never repeats its own CANONICAL_NAME.
+- If a NORMALIZED_FACT needs a literal pipe character, replace it with "and" or "or"; the meaning matters more than the character.
+
+Names and language in mixed Chinese/English turns:
+- Keep CANONICAL_NAME in the language and script it appears in the turn. Do not translate it, do not romanize it, do not append a translation or a gloss in parentheses.
+- Keep identifiers exactly as written, including case and punctuation: promptProfilesDir, extractionMaxTokens, memoplus4dsh, opencode-go-extra, v0.2-modularization, deepseek-v4.1-flash. Do not convert camelCase to spaces, do not drop hyphens or dots, do not change the case.
+- When the turn mixes Chinese prose with English names, the prose stays Chinese and the names stay English in the same row.
+- Keep a version suffix attached to the name it belongs to; never move a version number from a name into another field.
+
+Conversation turn:
+{turn_text}
+
+Rows:
+
+@@ end

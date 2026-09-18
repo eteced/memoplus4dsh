@@ -138,3 +138,59 @@ FULL_TAG=<tag> ./run-lme.sh      # LongMemEval(S*) n=300
 # LME 官方 judge：
 DEEPSEEK_API_KEY=... ./venv/bin/python judge_lme.py --hyp_file results/Accurate_Retrieval/*<tag>*_results.json
 ```
+
+---
+
+## 8. v02 轮：v0.2 分支验证（2026-09-17 ~ 09-18）
+
+> v0.2 由 DeepSeek V4.1 Flash 在 dsh + memoplus4dsh v0.1 环境下协作开发
+> （插件给开发者当记忆用，再回头验证它自己的迭代——一次 dogfooding）。
+> 本论用途：合并 v0.2-modularization 分支前的全量回归。
+
+### 设置
+
+| 项 | 值 |
+|---|---|
+| 插件代码 | v0.2-modularization 分支（main + 32 commits） |
+| 骨架模型 | deepseek-v4.1-flash @ opencode Go（经 zen-session-proxy 注入会话头） |
+| 与 r2 的差异 | 插件 v0.1→v0.2；模型 v4-flash→v4.1-flash；官方 API→Go 网关 |
+
+### 成绩（CR，EM，n=100/config）
+
+| config | r1 | r2 | v02 | v02−r2 |
+|---|---|---|---|---|
+| sh_6k | 63.0 | 89.0 | 64.0 | -25 |
+| sh_32k | 52.0 | 78.0 | 78.0 | ±0 |
+| sh_64k | 59.0 | 90.0 | 94.0 | +4 |
+| sh_262k | 57.0 | 83.0 | 88.0 | +5 |
+| mh_6k | 28.0 | 31.0 | 36.0 | +5 |
+| mh_32k | 38.0 | 66.0 | 48.0 | -18 |
+| mh_64k | 35.0 | 55.0 | 52.0 | -3 |
+| mh_262k | 20.0 | 54.0 | 52.0 | -2 |
+| **均值** | 44.0 | 68.25 | **64.0** | -4.25 |
+
+### LME(S*) 与 judge 交叉验证（n=300）
+
+| 轮次 | rule EM | rule F1 | judge 自评 | judge MiniMax M3（独立） |
+|---|---|---|---|---|
+| r2 | 24.0 | 44.1 | 68.33 | **67.33** |
+| v02 | 27.3 | 46.9 | 68.0 | **64.33** |
+
+同族自评与异族独立判分的差距：r2 仅 1.0 分（无虚高）；v02 为 3.67 分
+（v4.1 自评略宽，主要在 preference 题型）。**独立 judge 口径：v02 64.33
+vs r2 67.33，LME 微降 3 分**。
+
+### 归因与结论
+
+- **v0.2 插件本体无退步**：抽取零写入丢失，注入召回率与 r2 持平或更好；
+  记忆系统指标全部健康。
+- **分数波动主因是模型换代行为差异**：v4.1-flash 在短上下文冲突事实题上
+  更倾向按参数先验硬答（sh_6k 36 个失败题中 31 个是"已注入但按真实世界
+  知识答错"，如"日本官方语言→Japanese"而非记忆里的 Swedish）；
+  64k/262k 长上下文区间 v4.1 全部持平或反超。
+- **过程事故与处置**（数据完整性）：zen-session-proxy 上游断流曾崩死进程，
+  81 题被记空——污染结果已删除重跑，代理已加固（异常不再崩进程）；
+  mh_32k 的 900s driver 超时伪影（10 题记空，其中部分题模型随后实际答对）
+  通过 BENCH_ASK_TIMEOUT=1800 消除后重跑。
+- 全部 13 个 context 归档审计 PASS；三轮 judge/结果文件/会话归档均在
+  `benchmark/results/` 可复查。

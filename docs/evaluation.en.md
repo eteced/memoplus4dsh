@@ -153,3 +153,65 @@ FULL_TAG=<tag> ./run-lme.sh      # LongMemEval(S*) n=300
 # official LME judge:
 DEEPSEEK_API_KEY=... ./venv/bin/python judge_lme.py --hyp_file results/Accurate_Retrieval/*<tag>*_results.json
 ```
+
+---
+
+## 8. Round v02: v0.2 branch validation (2026-09-17 ~ 09-18)
+
+> v0.2 was co-developed by DeepSeek V4.1 Flash running on dsh with
+> memoplus4dsh v0.1 installed — the plugin served as its own developer's
+> memory, then got re-validated on the result of that iteration. A dogfooding
+> loop. This round's purpose: full regression before merging
+> v0.2-modularization.
+
+### Setup
+
+| Item | Value |
+|---|---|
+| Plugin code | v0.2-modularization branch (main + 32 commits) |
+| Skeleton model | deepseek-v4.1-flash @ opencode Go (session header injected via zen-session-proxy) |
+| Delta vs r2 | plugin v0.1→v0.2; model v4-flash→v4.1-flash; official API→Go gateway |
+
+### Scores (CR, EM, n=100/config)
+
+| config | r1 | r2 | v02 | v02−r2 |
+|---|---|---|---|---|
+| sh_6k | 63.0 | 89.0 | 64.0 | -25 |
+| sh_32k | 52.0 | 78.0 | 78.0 | ±0 |
+| sh_64k | 59.0 | 90.0 | 94.0 | +4 |
+| sh_262k | 57.0 | 83.0 | 88.0 | +5 |
+| mh_6k | 28.0 | 31.0 | 36.0 | +5 |
+| mh_32k | 38.0 | 66.0 | 48.0 | -18 |
+| mh_64k | 35.0 | 55.0 | 52.0 | -3 |
+| mh_262k | 20.0 | 54.0 | 52.0 | -2 |
+| **avg** | 44.0 | 68.25 | **64.0** | -4.25 |
+
+### LME(S*) with judge cross-validation (n=300)
+
+| Round | rule EM | rule F1 | judge (self) | judge MiniMax M3 (independent) |
+|---|---|---|---|---|
+| r2 | 24.0 | 44.1 | 68.33 | **67.33** |
+| v02 | 27.3 | 46.9 | 68.0 | **64.33** |
+
+Self-vs-independent judge gap: 1.0 point for r2 (no inflation); 3.67 for v02
+(v4.1 self-judges slightly leniently, mostly on the preference type).
+**Independent-judge reading: v02 64.33 vs r2 67.33 — LME is 3 points down.**
+
+### Attribution & conclusions
+
+- **No plugin-side regression in v0.2**: zero write-chain losses, injection
+  recall at or above r2 levels; every memory-system metric healthy.
+- **Score movement is dominated by the model swap**: on short-context
+  counterfactual questions, v4.1-flash is much more willing to answer from
+  parametric priors over injected memory (31 of 36 sh_6k failures were
+  "injected but answered with real-world knowledge" — e.g. "Japan's official
+  language → Japanese" instead of the memorized Swedish). At 64k/262k,
+  v4.1 matched or beat v4 everywhere.
+- **Incidents handled (data integrity)**: a zen-session-proxy crash (unhandled
+  socket error mid-stream) silently emptied 81 answers — the poisoned results
+  were deleted and rerun, and the proxy was hardened (errors no longer kill
+  the process). A 900s driver-timeout artifact on mh_32k (10 empty answers,
+  some of which the model later answered correctly) was eliminated by raising
+  the cap to 1800s (BENCH_ASK_TIMEOUT) and rerunning the config.
+- All 13 context archives audit-PASS; result files, judges, and session
+  archives remain inspectable under `benchmark/results/`.
