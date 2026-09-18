@@ -198,6 +198,28 @@ memoplus4dsh 的重要修改归档，按开发里程碑组织。各里程碑的�
   「丢弃改动」原本只重置 `drafts`，一段坏 JSON 会留在文本域里、`rawError` 非空导致
   保存被**永久阻塞**且用户无法自救；现在两者一起清。
 
+## v0.2.0 — 2026-09-18
+
+由 DeepSeek V4.1 Flash 在 dsh + memoplus4dsh v0.1 环境下协作开发
+（dogfooding：插件跨会话给开发者自己当记忆）。
+
+- 设置：web 设置卡片（两行常改 + 折叠高级区）、配置导入导出、命名空间注册日志。
+- prompt profile：一个文件一个 profile（@@ 块格式替换 JSON）、逐段 prompt
+  来源上报、外部 prompt 文件与导入导出工具；默认抽取 prompt 重做
+  （回喂已记录谓词 + 极性入 OBJECT 约定），按 v4.1-flash 实测调优。
+- supersede：relation-merge——共享内容词的旧事件并入同一次裁决。
+- 推理：按调用自适应 effort（路由能力解析：off → 最低声明档 → 省略），
+  非 off 档自动放大输出预算（thinking token headroom）。
+- 抽取队列：耐心节流重试（不再爆发式撞故障窗口）、并发 3、失败轮次保留
+  待重抽（不再静默丢记忆）；空内容失败自带 provider 侧现场证据。
+- doctor：积压口径与插件对齐（failed 轮次不算终态）。
+- 评测 harness：BENCH_MODEL 选模型、BENCH_ASK_TIMEOUT 调单题超时、
+  会话模型显式传给 harness（sdk-client 内置默认值曾静默盖过 profile 配置）、
+  会话代理加固（上游断流不再崩进程）。
+- 全量回归（v02 轮，opencode Go 的 v4.1-flash）：CR 均值 64.0（r1 44.0），
+  LME judge 自评 68.0 / 独立 MiniMax M3 64.33——详见
+  [docs/evaluation.md](docs/evaluation.md) §8。
+
 ## r2 全量重跑 — 2026-09-11
 
 - M11–M17 改进后的全量重跑（DeepSeek 官方 API）：FC-SH 89/78/90/83，

@@ -306,7 +306,7 @@ Co-authored with Kimi K3 Thinking (high) and DeepSeek V4.1 Flash.
 
 Disclaimer: this project merely used Kimi K3 as a development assistant. It is not affiliated with, endorsed by, or sponsored by Moonshot AI (月之暗面).
 
-Disclaimer: this project used DeepSeek V4.1 Flash for prompt tuning and code contributions (the prompt-tuning report is [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md)). It is not affiliated with, endorsed by, or sponsored by DeepSeek (深度求索).
+Disclaimer: this project used DeepSeek V4.1 Flash for prompt tuning and code contributions (the prompt-tuning report is [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md)). It is not affiliated with, endorsed by, or sponsored by DeepSeek (深度求索). The entire v0.2 iteration was developed by V4.1 Flash running on dsh with memoplus4dsh v0.1 installed — the plugin served as its own developer's memory (task progress and design decisions persisted across sessions), the most everyday dogfooding this system could get.
 
 ## License
 

@@ -305,7 +305,7 @@ npm test
 
 声明：本项目仅使用 Kimi K3 作为开发助手，与月之暗面（Moonshot AI）无任何隶属、背书或合作关系。
 
-声明：本项目使用 DeepSeek V4.1 Flash 完成 prompt 调优，并参与代码编写（prompt 调优的实测报告见 [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md)），与深度求索（DeepSeek）无任何隶属、背书或合作关系。
+声明：本项目使用 DeepSeek V4.1 Flash 完成 prompt 调优，并参与代码编写（prompt 调优的实测报告见 [docs/extraction-prompt-tuning.md](docs/extraction-prompt-tuning.md)），与深度求索（DeepSeek）无任何隶属、背书或合作关系。v0.2 的整个迭代是 V4.1 Flash 在 dsh + memoplus4dsh v0.1 环境下完成的——插件给自己的开发者当记忆（任务进度、设计决策跨会话留存），是这套系统最日常的一次 dogfooding。
 
 ## 许可证
 

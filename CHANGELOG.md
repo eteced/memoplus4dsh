@@ -271,6 +271,33 @@ MemoryAgentBench; see [docs/evaluation.md](docs/evaluation.en.md) for the full a
   `rawError` stayed non-empty, and saving was **blocked permanently** with no way for the
   user to recover; both now clear together.
 
+## v0.2.0 — 2026-09-18
+
+Co-developed by DeepSeek V4.1 Flash running on dsh + memoplus4dsh v0.1
+(dogfooding: the plugin was its own developer's memory across sessions).
+
+- Settings: web settings card (two-row common + collapsed advanced), config
+  import/export, namespace registration logging.
+- Prompt profiles: one file per profile (@@ block format replaces JSON),
+  per-section prompt provenance reporting, external prompt files with
+  import/export tooling; default extraction prompt reworked (recorded-predicate
+  feedback + polarity conventions), tuned against v4.1-flash.
+- Supersede: relation-merge — old events sharing content words join the same
+  adjudication.
+- Reasoning: adaptive per-call effort with route-capability resolution
+  (off → lowest declared → omit), thinking-token headroom on non-off efforts.
+- Extraction queue: patient throttled retries (no more bursts into failure
+  windows), concurrency 3, failed turns are kept and re-extracted instead of
+  being silently dropped; empty-content failures carry provider-side evidence.
+- doctor: backlog counting matches the plugin (failed turns are not terminal).
+- Benchmark harness: model selectable via BENCH_MODEL, ask timeout via
+  BENCH_ASK_TIMEOUT, session model passed explicitly to the harness
+  (sdk-client's built-in default silently overrode profile config),
+  hardened session proxy (upstream socket errors no longer kill it).
+- Full regression (v02 round, v4.1-flash on opencode Go): CR avg 64.0
+  (r1 44.0), LME judge 68.0 self / 64.33 independent MiniMax M3 — details in
+  [docs/evaluation.md](docs/evaluation.en.md) §8.
+
 ## r2 full rerun — 2026-09-11
 
 - Full MemoryAgentBench rerun on the DeepSeek official API after the M11–M17

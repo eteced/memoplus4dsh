@@ -1,6 +1,6 @@
 {
   "name": "memoplus4dsh",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Unified entity-time fused memory plugin for DeepSeek Harness (dsh). Replaces scattered per-day markdown notes with one coherent memory graph.",
   "type": "module",
   "main": "./lib/index.js",
